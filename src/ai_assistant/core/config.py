@@ -33,6 +33,14 @@ class Config:
     logging_level: str = "INFO"
     logging_file: str = "logs/ai-assistant.log"
 
+    # IM 适配器配置
+    adapters: list = None
+
+    def __post_init__(self):
+        """初始化后处理"""
+        if self.adapters is None:
+            self.adapters = [{"name": "feishu", "enabled": True, "priority": 1}]
+
     @classmethod
     def load(cls, config_path: str) -> "Config":
         """从YAML文件加载配置"""
@@ -78,5 +86,9 @@ class Config:
         if "logging" in data:
             config.logging_level = data["logging"].get("level", config.logging_level)
             config.logging_file = data["logging"].get("file", config.logging_file)
+
+        # 解析适配器
+        if "adapters" in data:
+            config.adapters = data["adapters"]
 
         return config
