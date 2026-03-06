@@ -13,10 +13,15 @@ context:
 # AI配置
 ai:
   primary:
-    provider: "openai"  # AI 提供商: "openai" (OpenAI 兼容接口) 或 "cherrystudio"
+    provider: "openai"  # AI 提供商: "openai" (OpenAI 兼容接口), "dify" (Dify 平台)
     base_url: "http://localhost:23333"
     api_key: ""
     model: "gpt-4-vision-preview"
+
+  # Dify 特定配置（当 provider 为 "dify" 时使用）
+  dify:
+    app_type: "chat"  # 应用类型: "chat" (对话型) 或 "completion" (完成型)
+    user: "default-user"  # 用户标识，用于区分不同用户
 
   timeout: 30
   multimodal: false

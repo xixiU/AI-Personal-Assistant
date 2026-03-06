@@ -18,12 +18,16 @@ class Config:
     context_session_timeout: int = 3600
 
     # AI配置
-    ai_primary_provider: str = "cherrystudio"
+    ai_primary_provider: str = "openai"
     ai_primary_base_url: str = "http://localhost:8000"
     ai_primary_api_key: str = ""
     ai_primary_model: str = "gpt-4-vision-preview"
     ai_timeout: int = 30
     ai_multimodal: bool = False
+
+    # Dify 特定配置
+    ai_dify_app_type: str = "chat"  # "chat" 或 "completion"
+    ai_dify_user: str = "default-user"
 
     # 回复执行
     reply_mode: str = "clipboard"
@@ -84,6 +88,12 @@ class Config:
 
             config.ai_timeout = data["ai"].get("timeout", config.ai_timeout)
             config.ai_multimodal = data["ai"].get("multimodal", config.ai_multimodal)
+
+            # 解析 Dify 特定配置
+            if "dify" in data["ai"]:
+                dify = data["ai"]["dify"]
+                config.ai_dify_app_type = dify.get("app_type", config.ai_dify_app_type)
+                config.ai_dify_user = dify.get("user", config.ai_dify_user)
 
         # 解析回复执行
         if "reply" in data:

@@ -17,7 +17,7 @@ from ai_assistant.core.context_manager import ContextManager
 from ai_assistant.core.reply_executor import ReplyExecutor
 from ai_assistant.core.models import Message, Content
 from ai_assistant.providers.openai_provider import OpenAIProvider
-from ai_assistant.providers.cherrystudio import CherryStudioProvider
+from ai_assistant.providers.dify_provider import DifyProvider
 from ai_assistant.adapters.feishu_ui import FeishuUIAdapter
 from ai_assistant.adapters.feishu_bot import FeishuBotAdapter
 from ai_assistant.adapters.wechat_adapter import WeChatAdapter
@@ -45,13 +45,15 @@ class AIAssistant:
             session_timeout=self.config.context_session_timeout
         )
 
-        # 初始化 AI Provider（默认使用 OpenAI 兼容接口）
+        # 初始化 AI Provider
         provider_type = self.config.ai_primary_provider
-        if provider_type == "cherrystudio":
-            self.ai_provider = CherryStudioProvider(
+        if provider_type == "dify":
+            # Dify 平台
+            self.ai_provider = DifyProvider(
                 base_url=self.config.ai_primary_base_url,
                 api_key=self.config.ai_primary_api_key,
-                model=self.config.ai_primary_model,
+                app_type=getattr(self.config, 'ai_dify_app_type', 'chat'),
+                user=getattr(self.config, 'ai_dify_user', 'default-user'),
                 timeout=self.config.ai_timeout
             )
         else:
