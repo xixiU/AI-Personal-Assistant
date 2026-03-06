@@ -99,9 +99,47 @@ class WeChat39Adapter:
         logger.info("微信 3.9 适配器初始化成功")
 
     def detect_active_window(self) -> bool:
-        """检测微信窗口"""
+        """检测微信窗口是否可见"""
         try:
-            # pywechat 会自动检测微信窗口
+            import win32gui
+            import win32con
+
+            # 查找微信窗口
+            def enum_windows_callback(hwnd, windows):
+                if win32gui.IsWindowVisible(hwnd):
+                    window_text = win32gui.GetWindowText(hwnd)
+                    if "微信" in window_text or "WeChat" in window_text:
+                        windows.append(hwnd)
+                return True
+
+            windows = []
+            win32gui.EnumWindows(enum_windows_callback, windows)
+
+            if not windows:
+                logger.debug("未找到微信窗口")
+                return False
+
+            # 检查窗口是否可见且未最小化
+            for hwnd in windows:
+                # 检查窗口是否可见
+                if not win32gui.IsWindowVisible(hwnd):
+                    continue
+
+                # 检查窗口是否最小化
+                placement = win32gui.GetWindowPlacement(hwnd)
+                if placement[1] == win32con.SW_SHOWMINIMIZED:
+                    logger.debug("微信窗口已最小化")
+                    continue
+
+                # 找到可见且未最小化的微信窗口
+                logger.debug("检测到可见的微信窗口")
+                return True
+
+            logger.debug("微信窗口不可见或已最小化")
+            return False
+
+        except ImportError:
+            logger.warning("win32gui 未安装，无法检测窗口状态，默认返回 True")
             return True
         except Exception as e:
             logger.debug(f"微信窗口检测失败: {e}")
@@ -265,10 +303,51 @@ class WeChat41Adapter:
         self.current_chat_name = None
 
     def detect_active_window(self) -> bool:
+        """检测微信窗口是否可见"""
         try:
+            import win32gui
+            import win32con
+
+            # 查找微信窗口
+            def enum_windows_callback(hwnd, windows):
+                if win32gui.IsWindowVisible(hwnd):
+                    window_text = win32gui.GetWindowText(hwnd)
+                    if "微信" in window_text or "WeChat" in window_text:
+                        windows.append(hwnd)
+                return True
+
+            windows = []
+            win32gui.EnumWindows(enum_windows_callback, windows)
+
+            if not windows:
+                logger.debug("未找到微信窗口")
+                return False
+
+            # 检查窗口是否可见且未最小化
+            for hwnd in windows:
+                # 检查窗口是否可见
+                if not win32gui.IsWindowVisible(hwnd):
+                    continue
+
+                # 检查窗口是否最小化
+                placement = win32gui.GetWindowPlacement(hwnd)
+                if placement[1] == win32con.SW_SHOWMINIMIZED:
+                    logger.debug("微信窗口已最小化")
+                    continue
+
+                # 找到可见且未最小化的微信窗口
+                logger.debug("检测到可见的微信窗口")
+                return True
+
+            logger.debug("微信窗口不可见或已最小化")
+            return False
+
+        except ImportError:
+            logger.warning("win32gui 未安装，无法检测窗口状态，默认返回 True")
             return True
         except Exception as e:
             logger.debug(f"微信窗口检测失败: {e}")
+            return False
             return False
 
     def extract_messages(self, count: int = 10) -> List[Message]:
