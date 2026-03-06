@@ -14,7 +14,7 @@ context:
 ai:
   primary:
     provider: "cherrystudio"
-    base_url: "http://localhost:8000"
+    base_url: "http://localhost:23333"
     api_key: ""
     model: "gpt-4-vision-preview"
 
@@ -31,6 +31,22 @@ adapters:
   - name: "feishu"
     enabled: true
     priority: 1
+    mode: "ui_automation"  # 模式: "bot_api" 或 "ui_automation"
+
+    # UI 自动化模式配置（无需审批，本地运行）
+    ui_automation:
+      window_titles: ["飞书", "Lark", "Feishu"]
+      poll_interval: 1.0  # 轮询间隔（秒）
+
+    # 机器人 API 模式配置（需要创建飞书应用）
+    bot_api:
+      app_id: ""           # 飞书应用 App ID
+      app_secret: ""       # 飞书应用 App Secret
+      verification_token: ""  # 事件订阅验证 Token
+      encrypt_key: ""      # 事件加密 Key（可选）
+      webhook_url: "http://your-server.com/webhook/feishu"  # Webhook 回调地址
+      allowed_chats: []    # 允许的群聊 ID 白名单（为空则允许所有）
+      allowed_users: []    # 允许的用户 ID 白名单（为空则允许所有）
 
 # 日志
 logging:

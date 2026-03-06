@@ -1,5 +1,5 @@
-from dataclasses import dataclass
-from typing import Optional
+from dataclasses import dataclass, field
+from typing import Optional, List, Dict, Any
 import yaml
 from pathlib import Path
 
@@ -34,12 +34,17 @@ class Config:
     logging_file: str = "logs/ai-assistant.log"
 
     # IM 适配器配置
-    adapters: list = None
+    adapters: List[Dict[str, Any]] = None
 
     def __post_init__(self):
         """初始化后处理"""
         if self.adapters is None:
-            self.adapters = [{"name": "feishu", "enabled": True, "priority": 1}]
+            self.adapters = [{
+                "name": "feishu",
+                "enabled": True,
+                "priority": 1,
+                "mode": "ui_automation"
+            }]
 
     @classmethod
     def load(cls, config_path: str) -> "Config":
