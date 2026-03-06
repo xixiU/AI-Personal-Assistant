@@ -16,6 +16,7 @@ from ai_assistant.core.config import Config
 from ai_assistant.core.context_manager import ContextManager
 from ai_assistant.core.reply_executor import ReplyExecutor
 from ai_assistant.core.models import Message, Content
+from ai_assistant.providers.openai_provider import OpenAIProvider
 from ai_assistant.providers.cherrystudio import CherryStudioProvider
 from ai_assistant.adapters.feishu_ui import FeishuUIAdapter
 from ai_assistant.adapters.feishu_bot import FeishuBotAdapter
@@ -44,12 +45,23 @@ class AIAssistant:
             session_timeout=self.config.context_session_timeout
         )
 
-        self.ai_provider = CherryStudioProvider(
-            base_url=self.config.ai_primary_base_url,
-            api_key=self.config.ai_primary_api_key,
-            model=self.config.ai_primary_model,
-            timeout=self.config.ai_timeout
-        )
+        # 初始化 AI Provider（默认使用 OpenAI 兼容接口）
+        provider_type = self.config.ai_primary_provider
+        if provider_type == "cherrystudio":
+            self.ai_provider = CherryStudioProvider(
+                base_url=self.config.ai_primary_base_url,
+                api_key=self.config.ai_primary_api_key,
+                model=self.config.ai_primary_model,
+                timeout=self.config.ai_timeout
+            )
+        else:
+            # 默认使用 OpenAI 兼容接口
+            self.ai_provider = OpenAIProvider(
+                base_url=self.config.ai_primary_base_url,
+                api_key=self.config.ai_primary_api_key,
+                model=self.config.ai_primary_model,
+                timeout=self.config.ai_timeout
+            )
 
         self.reply_executor = ReplyExecutor(
             mode=self.config.reply_mode,

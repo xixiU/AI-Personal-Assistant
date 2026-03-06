@@ -142,7 +142,7 @@ context:
 # AI 配置
 ai:
   primary:
-    provider: "cherrystudio"
+    provider: "openai"  # AI 提供商: "openai" (推荐) 或 "cherrystudio"
     base_url: "http://localhost:8000"
     api_key: ""
     model: "gpt-4-vision-preview"
@@ -183,7 +183,7 @@ context:
 # AI 配置
 ai:
   primary:
-    provider: "cherrystudio"
+    provider: "openai"  # AI 提供商: "openai" (推荐) 或 "cherrystudio"
     base_url: "http://localhost:8000"
     api_key: ""
     model: "gpt-4-vision-preview"
@@ -229,12 +229,36 @@ logging:
 
 **AI 配置：**
 
-- `provider`：AI 服务提供商（cherrystudio | openai）
+- `provider`：AI 服务提供商
+  - `openai`：OpenAI 兼容接口（推荐，支持所有兼容服务）
+  - `cherrystudio`：CherryStudio 专用（已废弃，建议使用 openai）
 - `base_url`：API 基础 URL
-- `api_key`：API 密钥（如需要）
+  - OpenAI 官方：`https://api.openai.com`
+  - CherryStudio：`http://localhost:23333`
+  - Ollama：`http://localhost:11434`
+  - LM Studio：`http://localhost:1234`
+  - 其他兼容服务：根据实际情况填写
+- `api_key`：API 密钥
+  - OpenAI 官方：必需，从 OpenAI 官网获取
+  - 本地服务（CherryStudio、Ollama、LM Studio）：留空即可
 - `model`：使用的模型名称
-- `timeout`：API 调用超时时间
-- `multimodal`：是否启用多模态（图片、视频）
+  - OpenAI：`gpt-4`, `gpt-3.5-turbo` 等
+  - CherryStudio：根据配置的模型填写
+  - Ollama：`llama2`, `mistral` 等
+  - LM Studio：根据加载的模型填写
+- `timeout`：API 调用超时时间（秒）
+- `multimodal`：是否启用多模态（图片、视频，计划中）
+
+**支持的 AI 服务：**
+
+| 服务 | Provider | Base URL | API Key |
+|------|----------|----------|---------|
+| OpenAI 官方 | openai | https://api.openai.com | 必需 |
+| CherryStudio | openai | http://localhost:23333 | 留空 |
+| Ollama | openai | http://localhost:11434 | 留空 |
+| LM Studio | openai | http://localhost:1234 | 留空 |
+| Azure OpenAI | openai | 自定义 | 必需 |
+| 其他兼容服务 | openai | 自定义 | 根据服务要求 |
 
 **回复模式：**
 
