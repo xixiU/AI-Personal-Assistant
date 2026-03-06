@@ -35,41 +35,85 @@
 - 🚧 微信适配器
 - 🚧 智能上下文判断
 
-## 系统要求
+## 快速开始
 
-- **操作系统**：Windows 10/11
-- **Python**：3.10 或更高版本
-- **AI 服务**：CherryStudio 本地服务或 OpenAI 兼容 API
+### 前提条件
 
-## 安装步骤
+1. **Python 3.10+** 已安装
+2. **CherryStudio** 或其他 OpenAI 兼容的 AI 服务正在运行
 
-### 1. 克隆项目
+### 安装步骤
+
+**1. 克隆项目**
 
 ```bash
 git clone <repository-url>
 cd AI-Personal-Assistant
 ```
 
-### 2. 安装依赖
+**2. 安装依赖**
 
 ```bash
 pip install -r requirements.txt
 ```
 
-### 3. 配置文件
-
-复制示例配置文件并根据需要修改：
+**3. 配置文件**
 
 ```bash
 # 复制示例配置文件
 cp config.example.yaml config.yaml
 
-# 编辑配置文件
+# 编辑配置文件，修改 AI 服务地址
 # Windows: notepad config.yaml
-# 或使用您喜欢的编辑器
 ```
 
-配置文件说明：
+**最小配置示例：**
+```yaml
+ai:
+  primary:
+    base_url: "http://localhost:8000"  # 修改为你的 AI 服务地址
+    model: "gpt-4"                      # 修改为你的模型名称
+```
+
+**4. 启动程序**
+
+```bash
+# 方式 1: 使用 run.py 脚本（推荐）
+python run.py
+
+# 方式 2: 直接运行模块
+python -m ai_assistant.main
+```
+
+看到以下输出表示启动成功：
+```
+AI Auto-Reply Assistant Starting...
+Assistant is running. Press Ctrl+C to stop.
+```
+
+**5. 测试使用**
+
+1. **打开飞书**
+2. **在聊天窗口中选中一条包含【ai】的消息**，例如：
+   ```
+   【ai】你好，请介绍一下自己
+   ```
+3. **按 Ctrl+C 复制消息**
+4. **等待几秒**，程序会调用 AI 生成回复
+5. **看到通知**："🔔 AI 回复已复制到剪贴板"
+6. **在飞书输入框按 Ctrl+V 粘贴**，然后发送
+
+**停止程序：** 按 `Ctrl+C`
+
+---
+
+## 系统要求
+
+- **操作系统**：Windows 10/11
+- **Python**：3.10 或更高版本
+- **AI 服务**：CherryStudio 本地服务或 OpenAI 兼容 API
+
+## 详细配置说明
 
 ```yaml
 # 触发规则
@@ -106,51 +150,89 @@ adapters:
     priority: 1
 ```
 
-## 使用方法
+## 详细配置说明
 
-### 启动 AI 服务
+⚠️ **重要**：首次使用前，请先复制 `config.example.yaml` 为 `config.yaml`，然后修改配置。`config.yaml` 已被 Git 忽略，不会提交到仓库，保护您的 API 密钥安全。
 
-在使用本工具前，需要先启动 CherryStudio 或其他 OpenAI 兼容的 AI 服务。
+**完整配置示例：**
 
-**CherryStudio 启动示例：**
-```bash
-# 确保 CherryStudio 在 http://localhost:8000 运行
-# 具体启动方式请参考 CherryStudio 文档
+```yaml
+# 触发规则
+trigger:
+  keyword: "【ai】"          # 触发关键词
+  check_mention: true       # 检查 @提及
+  check_private: true       # 检查私聊消息
+
+# 上下文策略
+context:
+  mode: "short"             # 上下文模式：short | smart
+  max_messages: 10          # 最大消息历史数量
+  session_timeout: 3600     # 会话超时时间（秒）
+
+# AI 配置
+ai:
+  primary:
+    provider: "cherrystudio"
+    base_url: "http://localhost:8000"
+    api_key: ""
+    model: "gpt-4-vision-preview"
+  timeout: 30
+  multimodal: false         # 是否启用多模态
+
+# 回复执行
+reply:
+  mode: "clipboard"         # 回复模式：clipboard | auto_input
+  notification: true        # 是否显示通知
+
+# IM 适配器
+adapters:
+  - name: "feishu"
+    enabled: true
+    priority: 1
+
+# 日志
+logging:
+  level: "INFO"
+  file: "logs/ai-assistant.log"
+  rotation: "daily"
+  retention: 7
 ```
 
-### 运行助手
+### 配置项说明
 
-**启动程序：**
+### 配置项说明
 
-```bash
-# 方式 1: 使用 run.py 脚本
-python run.py
+**触发规则：**
 
-# 方式 2: 直接运行模块
-python -m ai_assistant.main
-```
+- `keyword`：触发关键词，默认为 "【ai】"
+- `check_mention`：是否检查 @提及消息
+- `check_private`：是否检查私聊消息
 
-**停止程序：**
+**上下文策略：**
 
-按 `Ctrl+C` 停止程序。
+- `mode`：
+  - `short`：保留最近 N 条消息
+  - `smart`：智能判断相关消息（计划中）
+- `max_messages`：最大消息历史数量
+- `session_timeout`：会话超时时间（秒）
 
-### 使用说明
+**AI 配置：**
 
-**当前版本的使用方式（简化版）：**
+- `provider`：AI 服务提供商（cherrystudio | openai）
+- `base_url`：API 基础 URL
+- `api_key`：API 密钥（如需要）
+- `model`：使用的模型名称
+- `timeout`：API 调用超时时间
+- `multimodal`：是否启用多模态（图片、视频）
 
-1. **启动 CherryStudio**：确保 CherryStudio 在 `http://localhost:8000` 运行
-2. **启动助手**：运行 `python run.py`
-3. **打开飞书**：切换到飞书窗口
-4. **复制消息**：在飞书中选中包含【ai】关键词的消息，按 `Ctrl+C` 复制
-5. **等待回复**：助手检测到触发词后，会调用 AI 生成回复并复制到剪贴板
-6. **粘贴发送**：在飞书输入框按 `Ctrl+V` 粘贴回复，然后发送
+**回复模式：**
 
-**注意事项：**
-- 当前飞书适配器是简化实现，需要手动复制消息来触发
-- 完整的自动化实现需要更复杂的 UI 元素定位逻辑
-- 确保 CherryStudio 服务正常运行，否则会报错
+- `clipboard`：复制到剪贴板，用户手动粘贴（推荐）
+- `auto_input`：自动输入并发送（计划中，需谨慎使用）
 
-### 使用场景
+---
+
+## 使用场景
 
 **示例场景：**
 
@@ -172,37 +254,59 @@ python -m ai_assistant.main
 回复复制到剪贴板 → 用户粘贴发送
 ```
 
-## 配置说明
+**注意事项：**
+- 当前飞书适配器是简化实现，需要手动复制消息来触发
+- 完整的自动化实现需要更复杂的 UI 元素定位逻辑
+- 确保 CherryStudio 服务正常运行，否则会报错
 
-⚠️ **重要**：首次使用前，请先复制 `config.example.yaml` 为 `config.yaml`，然后修改配置。`config.yaml` 已被 Git 忽略，不会提交到仓库，保护您的 API 密钥安全。
+---
 
-### 触发规则
+## 常见问题
 
-- `keyword`：触发关键词，默认为 "【ai】"
-- `check_mention`：是否检查 @提及消息
-- `check_private`：是否检查私聊消息
+### Q: 提示 "AI service health check failed"
 
-### 上下文策略
+**A:** 检查 CherryStudio 是否正在运行，配置文件中的 `base_url` 是否正确。
 
-- `mode`：
-  - `short`：保留最近 N 条消息
-  - `smart`：智能判断相关消息（计划中）
-- `max_messages`：最大消息历史数量
-- `session_timeout`：会话超时时间（秒）
+### Q: 没有检测到触发
 
-### AI 配置
+**A:** 确保：
+- 飞书窗口是当前活动窗口
+- 消息中包含【ai】关键词
+- 已经用 Ctrl+C 复制了消息
 
-- `provider`：AI 服务提供商（cherrystudio | openai）
-- `base_url`：API 基础 URL
-- `api_key`：API 密钥（如需要）
-- `model`：使用的模型名称
-- `timeout`：API 调用超时时间
-- `multimodal`：是否启用多模态（图片、视频）
+### Q: 如何修改触发关键词？
 
-### 回复模式
+**A:** 编辑 `config.yaml`：
+```yaml
+trigger:
+  keyword: "【ai】"  # 改成你想要的关键词
+```
 
-- `clipboard`：复制到剪贴板，用户手动粘贴（推荐）
-- `auto_input`：自动输入并发送（计划中，需谨慎使用）
+### Q: 如何停止程序？
+
+**A:** 在终端按 `Ctrl+C`
+
+### Q: 为什么需要无障碍权限？
+
+**A:** 本工具通过 Windows UI 自动化 API 读取 IM 窗口内容，需要无障碍权限才能访问窗口元素。
+
+### Q: 会不会影响正常使用 IM 工具？
+
+**A:** 不会。本工具采用非侵入式设计，仅读取窗口内容，不修改 IM 客户端，您可以正常使用。
+
+### Q: 支持哪些 AI 模型？
+
+**A:** 目前支持 CherryStudio 本地服务和任何 OpenAI 兼容的 API，包括 GPT-4、Claude、本地部署的开源模型等。
+
+### Q: 消息会被上传到云端吗？
+
+**A:** 不会。所有消息仅在本地处理，AI API 调用使用 HTTPS 加密，不会上传到第三方服务器（除了您配置的 AI 服务）。
+
+### Q: 如何关闭自动回复？
+
+**A:** 直接关闭本程序即可，或在配置文件中禁用相应的适配器。
+
+---
 
 ## 开发指南
 
@@ -296,27 +400,34 @@ $env:PYTHONPATH="src"; pytest tests/unit/ -v
 - **日志管理**：loguru
 - **测试框架**：pytest
 
-## 常见问题
+---
 
-### Q: 为什么需要无障碍权限？
+## 故障排查
 
-A: 本工具通过 Windows UI 自动化 API 读取 IM 窗口内容，需要无障碍权限才能访问窗口元素。
+**查看日志：**
+```bash
+# 日志文件位置
+tail -f logs/ai-assistant.log
 
-### Q: 会不会影响正常使用 IM 工具？
+# Windows
+type logs\ai-assistant.log
+```
 
-A: 不会。本工具采用非侵入式设计，仅读取窗口内容，不修改 IM 客户端，您可以正常使用。
+**运行测试：**
+```bash
+# 运行所有测试
+PYTHONPATH=src pytest tests/unit/ -v
 
-### Q: 支持哪些 AI 模型？
+# Windows PowerShell
+$env:PYTHONPATH="src"; pytest tests/unit/ -v
+```
 
-A: 目前支持 CherryStudio 本地服务和任何 OpenAI 兼容的 API，包括 GPT-4、Claude、本地部署的开源模型等。
+**常见错误：**
+1. `ModuleNotFoundError` - 检查是否安装了所有依赖
+2. `FileNotFoundError: config.yaml` - 需要先复制配置文件
+3. `Connection refused` - 检查 AI 服务是否运行
 
-### Q: 消息会被上传到云端吗？
-
-A: 不会。所有消息仅在本地处理，AI API 调用使用 HTTPS 加密，不会上传到第三方服务器（除了您配置的 AI 服务）。
-
-### Q: 如何关闭自动回复？
-
-A: 直接关闭本程序即可，或在配置文件中禁用相应的适配器。
+---
 
 ## 许可证
 
