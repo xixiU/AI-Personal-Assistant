@@ -29,6 +29,9 @@ class Config:
     reply_mode: str = "clipboard"
     reply_notification: bool = True
 
+    # 系统配置
+    system_poll_interval: float = 5.0
+
     # 日志
     logging_level: str = "INFO"
     logging_file: str = "logs/ai-assistant.log"
@@ -86,6 +89,10 @@ class Config:
         if "reply" in data:
             config.reply_mode = data["reply"].get("mode", config.reply_mode)
             config.reply_notification = data["reply"].get("notification", config.reply_notification)
+
+        # 解析系统配置
+        if "system" in data:
+            config.system_poll_interval = data["system"].get("poll_interval", config.system_poll_interval)
 
         # 解析日志
         if "logging" in data:

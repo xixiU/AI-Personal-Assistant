@@ -204,7 +204,7 @@ class AIAssistant:
 
     def _main_loop(self):
         """主循环"""
-        poll_interval = 0.5  # 轮询间隔（秒）
+        poll_interval = self.config.system_poll_interval  # 从配置读取轮询间隔
 
         while self.running:
             try:

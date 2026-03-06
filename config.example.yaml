@@ -26,6 +26,10 @@ reply:
   mode: "clipboard"
   notification: true
 
+# 系统配置
+system:
+  poll_interval: 5.0  # UI 轮询间隔（秒），避免轮询太快影响用户操作
+
 # IM适配器
 adapters:
   - name: "feishu"
