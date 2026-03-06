@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(PYTHONPATH=/d/source/AI-Personal-Assistant/src pytest:*)"
+    ]
+  }
+}

@@ -53,7 +53,18 @@ pip install -r requirements.txt
 
 ### 3. 配置文件
 
-复制 `config.yaml` 并根据需要修改配置：
+复制示例配置文件并根据需要修改：
+
+```bash
+# 复制示例配置文件
+cp config.example.yaml config.yaml
+
+# 编辑配置文件
+# Windows: notepad config.yaml
+# 或使用您喜欢的编辑器
+```
+
+配置文件说明：
 
 ```yaml
 # 触发规则
@@ -126,6 +137,8 @@ python -m ai_assistant.main
 6. 您按 Ctrl+V 粘贴并发送
 
 ## 配置说明
+
+⚠️ **重要**：首次使用前，请先复制 `config.example.yaml` 为 `config.yaml`，然后修改配置。`config.yaml` 已被 Git 忽略，不会提交到仓库，保护您的 API 密钥安全。
 
 ### 触发规则
 
