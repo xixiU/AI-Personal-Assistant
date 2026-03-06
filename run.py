@@ -8,7 +8,8 @@ import sys
 from pathlib import Path
 
 # 添加 src 目录到 Python 路径
-src_path = Path(__file__).parent
+project_root = Path(__file__).parent
+src_path = project_root / "src"
 sys.path.insert(0, str(src_path))
 
 from ai_assistant.main import main
