@@ -1,0 +1,19 @@
+Looking in indexes: https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
+Collecting flask
+  Downloading https://mirrors.tuna.tsinghua.edu.cn/pypi/web/packages/7f/9c/34f6962f9b9e9c71f6e5ed806e0d0ff03c9d1b0b2340088a0cf4bce09b18/flask-3.1.3-py3-none-any.whl (103 kB)
+Collecting blinker>=1.9.0 (from flask)
+  Downloading https://mirrors.tuna.tsinghua.edu.cn/pypi/web/packages/10/cb/f2ad4230dc2eb1a74edf38f1a38b9b52277f75bef262d8908e60d957e13c/blinker-1.9.0-py3-none-any.whl (8.5 kB)
+Collecting click>=8.1.3 (from flask)
+  Downloading https://mirrors.tuna.tsinghua.edu.cn/pypi/web/packages/98/78/01c019cdb5d6498122777c1a43056ebb3ebfeef2076d9d026bfe15583b2b/click-8.3.1-py3-none-any.whl (108 kB)
+Collecting itsdangerous>=2.2.0 (from flask)
+  Downloading https://mirrors.tuna.tsinghua.edu.cn/pypi/web/packages/04/96/92447566d16df59b2a776c0fb82dbc4d9e07cd95062562af01e408583fc4/itsdangerous-2.2.0-py3-none-any.whl (16 kB)
+Collecting jinja2>=3.1.2 (from flask)
+  Downloading https://mirrors.tuna.tsinghua.edu.cn/pypi/web/packages/62/a1/3d680cbfd5f4b8f15abc1d571870c5fc3e594bb582bc3b64ea099db13e56/jinja2-3.1.6-py3-none-any.whl (134 kB)
+Collecting markupsafe>=2.1.1 (from flask)
+  Downloading https://mirrors.tuna.tsinghua.edu.cn/pypi/web/packages/05/73/c4abe620b841b6b791f2edc248f556900667a5a1cf023a6646967ae98335/markupsafe-3.0.3-cp313-cp313-win_amd64.whl (15 kB)
+Collecting werkzeug>=3.1.0 (from flask)
+  Downloading https://mirrors.tuna.tsinghua.edu.cn/pypi/web/packages/4d/ec/d58832f89ede95652fd01f4f24236af7d32b70cab2196dfcc2d2fd13c5c2/werkzeug-3.1.6-py3-none-any.whl (225 kB)
+Requirement already satisfied: colorama in C:\Users\rjyuan2\AppData\Local\Programs\Python\Python313\Lib\site-packages (from click>=8.1.3->flask) (0.4.6)
+Installing collected packages: markupsafe, itsdangerous, click, blinker, werkzeug, jinja2, flask
+
+Successfully installed blinker-1.9.0 click-8.3.1 flask-3.1.3 itsdangerous-2.2.0 jinja2-3.1.6 markupsafe-3.0.3 werkzeug-3.1.6

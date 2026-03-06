@@ -17,7 +17,8 @@ from ai_assistant.core.context_manager import ContextManager
 from ai_assistant.core.reply_executor import ReplyExecutor
 from ai_assistant.core.models import Message, Content
 from ai_assistant.providers.cherrystudio import CherryStudioProvider
-from ai_assistant.adapters.feishu import FeishuAdapter
+from ai_assistant.adapters.feishu_ui import FeishuUIAdapter
+from ai_assistant.adapters.feishu_bot import FeishuBotAdapter
 
 
 class AIAssistant:
@@ -56,13 +57,60 @@ class AIAssistant:
 
         # 初始化适配器
         self.adapters = []
-        if any(adapter.get("name") == "feishu" and adapter.get("enabled", False)
-               for adapter in self.config.__dict__.get("adapters", [])):
-            self.adapters.append(FeishuAdapter())
+        self.webhook_server = None
+        self._init_adapters()
 
         self.running = False
 
         logger.info("AI Assistant initialized successfully")
+
+    def _init_adapters(self):
+        """初始化 IM 适配器"""
+        for adapter_config in self.config.adapters:
+            if not adapter_config.get("enabled", False):
+                continue
+
+            name = adapter_config.get("name")
+            mode = adapter_config.get("mode", "ui_automation")
+
+            if name == "feishu":
+                if mode == "bot_api":
+                    # 机器人 API 模式
+                    bot_config = adapter_config.get("bot_api", {})
+                    adapter = FeishuBotAdapter(bot_config)
+                    self.adapters.append(adapter)
+                    logger.info("Feishu Bot API adapter initialized")
+
+                    # 启动 webhook 服务器
+                    self._start_webhook_server(adapter)
+
+                elif mode == "ui_automation":
+                    # UI 自动化模式
+                    ui_config = adapter_config.get("ui_automation", {})
+                    adapter = FeishuUIAdapter(ui_config)
+                    self.adapters.append(adapter)
+                    logger.info("Feishu UI automation adapter initialized")
+
+    def _start_webhook_server(self, feishu_adapter):
+        """启动 webhook 服务器（用于机器人模式）"""
+        try:
+            from ai_assistant.webhook_server import WebhookServer
+            import threading
+
+            self.webhook_server = WebhookServer(host="0.0.0.0", port=8080)
+            self.webhook_server.set_feishu_adapter(feishu_adapter)
+
+            # 在后台线程启动服务器
+            server_thread = threading.Thread(
+                target=self.webhook_server.run,
+                kwargs={"debug": False},
+                daemon=True
+            )
+            server_thread.start()
+            logger.info("Webhook server started on port 8080")
+
+        except Exception as e:
+            logger.error(f"Failed to start webhook server: {e}")
 
     def _load_config(self, config_path: str) -> Config:
         """加载配置文件"""
@@ -200,10 +248,19 @@ class AIAssistant:
             self.context_manager.add_message(session_id, ai_message)
 
             # 执行回复
-            if self.reply_executor.execute(reply):
-                logger.info("Reply executed successfully")
+            # 检查适配器类型，使用不同的回复方式
+            if isinstance(adapter, FeishuBotAdapter):
+                # 机器人模式：直接通过 API 发送
+                if adapter.send_reply(reply):
+                    logger.info("Reply sent via Bot API successfully")
+                else:
+                    logger.error("Failed to send reply via Bot API")
             else:
-                logger.error("Failed to execute reply")
+                # UI 自动化模式：使用回复执行器
+                if self.reply_executor.execute(reply):
+                    logger.info("Reply executed successfully")
+                else:
+                    logger.error("Failed to execute reply")
 
         except Exception as e:
             logger.error(f"Failed to handle trigger: {e}")

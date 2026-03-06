@@ -1,7 +1,17 @@
 {
   "permissions": {
     "allow": [
-      "Bash(PYTHONPATH=/d/source/AI-Personal-Assistant/src pytest:*)"
+      "Bash(PYTHONPATH=/d/source/AI-Personal-Assistant/src pytest:*)",
+      "WebSearch",
+      "WebFetch(domain:open.larksuite.com)",
+      "WebFetch(domain:www.feishu.cn)",
+      "WebFetch(domain:intl.cloud.tencent.com)",
+      "WebFetch(domain:www.larksuite.com)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:cloud.tencent.com)",
+      "WebFetch(domain:go-lark.github.io)",
+      "WebFetch(domain:pypi.org)",
+      "WebFetch(domain:hexdocs.pm)"
     ]
   }
 }
