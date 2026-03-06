@@ -1,0 +1,40 @@
+# 触发规则
+trigger:
+  keyword: "【ai】"
+  check_mention: true
+  check_private: true
+
+# 上下文策略
+context:
+  mode: "short"
+  max_messages: 10
+  session_timeout: 3600
+
+# AI配置
+ai:
+  primary:
+    provider: "cherrystudio"
+    base_url: "http://localhost:8000"
+    api_key: ""
+    model: "gpt-4-vision-preview"
+
+  timeout: 30
+  multimodal: false
+
+# 回复执行
+reply:
+  mode: "clipboard"
+  notification: true
+
+# IM适配器
+adapters:
+  - name: "feishu"
+    enabled: true
+    priority: 1
+
+# 日志
+logging:
+  level: "INFO"
+  file: "logs/ai-assistant.log"
+  rotation: "daily"
+  retention: 7
