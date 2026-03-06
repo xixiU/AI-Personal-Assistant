@@ -224,7 +224,14 @@ class WeChat39Adapter:
                 return False
 
             # 使用 send_message_to_friend 发送消息
-            wx_auto.send_message_to_friend(friend=target, message=message)
+            # is_maximize=False: 不最大化窗口，避免影响用户
+            # close_wechat=False: 不关闭微信窗口
+            wx_auto.send_message_to_friend(
+                friend=target,
+                message=message,
+                is_maximize=False,
+                close_wechat=False
+            )
             logger.info(f"消息已发送到 {target}")
             return True
 
