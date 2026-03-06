@@ -19,6 +19,7 @@ from ai_assistant.core.models import Message, Content
 from ai_assistant.providers.cherrystudio import CherryStudioProvider
 from ai_assistant.adapters.feishu_ui import FeishuUIAdapter
 from ai_assistant.adapters.feishu_bot import FeishuBotAdapter
+from ai_assistant.adapters.wechat_adapter import WeChatAdapter
 
 
 class AIAssistant:
@@ -90,6 +91,16 @@ class AIAssistant:
                     adapter = FeishuUIAdapter(ui_config)
                     self.adapters.append(adapter)
                     logger.info("Feishu UI automation adapter initialized")
+
+            elif name == "wechat":
+                # 微信适配器
+                try:
+                    adapter = WeChatAdapter(adapter_config)
+                    self.adapters.append(adapter)
+                    logger.info("WeChat adapter initialized")
+                except ImportError as e:
+                    logger.error(f"Failed to initialize WeChat adapter: {e}")
+                    logger.error("Install pywechat with: pip install git+https://github.com/Hello-Mr-Crab/pywechat.git")
 
     def _start_webhook_server(self, feishu_adapter):
         """启动 webhook 服务器（用于机器人模式）"""
@@ -255,6 +266,12 @@ class AIAssistant:
                     logger.info("Reply sent via Bot API successfully")
                 else:
                     logger.error("Failed to send reply via Bot API")
+            elif isinstance(adapter, WeChatAdapter):
+                # 微信适配器：直接发送消息
+                if adapter.send_message(reply):
+                    logger.info("Reply sent to WeChat successfully")
+                else:
+                    logger.error("Failed to send reply to WeChat")
             else:
                 # UI 自动化模式：使用回复执行器
                 if self.reply_executor.execute(reply):

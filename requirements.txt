@@ -8,3 +8,7 @@ pytest>=7.4.0
 pytest-asyncio>=0.21.0
 pyperclip>=1.8.2
 flask>=3.0.0
+
+# WeChat automation
+# 微信 4.1+: pip install git+https://github.com/Hello-Mr-Crab/pywechat.git
+# 微信 3.9+: pip install pywechat127==1.9.7
