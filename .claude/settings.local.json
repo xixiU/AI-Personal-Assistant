@@ -11,7 +11,8 @@
       "WebFetch(domain:cloud.tencent.com)",
       "WebFetch(domain:go-lark.github.io)",
       "WebFetch(domain:pypi.org)",
-      "WebFetch(domain:hexdocs.pm)"
+      "WebFetch(domain:hexdocs.pm)",
+      "Bash(python:*)"
     ]
   }
 }

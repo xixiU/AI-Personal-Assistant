@@ -178,7 +178,8 @@ class WeChat39Adapter:
         """检查所有聊天（使用 check_new_message）"""
         try:
             # 使用 check_new_message 检查新消息
-            new_msgs = wx_auto.check_new_message()
+            # close_wechat=False: 不关闭微信窗口
+            new_msgs = wx_auto.check_new_message(close_wechat=False)
             logger.info(f"检查所有聊天: {new_msgs}")
 
             if not new_msgs:
