@@ -219,9 +219,13 @@ class WeChat39Adapter:
         """检查指定聊天"""
         try:
             # 使用 listen_on_chat 监听指定聊天
+            # is_maximize=False: 不最大化窗口
+            # close_wechat=False: 不关闭微信窗口
             result = wx_auto.listen_on_chat(
                 friend=chat_name,
-                duration=f"{int(self.poll_interval)}s"
+                duration=f"{int(self.poll_interval)}s",
+                is_maximize=False,
+                close_wechat=False
             )
 
             if not result:

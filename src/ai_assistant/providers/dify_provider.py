@@ -94,6 +94,10 @@ class DifyProvider(AIProvider):
                             prompt += f"{role}: {content.data}\n"
                 payload["inputs"]["prompt"] = prompt
 
+            # 记录请求信息（用于调试）
+            logger.debug(f"Dify API 请求: {endpoint}")
+            logger.debug(f"Dify API 请求体: {payload}")
+
             # 发送请求
             response = requests.post(
                 endpoint,
@@ -101,6 +105,14 @@ class DifyProvider(AIProvider):
                 headers=headers,
                 timeout=self.timeout
             )
+
+            # 记录响应状态
+            logger.debug(f"Dify API 响应状态: {response.status_code}")
+
+            # 如果失败，记录响应内容
+            if response.status_code != 200:
+                logger.error(f"Dify API 响应内容: {response.text}")
+
             response.raise_for_status()
 
             # 解析响应
