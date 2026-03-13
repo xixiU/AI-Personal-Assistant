@@ -95,6 +95,8 @@ class WeChat39Adapter:
         self.processed_messages = set()
         self.last_message = None
         self.current_chat_name = None
+        self.current_chat_type = None  # 聊天类型：'好友' 或 '群聊'
+        self.current_sender = None  # 群聊中的发送者名称
 
         logger.info("微信 3.9 适配器初始化成功")
 
@@ -186,12 +188,13 @@ class WeChat39Adapter:
                 return False
 
             # 检查是否有包含关键词的消息
-            # new_msgs 格式: [{'好友名称': 'xxx', '消息内容': ['msg1', 'msg2'], ...}]
+            # new_msgs 格式: [{'好友名称': 'xxx', '好友类型': '好友'/'群聊', '消息内容': ['msg1', 'msg2'], ...}]
             for msg_info in new_msgs:
                 if not isinstance(msg_info, dict):
                     continue
 
                 who = msg_info.get('好友名称', 'Unknown')
+                chat_type = msg_info.get('好友类型', '好友')
                 msg_contents = msg_info.get('消息内容', [])
 
                 # 检查每条消息内容
@@ -200,9 +203,28 @@ class WeChat39Adapter:
                         # 避免重复处理
                         msg_key = f"{who}:{msg_text}"
                         if msg_key not in self.processed_messages:
-                            logger.info(f"检测到触发关键词: {keyword} (来自 {who})")
+                            logger.info(f"检测到触发关键词: {keyword} (来自 {who}, 类型: {chat_type})")
                             self.last_message = str(msg_text)
                             self.current_chat_name = who
+                            self.current_chat_type = chat_type
+
+                            # 如果是群聊，尝试从消息中提取发送者名称
+                            # 群聊消息格式通常是 "发送者: 消息内容" 或 "发送者\n消息内容"
+                            if chat_type == '群聊':
+                                # 尝试从消息中提取发送者
+                                if ':' in msg_text:
+                                    sender = msg_text.split(':', 1)[0].strip()
+                                    self.current_sender = sender
+                                    logger.info(f"群聊发送者: {sender}")
+                                elif '\n' in msg_text:
+                                    sender = msg_text.split('\n', 1)[0].strip()
+                                    self.current_sender = sender
+                                    logger.info(f"群聊发送者: {sender}")
+                                else:
+                                    self.current_sender = None
+                            else:
+                                self.current_sender = None
+
                             self.processed_messages.add(msg_key)
 
                             if len(self.processed_messages) > 100:
@@ -269,11 +291,18 @@ class WeChat39Adapter:
             # 使用 send_message_to_friend 发送消息
             # is_maximize=False: 不最大化窗口，避免影响用户
             # close_wechat=False: 不关闭微信窗口
+            # at: 在群聊中@发送者
+            at_list = []
+            if self.current_chat_type == '群聊' and self.current_sender:
+                at_list = [self.current_sender]
+                logger.info(f"群聊回复，将@{self.current_sender}")
+
             wx_auto.send_message_to_friend(
                 friend=target,
                 message=message,
                 is_maximize=False,
-                close_wechat=False
+                close_wechat=False,
+                at=at_list
             )
             logger.info(f"消息已发送到 {target}")
             return True

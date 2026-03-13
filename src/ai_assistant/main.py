@@ -18,7 +18,6 @@ from ai_assistant.core.reply_executor import ReplyExecutor
 from ai_assistant.core.models import Message, Content
 from ai_assistant.providers.openai_provider import OpenAIProvider
 from ai_assistant.providers.dify_provider import DifyProvider
-from ai_assistant.adapters.feishu_ui import FeishuUIAdapter
 from ai_assistant.adapters.feishu_bot import FeishuBotAdapter
 from ai_assistant.adapters.wechat_adapter import WeChatAdapter
 
@@ -89,22 +88,11 @@ class AIAssistant:
             mode = adapter_config.get("mode", "ui_automation")
 
             if name == "feishu":
-                if mode == "bot_api":
-                    # 机器人 API 模式
-                    bot_config = adapter_config.get("bot_api", {})
-                    adapter = FeishuBotAdapter(bot_config)
-                    self.adapters.append(adapter)
-                    logger.info("Feishu Bot API adapter initialized")
-
-                    # 启动 webhook 服务器
-                    self._start_webhook_server(adapter)
-
-                elif mode == "ui_automation":
-                    # UI 自动化模式
-                    ui_config = adapter_config.get("ui_automation", {})
-                    adapter = FeishuUIAdapter(ui_config)
-                    self.adapters.append(adapter)
-                    logger.info("Feishu UI automation adapter initialized")
+                bot_config = adapter_config.get("bot_api", {})
+                adapter = FeishuBotAdapter(bot_config)
+                self.adapters.append(adapter)
+                logger.info("Feishu Bot API adapter initialized")
+                self._start_webhook_server(adapter)
 
             elif name == "wechat":
                 # 微信适配器
@@ -124,6 +112,8 @@ class AIAssistant:
 
             self.webhook_server = WebhookServer(host="0.0.0.0", port=8080)
             self.webhook_server.set_feishu_adapter(feishu_adapter)
+            # 注册消息处理回调，事件到达时立即处理，无需等待主循环轮询
+            self.webhook_server.set_message_handler(self._handle_trigger)
 
             # 在后台线程启动服务器
             server_thread = threading.Thread(
@@ -273,25 +263,18 @@ class AIAssistant:
             self.context_manager.add_message(session_id, ai_message)
 
             # 执行回复
-            # 检查适配器类型，使用不同的回复方式
             if isinstance(adapter, FeishuBotAdapter):
-                # 机器人模式：直接通过 API 发送
+                # 飞书机器人：直接通过 API 回复原消息
                 if adapter.send_reply(reply):
-                    logger.info("Reply sent via Bot API successfully")
+                    logger.info("Reply sent via Feishu Bot API successfully")
                 else:
-                    logger.error("Failed to send reply via Bot API")
+                    logger.error("Failed to send reply via Feishu Bot API")
             elif isinstance(adapter, WeChatAdapter):
                 # 微信适配器：直接发送消息
                 if adapter.send_message(reply):
                     logger.info("Reply sent to WeChat successfully")
                 else:
                     logger.error("Failed to send reply to WeChat")
-            else:
-                # UI 自动化模式：使用回复执行器
-                if self.reply_executor.execute(reply):
-                    logger.info("Reply executed successfully")
-                else:
-                    logger.error("Failed to execute reply")
 
         except Exception as e:
             logger.error(f"Failed to handle trigger: {e}")

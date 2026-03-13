@@ -111,16 +111,17 @@ class FeishuBotAdapter(IMAdapter):
         Returns:
             响应数据（如果需要）
         """
-        # URL 验证
+        # URL 验证（飞书开放平台配置 webhook 时的验证请求）
         if event_data.get("type") == "url_verification":
             challenge = event_data.get("challenge", "")
             logger.info("URL verification challenge received")
             return {"challenge": challenge}
 
-        # 事件回调
-        if event_data.get("header", {}).get("event_type") == "im.message.receive_v1":
+        # 事件回调 v2.0 格式
+        header = event_data.get("header", {})
+        if header.get("event_type") == "im.message.receive_v1":
             self.latest_event = event_data
-            logger.info("Message event received")
+            logger.info(f"Message event received: {header.get('event_id', 'unknown')}")
 
         return None
 
@@ -161,6 +162,7 @@ class FeishuBotAdapter(IMAdapter):
         try:
             event = self.latest_event["event"]
             message = event["message"]
+            chat_type = message.get("chat_type", "p2p")  # p2p=私聊, group=群聊
 
             # 检查白名单
             chat_id = message.get("chat_id", "")
@@ -168,34 +170,47 @@ class FeishuBotAdapter(IMAdapter):
 
             if self.allowed_chats and chat_id not in self.allowed_chats:
                 logger.debug(f"Chat {chat_id} not in whitelist")
+                self.latest_event = None
                 return False
 
             if self.allowed_users and sender_id not in self.allowed_users:
                 logger.debug(f"User {sender_id} not in whitelist")
+                self.latest_event = None
                 return False
 
             # 解析消息内容
             content_str = message.get("content", "{}")
             content_data = json.loads(content_str)
 
-            # 检查触发关键词
-            if message.get("message_type") == "text":
-                text = content_data.get("text", "")
-                if keyword in text:
-                    logger.info(f"Trigger keyword detected: {keyword}")
-                    # 保存消息用于后续处理
-                    self.latest_message = {
-                        "message_id": message.get("message_id"),
-                        "chat_id": chat_id,
-                        "text": text,
-                        "sender_id": sender_id
-                    }
-                    return True
+            # 仅处理文本消息
+            if message.get("message_type") != "text":
+                logger.debug(f"Skipping non-text message type: {message.get('message_type')}")
+                self.latest_event = None
+                return False
 
+            text = content_data.get("text", "")
+
+            # 群聊：需要包含触发关键词（用户可将关键词设为 @机器人 相关内容）
+            # 私聊：直接检查关键词
+            if keyword in text:
+                logger.info(f"Trigger keyword '{keyword}' detected in {chat_type} chat")
+                self.latest_message = {
+                    "message_id": message.get("message_id"),
+                    "chat_id": chat_id,
+                    "chat_type": chat_type,
+                    "text": text,
+                    "sender_id": sender_id,
+                    "sender_name": event["sender"].get("sender_id", {}).get("open_id", "")
+                }
+                return True
+
+            logger.debug(f"No trigger keyword in message (chat_type={chat_type})")
+            self.latest_event = None
             return False
 
         except Exception as e:
             logger.error(f"Error checking trigger: {e}")
+            self.latest_event = None
             return False
 
     def get_session_id(self) -> Optional[str]:
@@ -228,7 +243,7 @@ class FeishuBotAdapter(IMAdapter):
 
     def send_reply(self, reply_text: str) -> bool:
         """
-        发送回复消息
+        回复消息（使用 reply 接口，保持消息线程）
 
         Args:
             reply_text: 回复文本
@@ -242,30 +257,27 @@ class FeishuBotAdapter(IMAdapter):
 
         try:
             token = self.get_tenant_access_token()
-            url = "https://open.feishu.cn/open-apis/im/v1/messages"
+            message_id = self.latest_message["message_id"]
+
+            # 使用 reply 接口回复具体消息，保持消息线程
+            url = f"https://open.feishu.cn/open-apis/im/v1/messages/{message_id}/reply"
 
             headers = {
                 "Authorization": f"Bearer {token}",
                 "Content-Type": "application/json"
             }
 
-            params = {
-                "receive_id_type": "chat_id"
-            }
-
             payload = {
-                "receive_id": self.latest_message["chat_id"],
                 "msg_type": "text",
                 "content": json.dumps({"text": reply_text})
             }
 
-            response = requests.post(url, headers=headers, params=params, json=payload, timeout=10)
+            response = requests.post(url, headers=headers, json=payload, timeout=10)
             response.raise_for_status()
             result = response.json()
 
             if result.get("code") == 0:
-                logger.info("Reply sent successfully")
-                # 清除已处理的消息
+                logger.info(f"Reply sent to message {message_id}")
                 self.latest_event = None
                 self.latest_message = None
                 return True
