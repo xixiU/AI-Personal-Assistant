@@ -35,6 +35,7 @@ reply:
 system:
   poll_interval: 10.0  # UI 轮询间隔（秒），避免轮询太快影响用户操作
   webhook_port: 8080   # Webhook 服务器端口（飞书机器人模式使用）
+  disable_proxy: true  # 禁用系统代理（避免代理干扰内网/私有化部署访问）
 
 # IM适配器
 adapters:
@@ -44,6 +45,7 @@ adapters:
 
     # 飞书机器人 API 配置（需在飞书开放平台创建应用）
     bot_api:
+      base_url: "https://open.feishu.cn"  # 飞书开放平台地址（私有化部署时修改）
       app_id: ""           # 飞书应用 App ID
       app_secret: ""       # 飞书应用 App Secret
       verification_token: ""  # 事件订阅验证 Token

@@ -8,6 +8,7 @@ AI 自动回复助手 - 主程序
 
 import time
 import sys
+import os
 from pathlib import Path
 from datetime import datetime
 from loguru import logger
@@ -30,6 +31,14 @@ class AIAssistant:
         """
         # 加载配置
         self.config = self._load_config(config_path)
+
+        # 禁用代理（如果配置了）
+        if self.config.system_disable_proxy:
+            os.environ['HTTP_PROXY'] = ''
+            os.environ['HTTPS_PROXY'] = ''
+            os.environ['http_proxy'] = ''
+            os.environ['https_proxy'] = ''
+            logger.info("System proxy disabled")
 
         # 初始化日志
         self._setup_logging()

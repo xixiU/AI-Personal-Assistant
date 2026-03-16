@@ -31,6 +31,7 @@ class FeishuBotAdapter(IMAdapter):
         self.app_secret = config.get("app_secret", "")
         self.verification_token = config.get("verification_token", "")
         self.encrypt_key = config.get("encrypt_key", "")
+        self.base_url = config.get("base_url", "https://open.feishu.cn")  # 支持私有化部署
         self.allowed_chats = config.get("allowed_chats", [])
         self.allowed_users = config.get("allowed_users", [])
 
@@ -53,16 +54,21 @@ class FeishuBotAdapter(IMAdapter):
             return self.tenant_access_token
 
         # 获取新 token
-        url = "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal"
+        url = f"{self.base_url}/open-apis/auth/v3/tenant_access_token/internal"
         payload = {
             "app_id": self.app_id,
             "app_secret": self.app_secret
         }
 
+        logger.debug(f"Requesting tenant_access_token with app_url ={url}, app_id={self.app_id[:10]}...")
+
         try:
             response = requests.post(url, json=payload, timeout=10)
+
             response.raise_for_status()
             result = response.json()
+
+            logger.info(f"Token API response: {result}")
 
             if result.get("code") == 0:
                 self.tenant_access_token = result["tenant_access_token"]
@@ -330,7 +336,7 @@ class FeishuBotAdapter(IMAdapter):
             logger.debug(f"Reply content: {reply_text[:100]}")
 
             # 使用 reply 接口回复具体消息，保持消息线程
-            url = f"https://open.feishu.cn/open-apis/im/v1/messages/{message_id}/reply"
+            url = f"{self.base_url}/open-apis/im/v1/messages/{message_id}/reply"
 
             headers = {
                 "Authorization": f"Bearer {token}",
