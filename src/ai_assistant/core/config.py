@@ -35,6 +35,7 @@ class Config:
 
     # 系统配置
     system_poll_interval: float = 5.0
+    system_webhook_port: int = 8080  # Webhook 服务器端口
 
     # 日志
     logging_level: str = "INFO"
@@ -103,6 +104,7 @@ class Config:
         # 解析系统配置
         if "system" in data:
             config.system_poll_interval = data["system"].get("poll_interval", config.system_poll_interval)
+            config.system_webhook_port = data["system"].get("webhook_port", config.system_webhook_port)
 
         # 解析日志
         if "logging" in data:

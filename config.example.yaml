@@ -34,6 +34,7 @@ reply:
 # 系统配置
 system:
   poll_interval: 10.0  # UI 轮询间隔（秒），避免轮询太快影响用户操作
+  webhook_port: 8080   # Webhook 服务器端口（飞书机器人模式使用）
 
 # IM适配器
 adapters:

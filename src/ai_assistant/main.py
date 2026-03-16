@@ -16,10 +16,6 @@ from ai_assistant.core.config import Config
 from ai_assistant.core.context_manager import ContextManager
 from ai_assistant.core.reply_executor import ReplyExecutor
 from ai_assistant.core.models import Message, Content
-from ai_assistant.providers.openai_provider import OpenAIProvider
-from ai_assistant.providers.dify_provider import DifyProvider
-from ai_assistant.adapters.feishu_bot import FeishuBotAdapter
-from ai_assistant.adapters.wechat_adapter import WeChatAdapter
 
 
 class AIAssistant:
@@ -47,6 +43,7 @@ class AIAssistant:
         # 初始化 AI Provider
         provider_type = self.config.ai_primary_provider
         if provider_type == "dify":
+            from ai_assistant.providers.dify_provider import DifyProvider
             # Dify 平台
             self.ai_provider = DifyProvider(
                 base_url=self.config.ai_primary_base_url,
@@ -56,6 +53,7 @@ class AIAssistant:
                 timeout=self.config.ai_timeout
             )
         else:
+            from ai_assistant.providers.openai_provider import OpenAIProvider
             # 默认使用 OpenAI 兼容接口
             self.ai_provider = OpenAIProvider(
                 base_url=self.config.ai_primary_base_url,
@@ -85,9 +83,9 @@ class AIAssistant:
                 continue
 
             name = adapter_config.get("name")
-            mode = adapter_config.get("mode", "ui_automation")
 
             if name == "feishu":
+                from ai_assistant.adapters.feishu_bot import FeishuBotAdapter
                 bot_config = adapter_config.get("bot_api", {})
                 adapter = FeishuBotAdapter(bot_config)
                 self.adapters.append(adapter)
@@ -95,14 +93,14 @@ class AIAssistant:
                 self._start_webhook_server(adapter)
 
             elif name == "wechat":
-                # 微信适配器
                 try:
+                    from ai_assistant.adapters.wechat_adapter import WeChatAdapter
                     adapter = WeChatAdapter(adapter_config)
                     self.adapters.append(adapter)
                     logger.info("WeChat adapter initialized")
                 except ImportError as e:
                     logger.error(f"Failed to initialize WeChat adapter: {e}")
-                    logger.error("Install pywechat with: pip install git+https://github.com/Hello-Mr-Crab/pywechat.git")
+                    logger.error("Install pywechat with: pip install pywechat127==1.9.7")
 
     def _start_webhook_server(self, feishu_adapter):
         """启动 webhook 服务器（用于机器人模式）"""
@@ -110,7 +108,7 @@ class AIAssistant:
             from ai_assistant.webhook_server import WebhookServer
             import threading
 
-            self.webhook_server = WebhookServer(host="0.0.0.0", port=8080)
+            self.webhook_server = WebhookServer(host="0.0.0.0", port=self.config.system_webhook_port)
             self.webhook_server.set_feishu_adapter(feishu_adapter)
             # 注册消息处理回调，事件到达时立即处理，无需等待主循环轮询
             self.webhook_server.set_message_handler(self._handle_trigger)
@@ -122,7 +120,7 @@ class AIAssistant:
                 daemon=True
             )
             server_thread.start()
-            logger.info("Webhook server started on port 8080")
+            logger.info(f"Webhook server started on port {self.config.system_webhook_port}")
 
         except Exception as e:
             logger.error(f"Failed to start webhook server: {e}")
@@ -263,13 +261,16 @@ class AIAssistant:
             self.context_manager.add_message(session_id, ai_message)
 
             # 执行回复
-            if isinstance(adapter, FeishuBotAdapter):
+            # 根据适配器类名判断类型（避免顶层导入）
+            adapter_class_name = adapter.__class__.__name__
+
+            if adapter_class_name == "FeishuBotAdapter":
                 # 飞书机器人：直接通过 API 回复原消息
                 if adapter.send_reply(reply):
                     logger.info("Reply sent via Feishu Bot API successfully")
                 else:
                     logger.error("Failed to send reply via Feishu Bot API")
-            elif isinstance(adapter, WeChatAdapter):
+            elif adapter_class_name == "WeChatAdapter":
                 # 微信适配器：直接发送消息
                 if adapter.send_message(reply):
                     logger.info("Reply sent to WeChat successfully")
