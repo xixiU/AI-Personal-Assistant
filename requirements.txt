@@ -8,6 +8,7 @@ pytest>=7.4.0
 pytest-asyncio>=0.21.0
 pyperclip>=1.8.2
 flask>=3.0.0
+pycryptodome>=3.19.0  # 飞书 webhook 加密解密
 
 # WeChat automation
 # 微信 4.1+: pip install git+https://github.com/Hello-Mr-Crab/pywechat.git

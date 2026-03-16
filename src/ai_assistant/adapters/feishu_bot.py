@@ -5,6 +5,7 @@
 """
 import json
 import time
+import base64
 import hashlib
 import hmac
 import requests
@@ -101,6 +102,36 @@ class FeishuBotAdapter(IMAdapter):
 
         return calculated_signature == signature
 
+    def _decrypt(self, encrypt_str: str) -> Dict[str, Any]:
+        """
+        解密飞书加密数据（AES-256-CBC）
+
+        Args:
+            encrypt_str: base64 编码的加密字符串
+
+        Returns:
+            解密后的 JSON 数据
+        """
+        from Crypto.Cipher import AES
+
+        # key = SHA256(encrypt_key)，得到 32 字节
+        key = hashlib.sha256(self.encrypt_key.encode()).digest()
+
+        # base64 解码，前 16 字节为 IV，其余为密文
+        encrypt_bytes = base64.b64decode(encrypt_str)
+        iv = encrypt_bytes[:16]
+        ciphertext = encrypt_bytes[16:]
+
+        # AES-256-CBC 解密
+        cipher = AES.new(key, AES.MODE_CBC, iv)
+        decrypted = cipher.decrypt(ciphertext)
+
+        # 去除 PKCS7 padding
+        pad_len = decrypted[-1]
+        decrypted = decrypted[:-pad_len]
+
+        return json.loads(decrypted.decode("utf-8"))
+
     def handle_webhook_event(self, event_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """
         处理 webhook 事件
@@ -111,6 +142,15 @@ class FeishuBotAdapter(IMAdapter):
         Returns:
             响应数据（如果需要）
         """
+        # 如果配置了加密，先解密
+        if self.encrypt_key and "encrypt" in event_data:
+            try:
+                event_data = self._decrypt(event_data["encrypt"])
+                logger.debug("Webhook event decrypted")
+            except Exception as e:
+                logger.error(f"Failed to decrypt webhook event: {e}")
+                return None
+
         # URL 验证（飞书开放平台配置 webhook 时的验证请求）
         if event_data.get("type") == "url_verification":
             challenge = event_data.get("challenge", "")

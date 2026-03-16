@@ -76,7 +76,7 @@ class WebhookServer:
                         daemon=True
                     )
                     t.start()
-
+                logger.info(f"Webhook event resp: {response}")
                 if response:
                     return jsonify(response), 200
 
