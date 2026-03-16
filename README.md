@@ -353,8 +353,69 @@ adapters:
 
 **Webhook 配置：**
 - 程序启动后会在本地 `8080` 端口监听飞书事件
-- 需要在**飞书开放平台 → 事件订阅**中填写回调地址：`http://your-server-ip:8080/webhook/feishu`
-- 本地开发可用 [ngrok](https://ngrok.com/) 等内网穿透工具获取公网地址
+- 需要在**飞书开放平台 → 事件订阅**中填写回调地址：`https://your-domain.com/webhook/feishu`
+- **飞书要求 webhook 必须使用 HTTPS**，配置方式：
+
+**开发测试环境（使用 ngrok）：**
+```bash
+# 安装 ngrok: https://ngrok.com/download
+ngrok http 8080
+```
+ngrok 会生成一个 HTTPS 地址（如 `https://abc123.ngrok.io`），将 `https://abc123.ngrok.io/webhook/feishu` 填入飞书事件订阅。
+
+**生产环境（使用 Nginx + SSL 证书）：**
+
+1. **获取 SSL 证书**（推荐 Let's Encrypt 免费证书）：
+```bash
+# 安装 certbot
+sudo apt install certbot python3-certbot-nginx
+
+# 申请证书（自动配置 Nginx）
+sudo certbot --nginx -d your-domain.com
+```
+
+2. **配置 Nginx 反向代理**（`/etc/nginx/sites-available/feishu-webhook`）：
+```nginx
+server {
+    listen 443 ssl http2;
+    server_name your-domain.com;
+
+    # SSL 证书（certbot 会自动配置）
+    ssl_certificate /etc/letsencrypt/live/your-domain.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/your-domain.com/privkey.pem;
+
+    # 飞书 webhook 路由
+    location /webhook/feishu {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+
+# HTTP 自动跳转 HTTPS
+server {
+    listen 80;
+    server_name your-domain.com;
+    return 301 https://$server_name$request_uri;
+}
+```
+
+3. **启用配置并重启 Nginx**：
+```bash
+sudo ln -s /etc/nginx/sites-available/feishu-webhook /etc/nginx/sites-enabled/
+sudo nginx -t  # 测试配置
+sudo systemctl reload nginx
+```
+
+4. **在飞书开放平台填写**：`https://your-domain.com/webhook/feishu`
+
+**证书自动续期**：
+```bash
+# certbot 会自动添加 cron 任务，也可以手动测试续期
+sudo certbot renew --dry-run
+```
 
 ---
 
