@@ -4,9 +4,10 @@ Webhook 服务器
 接收飞书事件回调
 """
 import threading
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, send_from_directory
 from loguru import logger
 from typing import Optional, Callable
+import os
 
 
 class WebhookServer:
@@ -26,7 +27,17 @@ class WebhookServer:
         self.feishu_adapter = None
         self.message_handler: Optional[Callable] = None  # 消息处理回调
 
+        # 静态文件目录（src/ai_assistant/static/）
+        self.static_dir = os.path.join(os.path.dirname(__file__), "static")
+
         # 注册路由
+        self.app.add_url_rule(
+            "/",
+            "index",
+            self.serve_index,
+            methods=["GET"]
+        )
+
         self.app.add_url_rule(
             "/webhook/feishu",
             "feishu_webhook",
@@ -40,6 +51,14 @@ class WebhookServer:
             self.health_check,
             methods=["GET"]
         )
+
+    def serve_index(self):
+        """返回首页"""
+        try:
+            return send_from_directory(self.static_dir, "index.html")
+        except Exception as e:
+            logger.error(f"Error serving index.html: {e}")
+            return jsonify({"error": "index.html not found"}), 404
 
     def set_feishu_adapter(self, adapter):
         """设置飞书适配器"""
