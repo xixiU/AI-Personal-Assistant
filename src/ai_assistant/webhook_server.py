@@ -74,7 +74,12 @@ class WebhookServer:
         self.event_queue = event_queue
 
     def handle_feishu_webhook(self):
-        """处理飞书 webhook 回调：解析事件并放入队列"""
+        """
+        处理飞书 webhook 回调：立即返回 200，将原始事件放入队列异步处理
+
+        飞书要求 3 秒内返回 HTTP 200，否则会认为推送失败。
+        因此这里只做最基本的验证，立即返回 200，所有业务逻辑在后台处理。
+        """
         from ai_assistant.core.trace_context import with_new_trace_id
 
         trace_id = with_new_trace_id()
@@ -86,34 +91,35 @@ class WebhookServer:
                 logger.warning("Empty webhook data received")
                 return jsonify({"error": "Empty data"}), 400
 
-            logger.info(f"📨 Webhook received event_type: {data.get('header', {}).get('event_type', data.get('type', 'unknown'))}")
+            event_type = data.get('header', {}).get('event_type', data.get('type', 'unknown'))
+            logger.info(f"📨 Webhook received event_type: {event_type}")
 
-            if self.feishu_adapter:
-                response = self.feishu_adapter.handle_webhook_event(data)
+            # URL 验证请求需要立即返回 challenge（不放入队列）
+            if data.get("type") == "url_verification":
+                challenge = data.get("challenge", "")
+                logger.info(f"URL verification: returning challenge={challenge}")
+                return jsonify({"challenge": challenge}), 200
 
-                # 将事件放入队列，由消费线程处理
-                if self.feishu_adapter.latest_event and self.event_queue:
-                    pending_event = self.feishu_adapter.latest_event
-                    self.feishu_adapter.latest_event = None  # 立即清空
+            # 将原始事件数据放入队列，由后台线程异步处理
+            if self.event_queue:
+                try:
+                    self.event_queue.put_nowait({
+                        "trace_id": trace_id,
+                        "adapter": self.feishu_adapter,
+                        "raw_data": data  # 存储原始数据，不预处理
+                    })
+                    logger.info(f"✅ Event enqueued, queue size: {self.event_queue.qsize()}/{self.event_queue.maxsize}")
+                except queue.Full:
+                    logger.error(f"❌ Event queue full (size={self.event_queue.maxsize}), dropping event")
+                    # 即使队列满了，也要返回 200，避免飞书重试
 
-                    try:
-                        self.event_queue.put_nowait({
-                            "trace_id": trace_id,
-                            "adapter": self.feishu_adapter,
-                            "event": pending_event
-                        })
-                        logger.info(f"✅ Event enqueued, queue size: {self.event_queue.qsize()}/{self.event_queue.maxsize}")
-                    except queue.Full:
-                        logger.error(f"❌ Event queue full (size={self.event_queue.maxsize}), dropping event")
-
-                if response:
-                    return jsonify(response), 200
-
+            # 立即返回 200，确保在 3 秒内响应
             return jsonify({}), 200
 
         except Exception as e:
             logger.error(f"Error handling webhook: {e}")
-            return jsonify({"error": str(e)}), 500
+            # 即使出错也返回 200，避免飞书重试
+            return jsonify({}), 200
 
     def health_check(self):
         """健康检查"""
