@@ -171,14 +171,10 @@ class AIAssistant:
         """
         处理单个事件（在线程池工作线程中执行）
 
-        从原始 webhook 数据中解析事件，处理所有业务逻辑（包括欢迎消息、AI 回复等）。
-        这个方法在后台线程中执行，不会阻塞 webhook 响应。
-
         Args:
             event_data: 事件数据，包含 trace_id, adapter, raw_data
         """
         import time as time_mod
-        import json as json_mod
         start_time = time_mod.time()
 
         trace_id = event_data["trace_id"]
@@ -191,10 +187,11 @@ class AIAssistant:
         try:
             logger.info(f"⏱️  Event processing started (queue_size={self.event_queue.qsize()})")
 
-            # 第一步：处理飞书事件（解密、解析、处理欢迎消息等）
-            processed_event = self._handle_feishu_webhook_event(raw_data, adapter)
+            # 第一步：让适配器处理原始事件（解密、解析、处理欢迎消息等）
+            # 适配器返回需要 AI 回复的消息事件，或 None（不需要 AI 回复）
+            processed_event = adapter.process_webhook_event(raw_data)
             if not processed_event:
-                logger.debug("Event processing returned None, skipping")
+                logger.debug("Adapter returned None, no AI reply needed")
                 return
 
             # 第二步：解析消息内容
@@ -247,111 +244,6 @@ class AIAssistant:
 
         except Exception as e:
             logger.error(f"Failed to process event: {e}")
-
-    def _handle_feishu_webhook_event(self, event_data: dict, adapter) -> Optional[dict]:
-        """
-        处理飞书 webhook 事件（解密、解析、处理欢迎消息等）
-
-        这个方法在后台线程中执行，可以执行耗时操作（如调用飞书 API 发送欢迎消息）。
-
-        Args:
-            event_data: 原始 webhook 数据
-            adapter: 飞书适配器
-
-        Returns:
-            处理后的事件数据，如果不需要进一步处理则返回 None
-        """
-        import json as json_mod
-
-        try:
-            # 如果配置了加密，先解密
-            if adapter.encrypt_key and "encrypt" in event_data:
-                try:
-                    from Crypto.Cipher import AES
-                    import hashlib
-                    import base64
-
-                    encrypt_str = event_data["encrypt"]
-                    key = hashlib.sha256(adapter.encrypt_key.encode()).digest()
-                    encrypt_bytes = base64.b64decode(encrypt_str)
-                    iv = encrypt_bytes[:16]
-                    ciphertext = encrypt_bytes[16:]
-                    cipher = AES.new(key, AES.MODE_CBC, iv)
-                    decrypted = cipher.decrypt(ciphertext)
-                    pad_len = decrypted[-1]
-                    decrypted = decrypted[:-pad_len]
-                    event_data = json_mod.loads(decrypted.decode("utf-8"))
-                    logger.info(f"Webhook event decrypted successfully")
-                except Exception as e:
-                    logger.error(f"Failed to decrypt webhook event: {e}")
-                    return None
-
-            # v1.0 旧版事件回调格式（私有化飞书可能使用）
-            if event_data.get("type") == "event_callback":
-                logger.info("📨 Received v1.0 event_callback format")
-                event = event_data.get("event", {})
-                msg_type = event.get("msg_type", "")
-                text = event.get("text_without_at_bot", "") or event.get("text", "")
-                chat_id = event.get("open_chat_id", "")
-                message_id = event.get("open_message_id", "")
-                sender_id = event.get("open_id", "")
-
-                if msg_type == "text" and text:
-                    # 转换为 v2.0 兼容格式
-                    return {
-                        "header": {"event_id": event_data.get("uuid", "unknown")},
-                        "event": {
-                            "message": {
-                                "message_id": message_id,
-                                "chat_id": chat_id,
-                                "chat_type": event.get("chat_type", ""),
-                                "message_type": "text",
-                                "content": json_mod.dumps({"text": text})
-                            },
-                            "sender": {
-                                "sender_id": {"open_id": sender_id}
-                            }
-                        }
-                    }
-                return None
-
-            # v2.0 事件格式
-            header = event_data.get("header", {})
-            event_type = header.get("event_type")
-
-            # 处理机器人入群事件（发送欢迎消息）
-            if event_type == "im.chat.member.bot.added_v1":
-                event = event_data.get("event", {})
-                chat_id = event.get("chat_id", "")
-                logger.info(f"🎉 Bot added to chat: {chat_id}")
-
-                if adapter.welcome_message:
-                    logger.info(f"🚀 Sending welcome message to chat_id={chat_id}")
-                    adapter._send_welcome_message(chat_id)
-                return None  # 欢迎消息不需要 AI 回复
-
-            # 处理消息接收事件
-            if event_type == "im.message.receive_v1":
-                event = event_data.get("event", {})
-                message = event.get("message", {})
-                message_type = message.get("message_type", "")
-
-                # 系统消息（如机器人入群通知），发送欢迎消息但不触发 AI
-                if message_type == "system":
-                    chat_id = message.get("chat_id", "")
-                    logger.info(f"🔔 System message in chat_id={chat_id}")
-                    if adapter.welcome_message:
-                        adapter._send_welcome_message(chat_id)
-                    return None
-
-                # 普通文本消息，返回给后续处理
-                return event_data
-
-            return None
-
-        except Exception as e:
-            logger.error(f"Failed to handle feishu webhook event: {e}")
-            return None
 
     def _parse_feishu_event(self, event_data: dict, adapter=None) -> Optional[dict]:
         """

@@ -141,6 +141,100 @@ class FeishuBotAdapter(IMAdapter):
 
         return json.loads(decrypted.decode("utf-8"))
 
+    def process_webhook_event(self, event_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """
+        处理 webhook 事件（后台线程中执行，可以执行耗时操作）
+
+        这个方法在后台线程中执行，可以安全地执行耗时操作（如调用飞书 API）。
+        与 handle_webhook_event() 的区别：
+        - handle_webhook_event(): 在 webhook 线程中执行，必须快速返回（已废弃）
+        - process_webhook_event(): 在后台线程中执行，可以执行耗时操作
+
+        Args:
+            event_data: 原始 webhook 数据
+
+        Returns:
+            处理后的事件数据（需要 AI 回复的消息），如果不需要 AI 回复则返回 None
+        """
+        try:
+            # 如果配置了加密，先解密
+            if self.encrypt_key and "encrypt" in event_data:
+                try:
+                    event_data = self._decrypt(event_data["encrypt"])
+                    logger.info(f"Webhook event decrypted successfully")
+                except Exception as e:
+                    logger.error(f"Failed to decrypt webhook event: {e}")
+                    return None
+
+            # v1.0 旧版事件回调格式（私有化飞书可能使用）
+            if event_data.get("type") == "event_callback":
+                logger.info("📨 Received v1.0 event_callback format")
+                event = event_data.get("event", {})
+                msg_type = event.get("msg_type", "")
+                text = event.get("text_without_at_bot", "") or event.get("text", "")
+                chat_id = event.get("open_chat_id", "")
+                message_id = event.get("open_message_id", "")
+                sender_id = event.get("open_id", "")
+
+                logger.info(f"📩 v1.0 Message: chat_id={chat_id}, msg_type={msg_type}, sender={sender_id}")
+
+                if msg_type == "text" and text:
+                    # 转换为 v2.0 兼容格式，返回给主流程处理
+                    return {
+                        "header": {"event_id": event_data.get("uuid", "unknown")},
+                        "event": {
+                            "message": {
+                                "message_id": message_id,
+                                "chat_id": chat_id,
+                                "chat_type": event.get("chat_type", ""),
+                                "message_type": "text",
+                                "content": json.dumps({"text": text})
+                            },
+                            "sender": {
+                                "sender_id": {"open_id": sender_id}
+                            }
+                        }
+                    }
+                return None
+
+            # v2.0 事件格式
+            header = event_data.get("header", {})
+            event_type = header.get("event_type")
+
+            # 处理机器人入群事件（发送欢迎消息）
+            if event_type == "im.chat.member.bot.added_v1":
+                event = event_data.get("event", {})
+                chat_id = event.get("chat_id", "")
+                logger.info(f"🎉 Bot added to chat: {chat_id}")
+
+                if self.welcome_message:
+                    logger.info(f"🚀 Sending welcome message to chat_id={chat_id}")
+                    self._send_welcome_message(chat_id)
+                return None  # 欢迎消息不需要 AI 回复
+
+            # 处理消息接收事件
+            if event_type == "im.message.receive_v1":
+                event = event_data.get("event", {})
+                message = event.get("message", {})
+                message_type = message.get("message_type", "")
+
+                # 系统消息（如机器人入群通知），发送欢迎消息但不触发 AI
+                if message_type == "system":
+                    chat_id = message.get("chat_id", "")
+                    logger.info(f"🔔 System message in chat_id={chat_id}")
+                    if self.welcome_message:
+                        self._send_welcome_message(chat_id)
+                    return None
+
+                # 普通文本消息，返回给主流程处理
+                return event_data
+
+            return None
+
+        except Exception as e:
+            logger.error(f"Failed to process webhook event: {e}")
+            return None
+
     def handle_webhook_event(self, event_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """
         处理 webhook 事件
