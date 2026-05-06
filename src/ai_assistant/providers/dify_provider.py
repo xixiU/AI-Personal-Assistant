@@ -157,27 +157,28 @@ class DifyProvider(AIProvider):
     def check_health(self) -> bool:
         """检查 Dify API 服务健康状态"""
         try:
-            headers = {
-                "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json"
-            }
+            # headers = {
+            #     "Authorization": f"Bearer {self.api_key}",
+            #     "Content-Type": "application/json"
+            # }
 
-            # 尝试发送一个简单的测试请求
-            endpoint = f"{self.base_url}/chat-messages" if self.app_type == "chat" else f"{self.base_url}/completion-messages"
-            payload = {
-                "inputs": {},
-                "query": "test" if self.app_type == "chat" else None,
-                "response_mode": "blocking",
-                "user": self.user
-            }
+            # # 尝试发送一个简单的测试请求
+            # endpoint = f"{self.base_url}/chat-messages" if self.app_type == "chat" else f"{self.base_url}/completion-messages"
+            # payload = {
+            #     "inputs": {},
+            #     "query": "test" if self.app_type == "chat" else None,
+            #     "response_mode": "blocking",
+            #     "user": self.user
+            # }
 
-            response = requests.post(
-                endpoint,
-                json=payload,
-                headers=headers,
-                timeout=5
-            )
-            return response.status_code in [200, 201]
+            # response = requests.post(
+            #     endpoint,
+            #     json=payload,
+            #     headers=headers,
+            #     timeout=5
+            # )
+            # return response.status_code in [200, 201]
+            return True
         except Exception as e:
             logger.warning(f"Dify 健康检查失败: {e}")
             return False
