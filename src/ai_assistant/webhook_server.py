@@ -91,8 +91,8 @@ class WebhookServer:
                 logger.warning("Empty webhook data received")
                 return jsonify({"error": "Empty data"}), 400
 
-            event_type = data.get('header', {}).get('event_type', data.get('type', 'unknown'))
-            logger.info(f"📨 Webhook received event_type: {event_type}")
+            # 记录接收到的事件（加密数据无法读取详细信息）
+            logger.info(f"📨 Webhook received, data size: {len(str(data))} bytes")
 
             # URL 验证请求需要立即返回 challenge（不放入队列）
             if data.get("type") == "url_verification":

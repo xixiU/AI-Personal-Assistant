@@ -146,9 +146,6 @@ class FeishuBotAdapter(IMAdapter):
         处理 webhook 事件（后台线程中执行，可以执行耗时操作）
 
         这个方法在后台线程中执行，可以安全地执行耗时操作（如调用飞书 API）。
-        与 handle_webhook_event() 的区别：
-        - handle_webhook_event(): 在 webhook 线程中执行，必须快速返回（已废弃）
-        - process_webhook_event(): 在后台线程中执行，可以执行耗时操作
 
         Args:
             event_data: 原始 webhook 数据
@@ -165,6 +162,10 @@ class FeishuBotAdapter(IMAdapter):
                 except Exception as e:
                     logger.error(f"Failed to decrypt webhook event: {e}")
                     return None
+
+            # 记录事件类型（解密后才能读取）
+            event_type = event_data.get('header', {}).get('event_type', event_data.get('type', 'unknown'))
+            logger.info(f"📨 Processing event_type: {event_type}")
 
             # v1.0 旧版事件回调格式（私有化飞书可能使用）
             if event_data.get("type") == "event_callback":
