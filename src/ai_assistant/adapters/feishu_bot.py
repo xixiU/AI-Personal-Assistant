@@ -42,6 +42,9 @@ class FeishuBotAdapter(IMAdapter):
         self.latest_message = None
         self.latest_event = None
 
+        # 欢迎消息配置
+        self.welcome_message = config.get("welcome_message", "")
+
     def get_tenant_access_token(self) -> str:
         """
         获取 tenant_access_token
@@ -148,13 +151,13 @@ class FeishuBotAdapter(IMAdapter):
         Returns:
             响应数据（如果需要）
         """
-        logger.debug(f"Received webhook event: {json.dumps(event_data, ensure_ascii=False)[:200]}")
+        logger.debug(f"Received webhook event: {json.dumps(event_data, ensure_ascii=False)}")
 
         # 如果配置了加密，先解密
         if self.encrypt_key and "encrypt" in event_data:
             try:
                 event_data = self._decrypt(event_data["encrypt"])
-                logger.info("Webhook event decrypted successfully")
+                logger.info(f"Webhook event decrypted successfully:{event_data}")
             except Exception as e:
                 logger.error(f"Failed to decrypt webhook event: {e}")
                 return None
@@ -165,12 +168,46 @@ class FeishuBotAdapter(IMAdapter):
             logger.info(f"URL verification: returning challenge={challenge}")
             return {"challenge": challenge}
 
+        # v1.0 旧版事件回调格式（私有化飞书可能使用）
+        if event_data.get("type") == "event_callback":
+            logger.info("📨 Received v1.0 event_callback format")
+            event = event_data.get("event", {})
+            msg_type = event.get("msg_type", "")
+            text = event.get("text_without_at_bot", "") or event.get("text", "")
+            chat_id = event.get("open_chat_id", "")
+            chat_type = event.get("chat_type", "")
+            sender_id = event.get("open_id", "")
+            message_id = event.get("open_message_id", "")
+
+            logger.info(f"📩 v1.0 Message: chat_id={chat_id}, chat_type={chat_type}, "
+                       f"msg_type={msg_type}, sender={sender_id}")
+            logger.info(f"💬 Message text: {text[:100]}")
+
+            if msg_type == "text" and text:
+                # 转换为 v2.0 兼容的 latest_event 格式，复用后续处理逻辑
+                self.latest_event = {
+                    "header": {"event_id": event_data.get("uuid", "unknown")},
+                    "event": {
+                        "message": {
+                            "message_id": message_id,
+                            "chat_id": chat_id,
+                            "chat_type": chat_type,
+                            "message_type": "text",
+                            "content": json.dumps({"text": text})
+                        },
+                        "sender": {
+                            "sender_id": {"open_id": sender_id}
+                        }
+                    }
+                }
+                logger.info(f"✅ v1.0 message converted, ready for processing")
+            return None
+
         # 事件回调 v2.0 格式
         header = event_data.get("header", {})
         event_type = header.get("event_type")
 
         if event_type == "im.message.receive_v1":
-            self.latest_event = event_data
             event_id = header.get("event_id", "unknown")
             logger.info(f"✅ Message event received: event_id={event_id}")
 
@@ -187,13 +224,54 @@ class FeishuBotAdapter(IMAdapter):
                 logger.info(f"📩 Message details: chat_id={chat_id}, chat_type={chat_type}, "
                            f"message_type={message_type}, sender={sender_id}")
 
+                # 系统消息（如机器人入群通知），不走正常消息处理流程
+                if message_type == "system":
+                    logger.info(f"🔔 System message detected in chat_id={chat_id}, treating as bot-added event")
+                    if self.welcome_message:
+                        logger.info(f"🚀 Sending welcome message to chat_id={chat_id}")
+                        self._send_welcome_message(chat_id)
+                    else:
+                        logger.warning("⚠️ No welcome message configured, skipping")
+                    return None
+
                 if message_type == "text":
                     content_str = message.get("content", "{}")
                     content_data = json.loads(content_str)
                     text = content_data.get("text", "")
                     logger.info(f"💬 Message text: {text[:100]}")
+
+                # 只有非系统消息才设置 latest_event 触发 AI 回复
+                self.latest_event = event_data
+
             except Exception as e:
                 logger.warning(f"Failed to parse message details: {e}")
+
+        elif event_type == "im.chat.member.bot.added_v1":
+            # 机器人被拉入群聊事件
+            event_id = header.get("event_id", "unknown")
+            logger.info(f"🎉 Bot added to chat event received: event_id={event_id}")
+            logger.debug(f"Full event data: {json.dumps(event_data, ensure_ascii=False)}")
+
+            try:
+                event = event_data.get("event", {})
+                chat_id = event.get("chat_id", "")
+                operator_id = event.get("operator_id", {}).get("open_id", "")
+
+                logger.info(f"🤖 Bot added to chat: chat_id={chat_id}, operator={operator_id}")
+                logger.info(f"📝 Welcome message configured: {bool(self.welcome_message)}")
+                if self.welcome_message:
+                    logger.info(f"📄 Welcome message content: {self.welcome_message[:100]}...")
+
+                # 发送欢迎消息
+                if self.welcome_message:
+                    logger.info(f"🚀 Attempting to send welcome message to chat_id={chat_id}")
+                    self._send_welcome_message(chat_id)
+                else:
+                    logger.warning("⚠️ No welcome message configured, skipping")
+
+            except Exception as e:
+                logger.error(f"❌ Failed to handle bot added event: {e}", exc_info=True)
+
         else:
             logger.debug(f"Received event type: {event_type}")
 
@@ -372,3 +450,102 @@ class FeishuBotAdapter(IMAdapter):
         """清除最新事件（处理完成后调用）"""
         self.latest_event = None
         self.latest_message = None
+
+    def _send_welcome_message(self, chat_id: str):
+        """
+        向群聊发送欢迎消息
+
+        Args:
+            chat_id: 群聊 ID
+        """
+        logger.info(f"📤 _send_welcome_message called with chat_id={chat_id}")
+
+        try:
+            logger.info("🔑 Getting tenant access token...")
+            token = self.get_tenant_access_token()
+            logger.info(f"✅ Token obtained: {token[:20]}...")
+
+            url = f"{self.base_url}/open-apis/im/v1/messages"
+            logger.info(f"🌐 API URL: {url}")
+
+            headers = {
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json"
+            }
+
+            # 检查欢迎消息中是否包含 HTTP 链接，如果有则使用富文本发送
+            logger.info("🔨 Building welcome message content...")
+            msg_type, content = self._build_welcome_content(self.welcome_message)
+            logger.info(f"📋 Message type: {msg_type}")
+            logger.debug(f"📄 Message content: {content}")
+
+            params = {"receive_id_type": "chat_id"}
+            payload = {
+                "receive_id": chat_id,
+                "msg_type": msg_type,
+                "content": content
+            }
+
+            logger.info(f"📤 Sending welcome message to chat_id={chat_id}")
+            logger.debug(f"Request payload: {json.dumps(payload, ensure_ascii=False)}")
+
+            response = requests.post(url, headers=headers, json=payload, params=params, timeout=10)
+            logger.info(f"📡 Response status: {response.status_code}")
+            logger.debug(f"Response headers: {response.headers}")
+
+            response.raise_for_status()
+            result = response.json()
+            logger.info(f"📥 Response body: {json.dumps(result, ensure_ascii=False)}")
+
+            if result.get("code") == 0:
+                logger.info(f"✅ Welcome message sent successfully to chat {chat_id}")
+            else:
+                logger.error(f"❌ Failed to send welcome message: code={result.get('code')}, msg={result.get('msg')}")
+
+        except Exception as e:
+            logger.error(f"❌ Error sending welcome message: {e}", exc_info=True)
+
+    def _build_welcome_content(self, text: str) -> tuple:
+        """
+        构建欢迎消息内容，自动检测链接并使用富文本格式
+
+        Args:
+            text: 欢迎消息文本
+
+        Returns:
+            (msg_type, content_json_str) 元组
+        """
+        import re
+        url_pattern = re.compile(r'(https?://\S+)')
+        urls = url_pattern.findall(text)
+
+        if not urls:
+            # 纯文本消息
+            return "text", json.dumps({"text": text})
+
+        # 包含链接，使用富文本（post）格式，链接可点击跳转
+        parts = url_pattern.split(text)
+        content_elements = []
+
+        for part in parts:
+            if not part:
+                continue
+            if url_pattern.match(part):
+                content_elements.append({
+                    "tag": "a",
+                    "text": part,
+                    "href": part
+                })
+            else:
+                content_elements.append({
+                    "tag": "text",
+                    "text": part
+                })
+
+        post_content = {
+            "zh_cn": {
+                "content": [content_elements]
+            }
+        }
+
+        return "post", json.dumps(post_content)
