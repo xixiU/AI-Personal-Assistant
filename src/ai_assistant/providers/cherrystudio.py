@@ -1,5 +1,5 @@
 import requests
-from typing import List
+from typing import List, Optional
 from loguru import logger
 from ai_assistant.core.ai_provider import AIProvider
 from ai_assistant.core.models import Message
@@ -23,7 +23,7 @@ class CherryStudioProvider(AIProvider):
         self.model = model
         self.timeout = timeout
 
-    def send_message(self, messages: List[Message]) -> str:
+    def send_message(self, messages: List[Message], session_id: Optional[str] = None) -> str:
         """发送消息到 CherryStudio API"""
         try:
             # 转换消息格式为 OpenAI 兼容格式

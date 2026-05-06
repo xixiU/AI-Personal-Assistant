@@ -11,7 +11,7 @@ OpenAI 兼容 API Provider
 """
 
 import requests
-from typing import List
+from typing import List, Optional
 from loguru import logger
 from ai_assistant.core.ai_provider import AIProvider
 from ai_assistant.core.models import Message
@@ -37,7 +37,7 @@ class OpenAIProvider(AIProvider):
 
         logger.info(f"OpenAI Provider 初始化: {base_url}, 模型: {model}")
 
-    def send_message(self, messages: List[Message]) -> str:
+    def send_message(self, messages: List[Message], session_id: Optional[str] = None) -> str:
         """发送消息到 OpenAI 兼容 API"""
         try:
             # 转换消息格式为 OpenAI 格式

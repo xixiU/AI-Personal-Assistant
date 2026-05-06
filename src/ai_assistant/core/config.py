@@ -37,6 +37,8 @@ class Config:
     system_poll_interval: float = 5.0
     system_webhook_port: int = 8080  # Webhook 服务器端口
     system_disable_proxy: bool = True  # 禁用系统代理（避免代理干扰内网访问）
+    system_event_queue_size: int = 100  # 事件队列最大长度
+    system_max_concurrent_workers: int = 5  # 最大并发处理数
 
     # 日志
     logging_level: str = "INFO"
@@ -107,6 +109,8 @@ class Config:
             config.system_poll_interval = data["system"].get("poll_interval", config.system_poll_interval)
             config.system_webhook_port = data["system"].get("webhook_port", config.system_webhook_port)
             config.system_disable_proxy = data["system"].get("disable_proxy", config.system_disable_proxy)
+            config.system_event_queue_size = data["system"].get("event_queue_size", config.system_event_queue_size)
+            config.system_max_concurrent_workers = data["system"].get("max_concurrent_workers", config.system_max_concurrent_workers)
 
         # 解析日志
         if "logging" in data:

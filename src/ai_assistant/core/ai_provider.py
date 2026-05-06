@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import List
+from typing import List, Optional
 from ai_assistant.core.models import Message
 
 
@@ -7,12 +7,13 @@ class AIProvider(ABC):
     """AI Provider 抽象基类"""
 
     @abstractmethod
-    def send_message(self, messages: List[Message]) -> str:
+    def send_message(self, messages: List[Message], session_id: Optional[str] = None) -> str:
         """
         发送消息到 AI 模型并获取回复
 
         Args:
             messages: 消息列表（包含上下文）
+            session_id: 会话 ID，用于维持多用户对话上下文
 
         Returns:
             AI 生成的回复文本

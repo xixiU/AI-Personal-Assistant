@@ -36,6 +36,10 @@ system:
   poll_interval: 10.0  # UI 轮询间隔（秒），避免轮询太快影响用户操作
   webhook_port: 8080   # Webhook 服务器端口（飞书机器人模式使用）
   disable_proxy: true  # 禁用系统代理（避免代理干扰内网/私有化部署访问）
+  event_queue_size: 100  # 事件队列最大长度（队列满时新事件将被丢弃）
+  max_concurrent_workers: 5  # 最大并发处理数（同时处理多少个用户请求）
+  event_queue_size: 100  # 事件队列最大长度（队列满时新事件将被丢弃）
+  max_concurrent_workers: 5  # 最大并发处理数（同时处理多少个用户请求）
 
 # IM适配器
 adapters:
@@ -52,6 +56,7 @@ adapters:
       encrypt_key: ""      # 事件加密 Key（可选）
       allowed_chats: []    # 允许的群聊 ID 白名单（为空则允许所有）
       allowed_users: []    # 允许的用户 ID 白名单（为空则允许所有）
+      welcome_message: "👋 大家好！我是 智慧法庭 AI 助手。\n\n我可以帮助大家回答交付运维中的任何问题。直接 @ 我发送消息即可。\n\n📖 使用文档：https://yf2ljykclb.xfchat.iflytek.com/docx/doxrzZR7mOLwIQjqnV5sOmnp4kf"  # 机器人入群欢迎消息（支持 HTTP 链接）
 
   - name: "wechat"
     enabled: false

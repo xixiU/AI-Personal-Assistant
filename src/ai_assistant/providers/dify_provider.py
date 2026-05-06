@@ -1,18 +1,19 @@
 """
 Dify API Provider
 
-支持 Dify 平台的对话型应用和完成型应用
+支持 Dify 平台的对话型应用和完成型应用（线程安全）
 """
 
 import requests
-from typing import List
+import threading
+from typing import List, Dict, Optional
 from loguru import logger
 from ai_assistant.core.ai_provider import AIProvider
 from ai_assistant.core.models import Message
 
 
 class DifyProvider(AIProvider):
-    """Dify API Provider"""
+    """Dify API Provider（线程安全）"""
 
     def __init__(
         self,
@@ -37,12 +38,21 @@ class DifyProvider(AIProvider):
         self.app_type = app_type
         self.user = user
         self.timeout = timeout
-        self.conversation_id = None  # 用于维持对话上下文
+
+        # 按 session_id 存储 conversation_id，支持多用户并发
+        self.conversation_ids: Dict[str, str] = {}
+        self.lock = threading.Lock()
 
         logger.info(f"Dify Provider 初始化: {base_url}, 应用类型: {app_type}")
 
-    def send_message(self, messages: List[Message]) -> str:
-        """发送消息到 Dify API"""
+    def send_message(self, messages: List[Message], session_id: Optional[str] = None) -> str:
+        """
+        发送消息到 Dify API（线程安全）
+
+        Args:
+            messages: 消息列表
+            session_id: 会话 ID，用于维持多用户对话上下文
+        """
         try:
             # 构建请求头
             headers = {
@@ -73,9 +83,14 @@ class DifyProvider(AIProvider):
                     "user": self.user
                 }
 
-                # 如果有对话 ID，添加到请求中以维持上下文
-                if self.conversation_id:
-                    payload["conversation_id"] = self.conversation_id
+                # 获取该会话的 conversation_id（线程安全）
+                conversation_id = None
+                if session_id:
+                    with self.lock:
+                        conversation_id = self.conversation_ids.get(session_id)
+
+                if conversation_id:
+                    payload["conversation_id"] = conversation_id
 
             else:  # completion
                 endpoint = f"{self.base_url}/completion-messages"
@@ -118,9 +133,10 @@ class DifyProvider(AIProvider):
             # 解析响应
             result = response.json()
 
-            # 保存对话 ID（用于对话型应用）
-            if self.app_type == "chat" and "conversation_id" in result:
-                self.conversation_id = result["conversation_id"]
+            # 保存对话 ID（线程安全）
+            if self.app_type == "chat" and "conversation_id" in result and session_id:
+                with self.lock:
+                    self.conversation_ids[session_id] = result["conversation_id"]
 
             # 提取回复内容
             reply = result.get("answer", "")
