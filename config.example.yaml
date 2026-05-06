@@ -14,9 +14,9 @@ context:
 ai:
   primary:
     provider: "openai"  # AI 提供商: "openai" (OpenAI 兼容接口), "dify" (Dify 平台)
-    base_url: "http://localhost:23333"
-    api_key: ""
-    model: "gpt-4-vision-preview"
+    base_url: "http://localhost:11434"  # 示例：Ollama 本地服务
+    api_key: ""  # 本地服务留空，云服务填写 API Key
+    model: "llama2"  # 示例：Ollama 模型名称
 
   # Dify 特定配置（当 provider 为 "dify" 时使用）
   dify:
@@ -38,8 +38,6 @@ system:
   disable_proxy: true  # 禁用系统代理（避免代理干扰内网/私有化部署访问）
   event_queue_size: 100  # 事件队列最大长度（队列满时新事件将被丢弃）
   max_concurrent_workers: 5  # 最大并发处理数（同时处理多少个用户请求）
-  event_queue_size: 100  # 事件队列最大长度（队列满时新事件将被丢弃）
-  max_concurrent_workers: 5  # 最大并发处理数（同时处理多少个用户请求）
 
 # IM适配器
 adapters:
@@ -56,7 +54,7 @@ adapters:
       encrypt_key: ""      # 事件加密 Key（可选）
       allowed_chats: []    # 允许的群聊 ID 白名单（为空则允许所有）
       allowed_users: []    # 允许的用户 ID 白名单（为空则允许所有）
-      welcome_message: "👋 大家好！我是 智慧法庭 AI 助手。\n\n我可以帮助大家回答交付运维中的任何问题。直接 @ 我发送消息即可。\n\n📖 使用文档：https://yf2ljykclb.xfchat.iflytek.com/docx/doxrzZR7mOLwIQjqnV5sOmnp4kf"  # 机器人入群欢迎消息（支持 HTTP 链接）
+      welcome_message: "👋 大家好！我是 AI 助手。\n\n我可以帮助大家回答问题。直接 @ 我发送消息即可。"  # 机器人入群欢迎消息（支持 HTTP 链接）
 
   - name: "wechat"
     enabled: false

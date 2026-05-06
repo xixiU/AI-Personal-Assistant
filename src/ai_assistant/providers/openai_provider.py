@@ -4,7 +4,6 @@ OpenAI 兼容 API Provider
 支持所有 OpenAI 兼容的 API，包括：
 - OpenAI 官方 API
 - Azure OpenAI
-- CherryStudio
 - Ollama
 - LM Studio
 - 其他兼容 OpenAI API 的服务

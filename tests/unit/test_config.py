@@ -11,7 +11,7 @@ def test_load_config_from_file():
         "context": {"max_messages": 5},
         "ai": {
             "primary": {
-                "provider": "cherrystudio",
+                "provider": "openai",
                 "base_url": "http://localhost:8000"
             }
         }
@@ -25,7 +25,7 @@ def test_load_config_from_file():
         config = Config.load(temp_path)
         assert config.trigger_keyword == "【test】"
         assert config.context_max_messages == 5
-        assert config.ai_primary_provider == "cherrystudio"
+        assert config.ai_primary_provider == "openai"
     finally:
         os.unlink(temp_path)
 

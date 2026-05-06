@@ -80,7 +80,7 @@ system:
 ### 前提条件
 
 1. **Python 3.10+** 已安装
-2. **CherryStudio** 或其他 OpenAI 兼容的 AI 服务正在运行
+2. **AI 服务**：Dify 或其他 OpenAI 兼容的 AI 服务正在运行
 
 ### 安装步骤
 
@@ -153,9 +153,9 @@ Assistant is running. Press Ctrl+C to stop.
 
 ## 系统要求
 
-- **操作系统**：Windows 10/11
+- **操作系统**：Windows 10/11 / Linux
 - **Python**：3.10 或更高版本
-- **AI 服务**：CherryStudio 本地服务或 OpenAI 兼容 API
+- **AI 服务**：Dify 平台或 OpenAI 兼容 API
 
 ## 详细配置说明
 
@@ -268,17 +268,15 @@ logging:
 - `base_url`：API 基础 URL
   - OpenAI 官方：`https://api.openai.com`
   - Dify：`https://api.dify.ai/v1` 或自部署地址
-  - CherryStudio：`http://localhost:23333`
   - Ollama：`http://localhost:11434`
   - LM Studio：`http://localhost:1234`
   - 其他兼容服务：根据实际情况填写
 - `api_key`：API 密钥
   - OpenAI 官方：必需，从 OpenAI 官网获取
   - Dify：必需，从 Dify 应用设置中获取
-  - 本地服务（CherryStudio、Ollama、LM Studio）：留空即可
+  - 本地服务（Ollama、LM Studio）：留空即可
 - `model`：使用的模型名称（OpenAI 兼容接口需要）
   - OpenAI：`gpt-4`, `gpt-3.5-turbo` 等
-  - CherryStudio：根据配置的模型填写
   - Ollama：`llama2`, `mistral` 等
   - LM Studio：根据加载的模型填写
   - Dify：不需要，由 Dify 应用配置决定
@@ -298,7 +296,6 @@ logging:
 |------|----------|----------|---------|-------|
 | OpenAI 官方 | openai | https://api.openai.com | 必需 | 必需 |
 | Dify 平台 | dify | https://api.dify.ai/v1 | 必需 | 不需要 |
-| CherryStudio | openai | http://localhost:23333 | 留空 | 必需 |
 | Ollama | openai | http://localhost:11434 | 留空 | 必需 |
 | LM Studio | openai | http://localhost:1234 | 留空 | 必需 |
 | Azure OpenAI | openai | 自定义 | 必需 | 必需 |
@@ -556,7 +553,7 @@ monitored_chats: []  # 留空
 
 ### Q: 提示 "AI service health check failed"
 
-**A:** 检查 CherryStudio 是否正在运行，配置文件中的 `base_url` 是否正确。
+**A:** 检查 AI 服务（Dify/OpenAI 等）是否正在运行，配置文件中的 `base_url` 和 `api_key` 是否正确。
 
 ### Q: 没有检测到触发
 
@@ -587,7 +584,7 @@ trigger:
 
 ### Q: 支持哪些 AI 模型？
 
-**A:** 目前支持 CherryStudio 本地服务和任何 OpenAI 兼容的 API，包括 GPT-4、Claude、本地部署的开源模型等。
+**A:** 支持 Dify 平台和任何 OpenAI 兼容的 API，包括 GPT-4、Claude、Ollama、LM Studio 等本地部署的开源模型。
 
 ### Q: 消息会被上传到云端吗？
 
