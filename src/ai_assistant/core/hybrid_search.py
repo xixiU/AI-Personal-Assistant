@@ -19,14 +19,22 @@ class HybridSearchEngine:
             persist_dir: ChromaDB 持久化目录
         """
         import chromadb
+        from chromadb.utils import embedding_functions
 
         self.persist_dir = Path(persist_dir)
         self.persist_dir.mkdir(parents=True, exist_ok=True)
 
         self._chroma_client = chromadb.PersistentClient(path=str(self.persist_dir))
+
+        # 使用中文 Embedding 模型
+        self._embedding_fn = embedding_functions.SentenceTransformerEmbeddingFunction(
+            model_name="shibing624/text2vec-base-chinese",
+        )
+
         self._collection = self._chroma_client.get_or_create_collection(
             name="feishu_docs",
             metadata={"hnsw:space": "cosine"},
+            embedding_function=self._embedding_fn,
         )
 
         # BM25 索引（内存中）
