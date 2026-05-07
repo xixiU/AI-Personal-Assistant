@@ -40,6 +40,9 @@ class HybridSearchEngine:
         """
         索引文档（向量 + BM25）
 
+        大文档会被分块索引到向量数据库（提升 Embedding 质量），
+        BM25 保持全文索引（精确匹配不受影响）。
+
         Args:
             docs: [{"token": ..., "title": ..., "path": ..., "content": ...}]
         """
@@ -48,7 +51,10 @@ class HybridSearchEngine:
 
         from rank_bm25 import BM25Okapi
 
-        # 向量索引：upsert 到 ChromaDB
+        CHUNK_SIZE = 1000  # 向量索引的分块大小（字符）
+        CHUNK_OVERLAP = 100  # 分块重叠
+
+        # 向量索引：分块 upsert 到 ChromaDB
         ids = []
         documents = []
         metadatas = []
@@ -61,13 +67,21 @@ class HybridSearchEngine:
             path = doc.get("path", "")
             content = doc.get("content", "")
 
-            ids.append(token)
-            # 将标题和内容拼接，增强标题权重
-            documents.append(f"{title}\n{title}\n{path}\n{content}")
-            metadatas.append({"title": title, "path": path})
+            if len(content) <= CHUNK_SIZE * 2:
+                # 短文档：整篇索引
+                ids.append(token)
+                documents.append(f"{title}\n{title}\n{path}\n{content}")
+                metadatas.append({"title": title, "path": path, "token": token})
+            else:
+                # 长文档：分块索引，每块带标题前缀
+                chunks = self._split_text(content, CHUNK_SIZE, CHUNK_OVERLAP)
+                for i, chunk in enumerate(chunks):
+                    chunk_id = f"{token}_chunk{i}"
+                    ids.append(chunk_id)
+                    documents.append(f"{title}\n{path}\n{chunk}")
+                    metadatas.append({"title": title, "path": path, "token": token, "chunk": i})
 
         if ids:
-            # ChromaDB 批量 upsert（每批最多 5000）
             batch_size = 5000
             for i in range(0, len(ids), batch_size):
                 self._collection.upsert(
@@ -76,7 +90,7 @@ class HybridSearchEngine:
                     metadatas=metadatas[i:i+batch_size],
                 )
 
-        # BM25 索引：中文分词后建索引
+        # BM25 索引：全文索引（不分块，精确匹配需要完整内容）
         self._bm25_docs = docs
         self._bm25_corpus = []
         for doc in docs:
@@ -85,7 +99,18 @@ class HybridSearchEngine:
             self._bm25_corpus.append(tokens)
 
         self._bm25 = BM25Okapi(self._bm25_corpus)
-        logger.info(f"文档索引完成: 向量={self._collection.count()}, BM25={len(self._bm25_corpus)}")
+        logger.info(f"文档索引完成: 向量={self._collection.count()}, BM25={len(self._bm25_corpus)}, 原始文档={len(docs)}")
+
+    @staticmethod
+    def _split_text(text: str, chunk_size: int, overlap: int) -> List[str]:
+        """将长文本分块"""
+        chunks = []
+        start = 0
+        while start < len(text):
+            end = start + chunk_size
+            chunks.append(text[start:end])
+            start = end - overlap
+        return chunks
 
     def search(self, query: str, top_k: int = 5) -> List[Dict[str, Any]]:
         """
@@ -122,25 +147,34 @@ class HybridSearchEngine:
         return results
 
     def _vector_search(self, query: str, top_k: int) -> List[Dict[str, Any]]:
-        """向量检索"""
+        """向量检索（分块结果自动去重回溯到原始文档）"""
         try:
             results = self._collection.query(
                 query_texts=[query],
-                n_results=min(top_k, self._collection.count()),
+                n_results=min(top_k * 3, self._collection.count()),  # 多取一些，去重后保证数量
             )
 
-            docs = []
+            # 去重：同一个原始文档的多个 chunk 只保留最高分
+            seen_tokens = {}
             if results and results["ids"] and results["ids"][0]:
                 for i, doc_id in enumerate(results["ids"][0]):
                     distance = results["distances"][0][i] if results.get("distances") else 0
                     metadata = results["metadatas"][0][i] if results.get("metadatas") else {}
-                    docs.append({
-                        "token": doc_id,
-                        "title": metadata.get("title", ""),
-                        "path": metadata.get("path", ""),
-                        "score": 1 - distance,  # cosine distance → similarity
-                    })
-            return docs
+                    # 获取原始文档 token（chunk 的 metadata 中存了原始 token）
+                    original_token = metadata.get("token", doc_id.split("_chunk")[0])
+                    score = 1 - distance
+
+                    if original_token not in seen_tokens or score > seen_tokens[original_token]["score"]:
+                        seen_tokens[original_token] = {
+                            "token": original_token,
+                            "title": metadata.get("title", ""),
+                            "path": metadata.get("path", ""),
+                            "score": score,
+                        }
+
+            # 按分数排序
+            docs = sorted(seen_tokens.values(), key=lambda x: x["score"], reverse=True)
+            return docs[:top_k]
         except Exception as e:
             logger.warning(f"向量检索失败: {e}")
             return []

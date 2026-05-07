@@ -90,16 +90,30 @@ class FeishuDocManager:
             logger.info(f"检索无结果: '{query_text[:50]}'")
             return ""
 
-        # 拼接文档内容
+        # 拼接文档内容，限制总字符数避免 prompt 过大
+        max_total_chars = 50000
         result_parts = ["以下是相关的飞书知识库文档内容：\n"]
+        total_chars = 0
+        included = []
         for doc in results:
+            content = doc["content"]
+            # 单篇文档截断（避免超大文件占满配额）
+            if len(content) > 15000:
+                content = content[:15000] + "\n...（文档内容过长，已截断）"
+            if total_chars + len(content) > max_total_chars:
+                logger.debug(f"总字符数达到上限 {max_total_chars}，跳过: {doc['title']}")
+                continue
             result_parts.append(f"## {doc['title']}")
-            result_parts.append(doc["content"])
+            result_parts.append(content)
             result_parts.append("")
+            total_chars += len(content)
+            included.append(doc['title'])
+
+        if not included:
+            return ""
 
         result = "\n".join(result_parts)
-        titles = [d['title'] for d in results]
-        logger.info(f"文档检索完成: {len(results)} 篇, {len(result)} 字符, 匹配文档: {titles}")
+        logger.info(f"文档检索完成: {len(included)} 篇, {len(result)} 字符, 匹配文档: {included}")
         return result
 
     def _ensure_indexed(self):
