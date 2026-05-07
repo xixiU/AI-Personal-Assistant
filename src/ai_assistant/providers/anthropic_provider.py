@@ -104,7 +104,7 @@ class AnthropicProvider(AIProvider):
                     api_messages.append({"role": msg.role, "content": content_parts})
 
             # 构建 system prompt
-            system_parts = ["你是一个智能助手，帮助用户回答问题。请始终使用中文回答。"]
+            system_parts = ["你是一个智能助手，帮助用户回答问题。你必须始终使用中文回答，包括技术术语的解释也要用中文。即使用户用英文提问，你也要用中文回答。"]
 
             # 如果有文档管理器，获取相关文档
             if self.doc_manager and last_user_text:
