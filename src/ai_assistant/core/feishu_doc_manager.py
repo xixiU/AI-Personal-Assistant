@@ -143,9 +143,12 @@ class FeishuDocManager:
                         with open(fpath, 'r', encoding='utf-8') as f:
                             content = f.read()
                         if content.strip():
+                            import hashlib
                             rel_path = os.path.relpath(fpath, path)
+                            # 使用文件完整路径的 md5 作为唯一 ID
+                            doc_id = "local_" + hashlib.md5(fpath.encode('utf-8')).hexdigest()[:16]
                             docs.append({
-                                "token": f"local_{hash(fpath) & 0xFFFFFFFF:08x}",
+                                "token": doc_id,
                                 "title": f"[{description}] {rel_path}",
                                 "path": f"{description}/{rel_path}",
                                 "content": content,
