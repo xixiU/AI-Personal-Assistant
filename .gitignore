@@ -21,4 +21,4 @@ pywechat2/
 pywechat_inner/
 pyweixin/
 .claude
-uv.lock
+data
