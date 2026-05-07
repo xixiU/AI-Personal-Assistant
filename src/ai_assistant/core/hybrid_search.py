@@ -11,15 +11,65 @@ from loguru import logger
 
 
 class Text2VecEmbeddingFunction:
-    """基于 text2vec 的中文 Embedding 函数，适配 ChromaDB 接口"""
+    """基于 ONNX Runtime 的中文 Embedding 函数，无需 PyTorch"""
 
     def __init__(self):
-        from text2vec import SentenceModel
-        self._model = SentenceModel("shibing624/text2vec-base-chinese")
-        logger.info("text2vec 中文 Embedding 模型已加载")
+        import numpy as np
+        from transformers import AutoTokenizer
+        from huggingface_hub import hf_hub_download
+        import onnxruntime as ort
+
+        self._np = np
+        model_name = "shibing624/text2vec-base-chinese"
+
+        # 下载 tokenizer
+        self._tokenizer = AutoTokenizer.from_pretrained(model_name)
+
+        # 下载 ONNX 模型（如果不存在则从 HuggingFace 下载）
+        try:
+            onnx_path = hf_hub_download(repo_id=model_name, filename="model.onnx")
+        except Exception:
+            # 如果没有官方 ONNX 文件，使用 onnx 目录下的
+            try:
+                onnx_path = hf_hub_download(repo_id=model_name, filename="onnx/model.onnx")
+            except Exception:
+                # 最后尝试 optimum 导出的格式
+                onnx_path = hf_hub_download(repo_id="nickypro/text2vec-base-chinese-onnx", filename="model.onnx")
+
+        self._session = ort.InferenceSession(onnx_path, providers=["CPUExecutionProvider"])
+        logger.info("ONNX 中文 Embedding 模型已加载")
 
     def __call__(self, input: List[str]) -> List[List[float]]:
-        embeddings = self._model.encode(input)
+        # Tokenize
+        encoded = self._tokenizer(
+            input, padding=True, truncation=True, max_length=512, return_tensors="np"
+        )
+
+        # ONNX 推理
+        ort_inputs = {
+            "input_ids": encoded["input_ids"].astype(self._np.int64),
+            "attention_mask": encoded["attention_mask"].astype(self._np.int64),
+            "token_type_ids": encoded.get("token_type_ids", self._np.zeros_like(encoded["input_ids"])).astype(self._np.int64),
+        }
+
+        # 只传模型实际需要的输入
+        model_inputs = {inp.name for inp in self._session.get_inputs()}
+        ort_inputs = {k: v for k, v in ort_inputs.items() if k in model_inputs}
+
+        outputs = self._session.run(None, ort_inputs)
+
+        # Mean pooling
+        token_embeddings = outputs[0]  # (batch_size, seq_len, hidden_size)
+        attention_mask = encoded["attention_mask"]
+        mask_expanded = self._np.expand_dims(attention_mask, axis=-1)  # (batch, seq, 1)
+        sum_embeddings = (token_embeddings * mask_expanded).sum(axis=1)
+        sum_mask = mask_expanded.sum(axis=1).clip(min=1e-9)
+        embeddings = sum_embeddings / sum_mask
+
+        # L2 归一化
+        norms = self._np.linalg.norm(embeddings, axis=1, keepdims=True).clip(min=1e-9)
+        embeddings = embeddings / norms
+
         return embeddings.tolist()
 
 

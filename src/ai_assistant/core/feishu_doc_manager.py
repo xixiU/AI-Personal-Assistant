@@ -21,7 +21,7 @@ class FeishuDocManager:
     """飞书文档管理器，支持本地缓存和递归目录遍历"""
 
     MAX_DEPTH = 10  # 递归深度限制
-    MAX_DOCS_IN_PROMPT = 6  # 注入 prompt 时的最大文档数
+    MAX_DOCS_IN_PROMPT = 10  # 注入 prompt 时的最大文档数
 
     def __init__(
         self,
