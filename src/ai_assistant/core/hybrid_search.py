@@ -10,6 +10,19 @@ from pathlib import Path
 from loguru import logger
 
 
+class Text2VecEmbeddingFunction:
+    """基于 text2vec 的中文 Embedding 函数，适配 ChromaDB 接口"""
+
+    def __init__(self):
+        from text2vec import SentenceModel
+        self._model = SentenceModel("shibing624/text2vec-base-chinese")
+        logger.info("text2vec 中文 Embedding 模型已加载")
+
+    def __call__(self, input: List[str]) -> List[List[float]]:
+        embeddings = self._model.encode(input)
+        return embeddings.tolist()
+
+
 class HybridSearchEngine:
     """混合检索引擎：向量检索 + BM25"""
 
@@ -19,17 +32,14 @@ class HybridSearchEngine:
             persist_dir: ChromaDB 持久化目录
         """
         import chromadb
-        from chromadb.utils import embedding_functions
 
         self.persist_dir = Path(persist_dir)
         self.persist_dir.mkdir(parents=True, exist_ok=True)
 
         self._chroma_client = chromadb.PersistentClient(path=str(self.persist_dir))
 
-        # 使用中文 Embedding 模型
-        self._embedding_fn = embedding_functions.SentenceTransformerEmbeddingFunction(
-            model_name="shibing624/text2vec-base-chinese",
-        )
+        # 使用 text2vec 中文 Embedding（基于 onnxruntime，无需 GPU）
+        self._embedding_fn = Text2VecEmbeddingFunction()
 
         self._collection = self._chroma_client.get_or_create_collection(
             name="feishu_docs",
