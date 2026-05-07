@@ -15,32 +15,20 @@ class Text2VecEmbeddingFunction:
 
     def __init__(self, model_dir: str = None):
         import os
-        import json
         import numpy as np
-        from tokenizers import Tokenizer
+        from transformers import AutoTokenizer
         import onnxruntime as ort
 
         self._np = np
 
-        # 优先使用本地模型目录
         if model_dir is None:
             model_dir = "./models/text2vec-base-chinese"
 
         if not os.path.isdir(model_dir):
             raise FileNotFoundError(f"模型目录不存在: {model_dir}")
 
-        # 加载 tokenizer
-        tokenizer_file = os.path.join(model_dir, "tokenizer.json")
-        if os.path.exists(tokenizer_file):
-            self._tokenizer = Tokenizer.from_file(tokenizer_file)
-        else:
-            # 从 vocab.txt 构建 BertWordPiece tokenizer
-            from tokenizers import BertWordPieceTokenizer
-            vocab_file = os.path.join(model_dir, "vocab.txt")
-            self._tokenizer = BertWordPieceTokenizer(vocab_file)
-
-        self._tokenizer.enable_padding(pad_id=0, pad_token="[PAD]")
-        self._tokenizer.enable_truncation(max_length=512)
+        # 加载 tokenizer（从本地目录）
+        self._tokenizer = AutoTokenizer.from_pretrained(model_dir, local_files_only=True)
 
         # 加载 ONNX 模型
         onnx_path = os.path.join(model_dir, "model.onnx")
@@ -52,25 +40,22 @@ class Text2VecEmbeddingFunction:
         logger.info(f"ONNX 中文 Embedding 模型已加载: {model_dir}")
 
     def __call__(self, input: List[str]) -> List[List[float]]:
-        # Tokenize
-        encoded_batch = self._tokenizer.encode_batch(input)
+        encoded = self._tokenizer(
+            input, padding=True, truncation=True, max_length=512, return_tensors="np"
+        )
 
-        input_ids = self._np.array([e.ids for e in encoded_batch], dtype=self._np.int64)
-        attention_mask = self._np.array([e.attention_mask for e in encoded_batch], dtype=self._np.int64)
-        token_type_ids = self._np.array([e.type_ids for e in encoded_batch], dtype=self._np.int64)
-
-        # ONNX 推理
         ort_inputs = {
-            "input_ids": input_ids,
-            "attention_mask": attention_mask,
-            "token_type_ids": token_type_ids,
+            "input_ids": encoded["input_ids"].astype(self._np.int64),
+            "attention_mask": encoded["attention_mask"].astype(self._np.int64),
+            "token_type_ids": encoded.get("token_type_ids", self._np.zeros_like(encoded["input_ids"])).astype(self._np.int64),
         }
         ort_inputs = {k: v for k, v in ort_inputs.items() if k in self._model_inputs}
 
         outputs = self._session.run(None, ort_inputs)
 
         # Mean pooling
-        token_embeddings = outputs[0]  # (batch_size, seq_len, hidden_size)
+        token_embeddings = outputs[0]
+        attention_mask = encoded["attention_mask"]
         mask_expanded = self._np.expand_dims(attention_mask, axis=-1)
         sum_embeddings = (token_embeddings * mask_expanded).sum(axis=1)
         sum_mask = mask_expanded.sum(axis=1).clip(min=1e-9)
