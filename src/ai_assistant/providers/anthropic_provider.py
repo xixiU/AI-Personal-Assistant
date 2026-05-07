@@ -23,7 +23,7 @@ class AnthropicProvider(AIProvider):
         base_url: str = None,
         timeout: int = 90,
         doc_manager=None,
-        local_docs: list = None,
+        local_docs: list = None,  # 保留参数兼容性，但不再使用
     ):
         """
         Args:
@@ -32,12 +32,11 @@ class AnthropicProvider(AIProvider):
             base_url: API 基础 URL（可选，用于代理或兼容服务）
             timeout: 请求超时时间（秒）
             doc_manager: 飞书文档管理器实例（可选）
-            local_docs: 本地离线文档配置列表
+            local_docs: 已废弃，本地文档现在由文档管理器统一管理
         """
         self.model = model
         self.timeout = timeout
         self.doc_manager = doc_manager
-        self.local_docs = local_docs or []
 
         # 初始化 Anthropic 客户端
         client_kwargs = {"api_key": api_key, "timeout": timeout}
@@ -106,7 +105,7 @@ class AnthropicProvider(AIProvider):
             # 构建 system prompt
             system_parts = ["你是一个智能助手，帮助用户回答问题。你必须始终使用中文回答，包括技术术语的解释也要用中文。即使用户用英文提问，你也要用中文回答。"]
 
-            # 如果有文档管理器，获取相关文档
+            # 如果有文档管理器，获取相关文档（已包含在线文档 + 本地文档）
             if self.doc_manager and last_user_text:
                 try:
                     doc_content = self.doc_manager.get_documents_by_query(last_user_text)
@@ -114,12 +113,6 @@ class AnthropicProvider(AIProvider):
                         system_parts.append(doc_content)
                 except Exception as e:
                     logger.warning(f"文档获取失败，降级到无文档模式: {e}")
-
-            # 加载匹配的本地离线文档
-            if self.local_docs and last_user_text:
-                local_content = self._load_local_docs(last_user_text)
-                if local_content:
-                    system_parts.append(local_content)
 
             if len(system_parts) > 1:
                 system_parts.append("请基于以上文档内容回答用户的问题。如果文档中没有相关信息，请如实告知。")

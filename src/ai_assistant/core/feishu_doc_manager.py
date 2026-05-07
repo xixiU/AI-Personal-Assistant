@@ -30,6 +30,7 @@ class FeishuDocManager:
         cache_ttl: int = 86400,
         sources: List[str] = None,
         keyword_extractor=None,
+        local_docs: List[Dict[str, str]] = None,
     ):
         """
         Args:
@@ -37,13 +38,15 @@ class FeishuDocManager:
             cache_dir: 本地缓存目录
             cache_ttl: 缓存有效期（秒），默认 1 天
             sources: 知识库/云空间 token 列表，限定搜索范围
-            keyword_extractor: 关键词提取函数（可选），接收查询文本，返回关键词列表
+            keyword_extractor: 关键词提取函数（可选）
+            local_docs: 本地离线文档配置列表 [{path, description, keywords}]
         """
         self.mcp_client = SimpleMCPClient(mcp_url)
         self.cache_dir = Path(cache_dir)
         self.cache_ttl = cache_ttl
         self.sources = sources or []
         self._keyword_extractor = keyword_extractor
+        self._local_docs_config = local_docs or []
         self._lock = threading.Lock()
         self._indexed = False
 
@@ -100,19 +103,59 @@ class FeishuDocManager:
         return result
 
     def _ensure_indexed(self):
-        """确保文档已加载到缓存并建立检索索引"""
+        """确保文档已加载到缓存并建立检索索引（含在线文档 + 本地文档）"""
         if self._indexed:
             return
 
         all_docs = []
+
+        # 在线飞书文档
         for source_token in self.sources:
             docs = self._get_docs_for_source(source_token)
             all_docs.extend(docs)
 
+        # 本地离线文档
+        local_docs = self._load_all_local_docs()
+        all_docs.extend(local_docs)
+
         if all_docs:
             self._search_engine.index_documents(all_docs)
             self._indexed = True
-            logger.info(f"检索索引已建立: {len(all_docs)} 篇文档")
+            logger.info(f"检索索引已建立: {len(all_docs)} 篇文档（在线 {len(all_docs) - len(local_docs)}, 本地 {len(local_docs)}）")
+
+    def _load_all_local_docs(self) -> List[Dict[str, str]]:
+        """加载所有本地离线文档"""
+        import os
+        docs = []
+        for doc_config in self._local_docs_config:
+            path = doc_config.get("path", "")
+            description = doc_config.get("description", "")
+
+            if not path or not os.path.isdir(path):
+                continue
+
+            for root, dirs, files in os.walk(path):
+                for fname in sorted(files):
+                    if not fname.endswith(('.txt', '.md', '.sql', '.json', '.yaml', '.yml', '.csv')):
+                        continue
+                    fpath = os.path.join(root, fname)
+                    try:
+                        with open(fpath, 'r', encoding='utf-8') as f:
+                            content = f.read()
+                        if content.strip():
+                            rel_path = os.path.relpath(fpath, path)
+                            docs.append({
+                                "token": f"local_{hash(fpath) & 0xFFFFFFFF:08x}",
+                                "title": f"[{description}] {rel_path}",
+                                "path": f"{description}/{rel_path}",
+                                "content": content,
+                            })
+                    except Exception as e:
+                        logger.warning(f"读取本地文档失败: {fpath}, error={e}")
+
+        if docs:
+            logger.info(f"加载本地文档: {len(docs)} 篇")
+        return docs
 
     def _get_docs_for_source(self, source_token: str) -> List[Dict[str, str]]:
         """获取某个 source token 下的所有文档"""

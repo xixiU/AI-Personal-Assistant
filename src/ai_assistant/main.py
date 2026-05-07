@@ -104,6 +104,7 @@ class AIAssistant:
                 cache_ttl=self.config.feishu_docs_cache_ttl,
                 sources=self.config.feishu_docs_sources,
                 keyword_extractor=keyword_extractor,
+                local_docs=self.config.local_docs,
             )
             # 回填 doc_manager 到 Provider
             self.ai_provider.doc_manager = doc_manager
