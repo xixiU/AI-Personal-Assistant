@@ -45,7 +45,7 @@ class AnthropicProvider(AIProvider):
             logger.info(f"使用自定义 base_url: {base_url}")
 
         self.client = anthropic.Anthropic(**client_kwargs)
-        logger.info(f"Anthropic Provider 初始化: model={model}, base_url={base_url or '默认'}, docs={'启用' if doc_manager else '禁用'}, local_docs={len(self.local_docs)}个")
+        logger.info(f"Anthropic Provider 初始化: model={model}, base_url={base_url or '默认'}, docs={'启用' if doc_manager else '禁用'}")
 
     def extract_keywords(self, query_text: str) -> List[str]:
         """
