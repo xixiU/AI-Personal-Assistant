@@ -58,7 +58,21 @@ class AIAssistant:
 
         # 初始化 AI Provider
         provider_type = self.config.ai_primary_provider
-        if provider_type == "dify":
+
+        # 先初始化 Provider（文档管理器需要用到 Provider 的关键词提取能力）
+        doc_manager = None
+
+        if provider_type == "anthropic":
+            from ai_assistant.providers.anthropic_provider import AnthropicProvider
+            self.ai_provider = AnthropicProvider(
+                api_key=self.config.ai_primary_api_key,
+                model=self.config.ai_primary_model,
+                base_url=self.config.ai_primary_base_url if self.config.ai_primary_base_url else None,
+                timeout=self.config.ai_timeout,
+                doc_manager=None,  # 稍后设置
+                local_docs=self.config.local_docs,
+            )
+        elif provider_type == "dify":
             from ai_assistant.providers.dify_provider import DifyProvider
             self.ai_provider = DifyProvider(
                 base_url=self.config.ai_primary_base_url,
@@ -75,6 +89,25 @@ class AIAssistant:
                 model=self.config.ai_primary_model,
                 timeout=self.config.ai_timeout
             )
+
+        # 初始化飞书文档管理器（如果启用）
+        if self.config.feishu_docs_enabled:
+            from ai_assistant.core.feishu_doc_manager import FeishuDocManager
+            # 如果是 Anthropic Provider，使用 Claude 辅助提取关键词
+            keyword_extractor = None
+            if provider_type == "anthropic" and hasattr(self.ai_provider, 'extract_keywords'):
+                keyword_extractor = self.ai_provider.extract_keywords
+
+            doc_manager = FeishuDocManager(
+                mcp_url=self.config.feishu_docs_mcp_url,
+                cache_dir=self.config.feishu_docs_cache_dir,
+                cache_ttl=self.config.feishu_docs_cache_ttl,
+                sources=self.config.feishu_docs_sources,
+                keyword_extractor=keyword_extractor,
+            )
+            # 回填 doc_manager 到 Provider
+            self.ai_provider.doc_manager = doc_manager
+            logger.info("飞书文档管理器已启用")
 
         self.reply_executor = ReplyExecutor(
             mode=self.config.reply_mode,
@@ -134,6 +167,8 @@ class AIAssistant:
             self.webhook_server = WebhookServer(host="0.0.0.0", port=self.config.system_webhook_port)
             self.webhook_server.set_feishu_adapter(feishu_adapter)
             self.webhook_server.set_event_queue(self.event_queue)
+            # 注入 AI 组件用于 Web 聊天接口
+            self.webhook_server.set_ai_components(self.ai_provider, self.context_manager)
 
             # 在后台线程启动服务器
             server_thread = threading.Thread(

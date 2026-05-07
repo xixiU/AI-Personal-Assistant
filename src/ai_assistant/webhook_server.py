@@ -52,6 +52,17 @@ class WebhookServer:
             methods=["GET"]
         )
 
+        self.app.add_url_rule(
+            "/api/chat",
+            "chat",
+            self.handle_chat,
+            methods=["POST"]
+        )
+
+        # 用于存储 AI Provider 和 Context Manager 的引用
+        self.ai_provider = None
+        self.context_manager = None
+
     def serve_index(self):
         """返回首页"""
         try:
@@ -72,6 +83,17 @@ class WebhookServer:
             event_queue: 事件队列，webhook 收到事件后放入队列
         """
         self.event_queue = event_queue
+
+    def set_ai_components(self, ai_provider, context_manager):
+        """
+        设置 AI 组件（用于 Web 聊天接口）
+
+        Args:
+            ai_provider: AI Provider 实例
+            context_manager: Context Manager 实例
+        """
+        self.ai_provider = ai_provider
+        self.context_manager = context_manager
 
     def handle_feishu_webhook(self):
         """
@@ -128,6 +150,83 @@ class WebhookServer:
             "queue_size": self.event_queue.qsize() if self.event_queue else 0
         }
         return jsonify(status), 200
+
+    def handle_chat(self):
+        """
+        处理 Web 聊天请求
+
+        请求格式：
+        {
+            "message": "用户消息",
+            "session_id": "会话ID（可选）",
+            "image": {              // 可选
+                "data": "base64...",
+                "media_type": "image/png"
+            }
+        }
+
+        响应格式：
+        {
+            "reply": "AI 回复",
+            "session_id": "会话ID"
+        }
+        """
+        from ai_assistant.core.models import Message, Content
+        from datetime import datetime
+
+        try:
+            data = request.get_json()
+            if not data:
+                return jsonify({"error": "Empty request"}), 400
+
+            user_text = data.get("message", "")
+            session_id = data.get("session_id", "web-default")
+            image_data = data.get("image")  # {"data": base64, "media_type": "image/png"}
+
+            if not user_text and not image_data:
+                return jsonify({"error": "Missing message or image"}), 400
+
+            if not self.ai_provider or not self.context_manager:
+                return jsonify({"error": "AI components not initialized"}), 500
+
+            # 构建用户消息内容
+            contents = []
+            if image_data:
+                contents.append(Content(type="image", data=image_data))
+            if user_text:
+                contents.append(Content(type="text", data=user_text))
+
+            user_message = Message(
+                role="user",
+                content=contents,
+                timestamp=datetime.now()
+            )
+
+            # 添加到上下文
+            self.context_manager.add_message(session_id, user_message)
+
+            # 获取上下文消息
+            context_messages = self.context_manager.get_context(session_id)
+
+            # 调用 AI 生成回复
+            reply = self.ai_provider.send_message(context_messages, session_id=session_id)
+
+            # 将 AI 回复添加到上下文
+            ai_message = Message(
+                role="assistant",
+                content=[Content(type="text", data=reply)],
+                timestamp=datetime.now()
+            )
+            self.context_manager.add_message(session_id, ai_message)
+
+            return jsonify({
+                "reply": reply,
+                "session_id": session_id
+            }), 200
+
+        except Exception as e:
+            logger.error(f"Error handling chat request: {e}")
+            return jsonify({"error": str(e)}), 500
 
     def run(self, debug: bool = False):
         """启动服务器"""

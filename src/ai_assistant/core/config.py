@@ -29,6 +29,16 @@ class Config:
     ai_dify_app_type: str = "chat"  # "chat" 或 "completion"
     ai_dify_user: str = "default-user"
 
+    # 飞书文档配置
+    feishu_docs_enabled: bool = False
+    feishu_docs_mcp_url: str = "http://localhost:50070/sse"
+    feishu_docs_cache_dir: str = "./data/feishu_docs"
+    feishu_docs_cache_ttl: int = 86400  # 缓存有效期（秒），默认1天
+    feishu_docs_sources: List[str] = None  # 知识库/云空间 token 列表
+
+    # 本地离线文档配置
+    local_docs: List[Dict[str, str]] = None  # [{path, description, keywords}]
+
     # 回复执行
     reply_mode: str = "clipboard"
     reply_notification: bool = True
@@ -98,6 +108,19 @@ class Config:
                 dify = data["ai"]["dify"]
                 config.ai_dify_app_type = dify.get("app_type", config.ai_dify_app_type)
                 config.ai_dify_user = dify.get("user", config.ai_dify_user)
+
+        # 解析飞书文档配置
+        if "feishu_docs" in data:
+            docs = data["feishu_docs"]
+            config.feishu_docs_enabled = docs.get("enabled", config.feishu_docs_enabled)
+            config.feishu_docs_mcp_url = docs.get("mcp_url", config.feishu_docs_mcp_url)
+            config.feishu_docs_cache_dir = docs.get("cache_dir", config.feishu_docs_cache_dir)
+            config.feishu_docs_cache_ttl = docs.get("cache_ttl", config.feishu_docs_cache_ttl)
+            config.feishu_docs_sources = docs.get("sources", config.feishu_docs_sources)
+
+        # 解析本地离线文档配置
+        if "local_docs" in data:
+            config.local_docs = data["local_docs"]
 
         # 解析回复执行
         if "reply" in data:

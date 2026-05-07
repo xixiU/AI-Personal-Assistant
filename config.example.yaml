@@ -13,17 +13,24 @@ context:
 # AI配置
 ai:
   primary:
-    provider: "openai"  # AI 提供商: "openai" (OpenAI 兼容接口), "dify" (Dify 平台)
+    provider: "openai"  # AI 提供商: "openai" (OpenAI 兼容接口), "dify" (Dify 平台), "anthropic" (Anthropic Claude)
     base_url: "http://localhost:11434"  # 示例：Ollama 本地服务
     api_key: ""  # 本地服务留空，云服务填写 API Key
     model: "llama2"  # 示例：Ollama 模型名称
+
+  # Anthropic 配置示例（当 provider 为 "anthropic" 时使用）
+  # primary:
+  #   provider: "anthropic"
+  #   base_url: ""  # 可选，留空使用官方 API；填写则使用代理或兼容服务
+  #   api_key: "sk-ant-xxx"  # Anthropic API Key
+  #   model: "claude-sonnet-4-20250514"
 
   # Dify 特定配置（当 provider 为 "dify" 时使用）
   dify:
     app_type: "chat"  # 应用类型: "chat" (对话型) 或 "completion" (完成型)
     user: "default-user"  # 用户标识，用于区分不同用户
 
-  timeout: 30
+  timeout: 90  # 超时时间（秒），文档获取可能较慢，建议设置较大值
   multimodal: false
 
 # 回复执行
@@ -68,6 +75,27 @@ adapters:
     monitored_chats: []    # 监控的聊天列表（好友名或群名）
                            # 示例: ["张三", "工作群", "项目讨论组"]
                            # 留空则监听所有聊天（4.1 版本需手动复制消息）
+
+# 飞书文档配置
+feishu_docs:
+  enabled: false  # 默认关闭
+  mcp_url: "http://localhost:50070/sse"  # MCP 服务器地址
+  cache_dir: "./data/feishu_docs"        # 本地缓存目录
+  cache_ttl: 86400                       # 缓存有效期（秒），1天=86400
+  sources:                               # 知识库/云空间 token 列表（限定搜索范围）
+    # - "C5RNwyHtWikA4LkBN9trd4u8zFd"   # 知识库示例（从 URL 中提取 token）
+    # - "HRfkf7lPDlQbqqdswOsrKPsezAd"   # 云空间文件夹示例
+
+# 本地离线文档配置
+# 用于补充不在飞书知识库中的文档（如 SQL 配置、产品手册等）
+# 当用户查询匹配 keywords 时，会读取对应目录下的文档注入给大模型
+local_docs:
+  # - path: "./data/local_docs/sql"       # 文档目录路径
+  #   description: "数据库SQL配置"         # 描述（会展示给大模型）
+  #   keywords: ["sql", "数据库", "建表", "表结构", "DDL"]  # 触发关键词
+  # - path: "./data/local_docs/manual"
+  #   description: "产品使用手册"
+  #   keywords: ["手册", "使用说明", "操作指南", "功能介绍"]
 
 # 日志
 logging:
