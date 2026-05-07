@@ -37,7 +37,7 @@ class Config:
     feishu_docs_sources: List[str] = None  # 知识库/云空间 token 列表
 
     # 本地离线文档配置
-    local_docs: List[Dict[str, str]] = None  # [{path, description, keywords}]
+    local_docs: List[Dict[str, str]] = None  # [{path, description}]
 
     # 回复执行
     reply_mode: str = "clipboard"

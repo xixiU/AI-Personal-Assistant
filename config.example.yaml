@@ -88,14 +88,12 @@ feishu_docs:
 
 # 本地离线文档配置
 # 用于补充不在飞书知识库中的文档（如 SQL 配置、产品手册等）
-# 当用户查询匹配 keywords 时，会读取对应目录下的文档注入给大模型
+# 文档会自动纳入混合检索引擎，根据用户问题语义匹配相关内容
 local_docs:
   # - path: "./data/local_docs/sql"       # 文档目录路径
-  #   description: "数据库SQL配置"         # 描述（会展示给大模型）
-  #   keywords: ["sql", "数据库", "建表", "表结构", "DDL"]  # 触发关键词
+  #   description: "数据库SQL配置"         # 描述（会作为文档标题前缀）
   # - path: "./data/local_docs/manual"
   #   description: "产品使用手册"
-  #   keywords: ["手册", "使用说明", "操作指南", "功能介绍"]
 
 # 日志
 logging:
