@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Optional
 from loguru import logger
 
 from ai_assistant.core.simple_mcp_client import SimpleMCPClient
+from ai_assistant.core.hybrid_search import HybridSearchEngine
 
 
 class FeishuDocManager:
@@ -44,6 +45,11 @@ class FeishuDocManager:
         self.sources = sources or []
         self._keyword_extractor = keyword_extractor
         self._lock = threading.Lock()
+        self._indexed = False
+
+        # 混合检索引擎
+        vector_db_dir = str(Path(cache_dir) / "_vector_db")
+        self._search_engine = HybridSearchEngine(persist_dir=vector_db_dir)
 
         # 确保缓存目录存在
         self.cache_dir.mkdir(parents=True, exist_ok=True)
@@ -57,10 +63,9 @@ class FeishuDocManager:
         根据查询文本获取相关文档内容
 
         工作流程：
-        1. 遍历配置的 sources（知识库/云空间 token）
-        2. 对每个 source 检查缓存，未命中则通过 MCP 递归获取
-        3. 在获取到的文档中按关键词过滤相关内容
-        4. 拼接后返回
+        1. 确保文档已缓存且已建索引
+        2. 使用混合检索（向量 + BM25）找到相关文档
+        3. 拼接后返回
 
         Args:
             query_text: 用户查询文本
@@ -72,36 +77,42 @@ class FeishuDocManager:
             logger.warning("未配置飞书文档 sources，跳过文档检索")
             return ""
 
-        keywords = self._extract_keywords(query_text)
-        all_docs = []
+        # 确保文档已加载并建立索引
+        self._ensure_indexed()
 
-        for source_token in self.sources:
-            docs = self._get_docs_for_source(source_token)
-            all_docs.extend(docs)
+        # 使用混合检索
+        results = self._search_engine.search(query_text, top_k=self.MAX_DOCS_IN_PROMPT)
 
-        if not all_docs:
-            return ""
-
-        # 如果有关键词，过滤相关文档
-        if keywords:
-            relevant_docs = self._filter_relevant_docs(all_docs, keywords)
-        else:
-            relevant_docs = all_docs
-
-        if not relevant_docs:
-            logger.info(f"关键词 {keywords} 未匹配到文档")
+        if not results:
+            logger.info(f"检索无结果: '{query_text[:50]}'")
             return ""
 
         # 拼接文档内容
         result_parts = ["以下是相关的飞书知识库文档内容：\n"]
-        for doc in relevant_docs[:self.MAX_DOCS_IN_PROMPT]:
+        for doc in results:
             result_parts.append(f"## {doc['title']}")
             result_parts.append(doc["content"])
             result_parts.append("")
 
         result = "\n".join(result_parts)
-        logger.info(f"文档检索完成: {len(relevant_docs)} 篇相关文档, {len(result)} 字符")
+        titles = [d['title'] for d in results]
+        logger.info(f"文档检索完成: {len(results)} 篇, {len(result)} 字符, 匹配文档: {titles}")
         return result
+
+    def _ensure_indexed(self):
+        """确保文档已加载到缓存并建立检索索引"""
+        if self._indexed:
+            return
+
+        all_docs = []
+        for source_token in self.sources:
+            docs = self._get_docs_for_source(source_token)
+            all_docs.extend(docs)
+
+        if all_docs:
+            self._search_engine.index_documents(all_docs)
+            self._indexed = True
+            logger.info(f"检索索引已建立: {len(all_docs)} 篇文档")
 
     def _get_docs_for_source(self, source_token: str) -> List[Dict[str, str]]:
         """获取某个 source token 下的所有文档"""
@@ -111,6 +122,7 @@ class FeishuDocManager:
             # 缓存存在，检查是否需要更新
             updated_docs = self._check_and_update(source_token, cached)
             if updated_docs is not None:
+                self._indexed = False  # 文档有更新，需要重建索引
                 return updated_docs
             # 缓存有效，直接返回
             return cached
@@ -121,6 +133,7 @@ class FeishuDocManager:
             docs = self._fetch_tree(source_token)
             if docs:
                 self._save_to_cache(source_token, docs)
+                self._indexed = False  # 新文档，需要重建索引
             return docs
         except Exception as e:
             logger.error(f"MCP 获取文档失败: source={source_token}, error={e}")
