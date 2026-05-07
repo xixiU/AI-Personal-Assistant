@@ -132,16 +132,21 @@ class HybridSearchEngine:
         # 2. BM25 检索
         bm25_results = self._bm25_search(query, top_k=top_k * 2)
 
-        # 3. RRF 融合
-        fused = self._rrf_fusion(vector_results, bm25_results, k=60)
+        # 3. RRF 融合（BM25 权重更高，因为中文场景下关键词匹配更可靠）
+        fused = self._rrf_fusion(vector_results, bm25_results, k=60, bm25_weight=1.5)
 
         # 取 top_k
         results = fused[:top_k]
 
+        # 详细日志
+        vector_titles = [f"{d['title']}({d['score']:.3f})" for d in vector_results[:5]]
+        bm25_titles = [f"{d['title']}({d['score']:.1f})" for d in bm25_results[:5]]
+        result_titles = [d['title'] for d in results]
         logger.info(
-            f"混合检索: query='{query[:50]}', "
-            f"向量命中={len(vector_results)}, BM25命中={len(bm25_results)}, "
-            f"融合结果={len(results)}"
+            f"混合检索: query='{query[:50]}'\n"
+            f"  向量Top5: {vector_titles}\n"
+            f"  BM25Top5: {bm25_titles}\n"
+            f"  融合结果: {result_titles}"
         )
 
         return results
@@ -211,25 +216,27 @@ class HybridSearchEngine:
         vector_results: List[Dict[str, Any]],
         bm25_results: List[Dict[str, Any]],
         k: int = 60,
+        bm25_weight: float = 1.5,
     ) -> List[Dict[str, Any]]:
         """
         RRF（Reciprocal Rank Fusion）融合两个检索结果
 
-        RRF(d) = Σ 1/(k + rank_i(d))，k 是常数（通常 60）
+        RRF(d) = Σ weight_i/(k + rank_i(d))，k 是常数（通常 60）
+        bm25_weight > 1.0 时 BM25 结果权重更高（中文场景推荐）
         """
         scores: Dict[str, float] = {}
         doc_map: Dict[str, Dict[str, Any]] = {}
 
-        # 向量检索排名
+        # 向量检索排名（权重 1.0）
         for rank, doc in enumerate(vector_results):
             token = doc["token"]
             scores[token] = scores.get(token, 0) + 1.0 / (k + rank + 1)
             doc_map[token] = doc
 
-        # BM25 检索排名
+        # BM25 检索排名（权重更高）
         for rank, doc in enumerate(bm25_results):
             token = doc["token"]
-            scores[token] = scores.get(token, 0) + 1.0 / (k + rank + 1)
+            scores[token] = scores.get(token, 0) + bm25_weight / (k + rank + 1)
             if token not in doc_map:
                 doc_map[token] = doc
 
