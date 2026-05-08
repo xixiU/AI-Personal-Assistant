@@ -212,6 +212,7 @@ class HybridSearchEngine:
 
         # 3. RRF 融合（BM25 权重更高，因为中文场景下关键词匹配更可靠）
         fused = self._rrf_fusion(vector_results, bm25_results, k=60, bm25_weight=1.5)
+        fused_titles = [d['title'] for d in fused]
 
         # 4. 标题相关性过滤：用 Embedding 计算 query 与标题的相似度，过滤明显不相关的
         fused = self._filter_by_title_relevance(query, fused, threshold=0.35)
@@ -227,7 +228,8 @@ class HybridSearchEngine:
             f"混合检索: query='{query[:50]}'\n"
             f"  向量Top5: {vector_titles}\n"
             f"  BM25Top5: {bm25_titles}\n"
-            f"  融合结果: {result_titles}"
+            f"  融合({len(fused_titles)}篇): {fused_titles}\n"
+            f"  过滤后({len(results)}篇): {result_titles}"
         )
 
         return results
@@ -362,15 +364,19 @@ class HybridSearchEngine:
         similarities = (query_emb @ title_embs.T).flatten()
 
         filtered = []
+        removed = []
         for i, doc in enumerate(docs):
             if similarities[i] >= threshold:
                 filtered.append(doc)
             else:
-                logger.debug(f"标题相关性过滤: '{doc['title']}' (相似度={similarities[i]:.3f} < {threshold})")
+                removed.append(f"{doc['title']}({similarities[i]:.3f})")
 
         # 至少保留 3 个结果，避免过度过滤
         if len(filtered) < 3 and len(docs) >= 3:
             filtered = docs[:3]
+
+        if removed:
+            logger.info(f"标题相关性过滤: 移除{len(removed)}篇(阈值{threshold}): {removed}")
 
         return filtered
 
