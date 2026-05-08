@@ -62,21 +62,33 @@ class Text2VecEmbeddingFunction:
         return self._encode(input)
 
     def _encode(self, texts: List[str]) -> List[List[float]]:
-        # 再次确保输入是字符串列表
+        # 确保输入是字符串列表
         if not texts or not isinstance(texts, list):
             logger.warning(f"_encode 收到非法输入: {type(texts)}, {texts}")
             texts = [str(texts)] if texts else [""]
 
         texts = [str(t) if not isinstance(t, str) else t for t in texts]
 
-        encoded = self._tokenizer(
-            texts, padding=True, truncation=True, max_length=512, return_tensors="np"
-        )
+        try:
+            # 不使用 return_tensors，直接返回 Python 对象
+            encoded = self._tokenizer(
+                texts, padding=True, truncation=True, max_length=512
+            )
+
+            # 手动转换为 numpy 数组
+            import numpy as np
+            input_ids = np.array(encoded["input_ids"], dtype=np.int64)
+            attention_mask = np.array(encoded["attention_mask"], dtype=np.int64)
+            token_type_ids = np.array(encoded.get("token_type_ids", [[0] * len(input_ids[0])] * len(input_ids)), dtype=np.int64)
+
+        except Exception as e:
+            logger.error(f"Tokenizer 调用失败: {e}, 输入类型={type(texts)}, 输入前2项={texts[:2] if len(texts) > 0 else texts}")
+            raise
 
         ort_inputs = {
-            "input_ids": encoded["input_ids"].astype(self._np.int64),
-            "attention_mask": encoded["attention_mask"].astype(self._np.int64),
-            "token_type_ids": encoded.get("token_type_ids", self._np.zeros_like(encoded["input_ids"])).astype(self._np.int64),
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+            "token_type_ids": token_type_ids,
         }
         ort_inputs = {k: v for k, v in ort_inputs.items() if k in self._model_inputs}
 
