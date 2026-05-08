@@ -46,12 +46,17 @@ class Text2VecEmbeddingFunction:
     def __call__(self, input: List[str]) -> List[List[float]]:
         return self._encode(input)
 
-    def embed_query(self, query: str) -> List[float]:
-        """ChromaDB 查询时调用此方法"""
+    def embed_query(self, query: str = None, **kwargs) -> List[float]:
+        """ChromaDB 查询时调用（兼容不同版本的参数传递方式）"""
+        # 兼容 embed_query(query) 和 embed_query(input=query)
+        if query is None:
+            query = kwargs.get('input', kwargs.get('text', ''))
         return self._encode([query])[0]
 
-    def embed_documents(self, documents: List[str]) -> List[List[float]]:
-        """ChromaDB 索引时调用此方法"""
+    def embed_documents(self, documents: List[str] = None, **kwargs) -> List[List[float]]:
+        """ChromaDB 索引时调用（兼容不同版本的参数传递方式）"""
+        if documents is None:
+            documents = kwargs.get('texts', kwargs.get('inputs', []))
         return self._encode(documents)
 
     def _encode(self, texts: List[str]) -> List[List[float]]:
