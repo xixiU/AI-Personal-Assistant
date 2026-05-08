@@ -48,9 +48,15 @@ class Text2VecEmbeddingFunction:
 
     def embed_query(self, input: str) -> List[float]:
         """ChromaDB 查询时调用（参数名必须是 input）"""
-        # 确保 input 是字符串
+        # ChromaDB 可能传入字符串或列表
+        if isinstance(input, list):
+            # 如果是列表，返回 List[List[float]]
+            return self._encode(input)
+
+        # 如果是字符串，确保是真正的字符串
         if not isinstance(input, str):
             input = str(input)
+
         result = self._encode([input])
         # result 是 List[List[float]]，取第一个元素得到 List[float]
         if isinstance(result, list) and len(result) > 0:
