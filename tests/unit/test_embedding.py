@@ -148,9 +148,25 @@ def test_chromadb_integration():
             return result
 
         def embed_query(self, input):
-            print(f"  [调用] embed_query(input='{input[:50]}...')")
+            print(f"  [调用] embed_query:")
+            print(f"    input 类型: {type(input)}")
+            print(f"    input 值: {repr(input)[:100]}")
+            print(f"    isinstance(input, list): {isinstance(input, list)}")
+            print(f"    isinstance(input, str): {isinstance(input, str)}")
+
             result = super().embed_query(input)
-            print(f"  [返回] embed_query -> {type(result)}, len={len(result) if isinstance(result, list) else 'N/A'}")
+
+            print(f"  [返回] embed_query:")
+            print(f"    result 类型: {type(result)}")
+            if isinstance(result, list):
+                print(f"    result 长度: {len(result)}")
+                if len(result) > 0:
+                    print(f"    第一个元素类型: {type(result[0])}")
+                    if isinstance(result[0], list):
+                        print(f"    这是二维列表 List[List[float]]")
+                    else:
+                        print(f"    这是一维列表 List[float]")
+
             return result
 
         def embed_documents(self, input):
