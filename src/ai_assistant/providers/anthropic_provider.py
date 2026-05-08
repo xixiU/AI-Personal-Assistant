@@ -127,7 +127,12 @@ class AnthropicProvider(AIProvider):
                 messages=api_messages,
             )
 
-            reply = response.content[0].text
+            reply = ""
+            for block in response.content:
+                if hasattr(block, 'text'):
+                    reply += block.text
+            if not reply:
+                reply = "抱歉，未能生成有效回复。"
             logger.info(f"Claude 回复已接收: {len(reply)} 字符, tokens={response.usage.input_tokens}+{response.usage.output_tokens}")
             return reply
 
