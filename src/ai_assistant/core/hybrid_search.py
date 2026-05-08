@@ -39,6 +39,10 @@ class Text2VecEmbeddingFunction:
         self._model_inputs = {inp.name for inp in self._session.get_inputs()}
         logger.info(f"ONNX 中文 Embedding 模型已加载: {model_dir}")
 
+    def name(self) -> str:
+        """ChromaDB 要求的方法，返回 Embedding 函数名称"""
+        return "text2vec-base-chinese"
+
     def __call__(self, input: List[str]) -> List[List[float]]:
         encoded = self._tokenizer(
             input, padding=True, truncation=True, max_length=512, return_tensors="np"
