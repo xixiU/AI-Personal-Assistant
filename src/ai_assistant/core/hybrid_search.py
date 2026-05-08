@@ -44,8 +44,19 @@ class Text2VecEmbeddingFunction:
         return "text2vec-base-chinese"
 
     def __call__(self, input: List[str]) -> List[List[float]]:
+        return self._encode(input)
+
+    def embed_query(self, query: str) -> List[float]:
+        """ChromaDB 查询时调用此方法"""
+        return self._encode([query])[0]
+
+    def embed_documents(self, documents: List[str]) -> List[List[float]]:
+        """ChromaDB 索引时调用此方法"""
+        return self._encode(documents)
+
+    def _encode(self, texts: List[str]) -> List[List[float]]:
         encoded = self._tokenizer(
-            input, padding=True, truncation=True, max_length=512, return_tensors="np"
+            texts, padding=True, truncation=True, max_length=512, return_tensors="np"
         )
 
         ort_inputs = {
@@ -202,6 +213,9 @@ class HybridSearchEngine:
         # 3. RRF 融合（BM25 权重更高，因为中文场景下关键词匹配更可靠）
         fused = self._rrf_fusion(vector_results, bm25_results, k=60, bm25_weight=1.5)
 
+        # 4. 标题相关性过滤：用 Embedding 计算 query 与标题的相似度，过滤明显不相关的
+        fused = self._filter_by_title_relevance(query, fused, threshold=0.35)
+
         # 取 top_k
         results = fused[:top_k]
 
@@ -325,6 +339,40 @@ class HybridSearchEngine:
                 })
 
         return results
+
+    def _filter_by_title_relevance(
+        self, query: str, docs: List[Dict[str, Any]], threshold: float = 0.35
+    ) -> List[Dict[str, Any]]:
+        """
+        用 Embedding 相似度过滤标题与 query 明显不相关的文档
+
+        threshold: 相似度低于此值的文档被过滤（0.35 比较宽松，只过滤明显不相关的）
+        """
+        import numpy as np
+
+        if not docs:
+            return docs
+
+        titles = [doc["title"] for doc in docs]
+        # 计算 query 和所有标题的 Embedding
+        query_emb = np.array(self._embedding_fn._encode([query]))  # (1, dim)
+        title_embs = np.array(self._embedding_fn._encode(titles))  # (n, dim)
+
+        # 余弦相似度（已 L2 归一化，直接点积）
+        similarities = (query_emb @ title_embs.T).flatten()
+
+        filtered = []
+        for i, doc in enumerate(docs):
+            if similarities[i] >= threshold:
+                filtered.append(doc)
+            else:
+                logger.debug(f"标题相关性过滤: '{doc['title']}' (相似度={similarities[i]:.3f} < {threshold})")
+
+        # 至少保留 3 个结果，避免过度过滤
+        if len(filtered) < 3 and len(docs) >= 3:
+            filtered = docs[:3]
+
+        return filtered
 
     def remove_documents(self, tokens: List[str]) -> None:
         """删除文档"""
