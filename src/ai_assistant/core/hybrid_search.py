@@ -46,13 +46,13 @@ class Text2VecEmbeddingFunction:
     def __call__(self, input: List[str]) -> List[List[float]]:
         return self._encode(input)
 
-    def embed_query(self, query: str) -> List[float]:
-        """ChromaDB 查询时调用此方法"""
-        return self._encode([query])[0]
+    def embed_query(self, input: str) -> List[float]:
+        """ChromaDB 查询时调用（参数名必须是 input）"""
+        return self._encode([input])[0]
 
-    def embed_documents(self, documents: List[str]) -> List[List[float]]:
-        """ChromaDB 索引时调用此方法"""
-        return self._encode(documents)
+    def embed_documents(self, input: List[str]) -> List[List[float]]:
+        """ChromaDB 索引时调用（参数名必须是 input）"""
+        return self._encode(input)
 
     def _encode(self, texts: List[str]) -> List[List[float]]:
         encoded = self._tokenizer(
