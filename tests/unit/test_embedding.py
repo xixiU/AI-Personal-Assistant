@@ -94,7 +94,17 @@ def test_embedding_function():
     for query in test_queries:
         try:
             result = emb_fn.embed_query(query)
-            print(f"  ✓ embed_query('{query}'): shape={len(result)}")
+            print(f"  测试 embed_query('{query}'):")
+            print(f"    返回类型: {type(result)}")
+            print(f"    是否是列表: {isinstance(result, list)}")
+            if isinstance(result, list):
+                print(f"    列表长度: {len(result)}")
+                if len(result) > 0:
+                    print(f"    第一个元素类型: {type(result[0])}")
+                    print(f"    前5个元素: {result[:5]}")
+                print(f"  ✓ embed_query('{query}'): shape={len(result)}")
+            else:
+                print(f"    ✗ 返回值不是列表: {result}")
         except Exception as e:
             print(f"  ✗ embed_query('{query}') 失败: {e}")
             import traceback
