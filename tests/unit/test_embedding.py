@@ -139,8 +139,28 @@ def test_chromadb_integration():
     temp_dir = tempfile.mkdtemp(prefix="test_chroma_")
     print(f"临时目录: {temp_dir}")
 
+    # 创建一个包装类来监控方法调用
+    class DebugEmbeddingFunction(Text2VecEmbeddingFunction):
+        def __call__(self, input):
+            print(f"  [调用] __call__(input={input[:50] if isinstance(input, list) and input else input}...)")
+            result = super().__call__(input)
+            print(f"  [返回] __call__ -> {type(result)}, len={len(result)}")
+            return result
+
+        def embed_query(self, input):
+            print(f"  [调用] embed_query(input='{input[:50]}...')")
+            result = super().embed_query(input)
+            print(f"  [返回] embed_query -> {type(result)}, len={len(result) if isinstance(result, list) else 'N/A'}")
+            return result
+
+        def embed_documents(self, input):
+            print(f"  [调用] embed_documents(input={input[:2] if isinstance(input, list) else input}...)")
+            result = super().embed_documents(input)
+            print(f"  [返回] embed_documents -> {type(result)}, len={len(result)}")
+            return result
+
     try:
-        emb_fn = Text2VecEmbeddingFunction()
+        emb_fn = DebugEmbeddingFunction()
         client = chromadb.PersistentClient(path=temp_dir)
 
         print("创建 collection...")
@@ -166,7 +186,7 @@ def test_chromadb_integration():
             traceback.print_exc()
 
         # 测试查询
-        print("\n测试查询...")
+        print("\n测试查询（观察 ChromaDB 调用了哪个方法）...")
         try:
             results = collection.query(
                 query_texts=["第一篇"],
