@@ -48,13 +48,27 @@ class Text2VecEmbeddingFunction:
 
     def embed_query(self, input: str) -> List[float]:
         """ChromaDB 查询时调用（参数名必须是 input）"""
+        # 确保 input 是字符串
+        if not isinstance(input, str):
+            input = str(input)
         return self._encode([input])[0]
 
     def embed_documents(self, input: List[str]) -> List[List[float]]:
         """ChromaDB 索引时调用（参数名必须是 input）"""
+        # 确保所有元素都是字符串
+        if not isinstance(input, list):
+            input = [input]
+        input = [str(item) if not isinstance(item, str) else item for item in input]
         return self._encode(input)
 
     def _encode(self, texts: List[str]) -> List[List[float]]:
+        # 再次确保输入是字符串列表
+        if not texts or not isinstance(texts, list):
+            logger.warning(f"_encode 收到非法输入: {type(texts)}, {texts}")
+            texts = [str(texts)] if texts else [""]
+
+        texts = [str(t) if not isinstance(t, str) else t for t in texts]
+
         encoded = self._tokenizer(
             texts, padding=True, truncation=True, max_length=512, return_tensors="np"
         )
