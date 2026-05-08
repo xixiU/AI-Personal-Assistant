@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """
 测试 Embedding 函数，定位 tokenizer 和 ChromaDB 调用问题
+
+运行方式：
+    uv run tests/unit/test_embedding.py
 """
 
 import sys

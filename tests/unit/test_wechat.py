@@ -4,6 +4,9 @@
 微信适配器测试脚本
 
 用于测试微信适配器的基本功能
+
+运行方式：
+    uv run tests/unit/test_wechat.py
 """
 
 import sys
