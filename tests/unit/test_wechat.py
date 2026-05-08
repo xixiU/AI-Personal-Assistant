@@ -9,8 +9,8 @@
 import sys
 from pathlib import Path
 
-# 添加 src 目录到路径
-sys.path.insert(0, str(Path(__file__).parent / "src"))
+# 添加 src 目录到路径（从 tests/unit/ 向上两级到项目根目录）
+sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
 
 from loguru import logger
 
