@@ -61,7 +61,7 @@ adapters:
       encrypt_key: ""      # 事件加密 Key（可选）
       allowed_chats: []    # 允许的群聊 ID 白名单（为空则允许所有）
       allowed_users: []    # 允许的用户 ID 白名单（为空则允许所有）
-      welcome_message: "👋 大家好！我是 智慧法庭 AI 助手。\n\n我可以帮助大家回答交付运维中的任何问题。直接 @ 我发送消息即可。\n\n📖 使用文档：https://yf2ljykclb.xfchat.iflytek.com/docx/doxrzZR7mOLwIQjqnV5sOmnp4kf"  # 机器人入群欢迎消息（支持 HTTP 链接）
+      welcome_message: "👋 大家好！我是 AI 助手，很高兴加入这个群聊。\n\n我可以帮助大家回答问题、查询文档等。直接 @ 我或私法发送消息即可。\n\n📖 使用文档：https://example.com/docs/ai-assistant"  # 机器人入群欢迎消息（支持 HTTP 链接） 直接回复群聊消息不艾特需要开启【获取群组中所有消息】事件
 
   - name: "wechat"
     enabled: false
