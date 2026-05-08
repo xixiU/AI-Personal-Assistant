@@ -240,7 +240,7 @@ class AIAssistant:
             text = parsed["text"]
             message_id = parsed["message_id"]
 
-            logger.info(f"Processing message for session: {session_id}")
+            logger.info(f"Processing message for session: {session_id},text:{text}")
 
             # 构建用户消息
             user_message = Message(

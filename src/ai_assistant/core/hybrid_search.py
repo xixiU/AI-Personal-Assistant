@@ -51,7 +51,13 @@ class Text2VecEmbeddingFunction:
         # 确保 input 是字符串
         if not isinstance(input, str):
             input = str(input)
-        return self._encode([input])[0]
+        result = self._encode([input])
+        # result 是 List[List[float]]，取第一个元素得到 List[float]
+        if isinstance(result, list) and len(result) > 0:
+            return result[0]
+        else:
+            logger.error(f"embed_query 返回类型错误: {type(result)}, {result}")
+            return [0.0] * 768  # 返回零向量作为降级
 
     def embed_documents(self, input: List[str]) -> List[List[float]]:
         """ChromaDB 索引时调用（参数名必须是 input）"""
