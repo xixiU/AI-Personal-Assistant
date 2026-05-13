@@ -86,6 +86,11 @@ feishu_docs:
     # - "C5RNwyHtWikA4LkBN9trd4u8zFd"   # 知识库示例（从 URL 中提取 token）
     # - "HRfkf7lPDlQbqqdswOsrKPsezAd"   # 云空间文件夹示例
 
+# 向量数据库配置（用于文档检索）
+vector_db:
+  use_gpu: false  # 是否使用 GPU 加速 Embedding 生成（需要安装 onnxruntime-gpu）
+  gpu_id: 0       # 使用哪张 GPU（0 或 1）
+
 # 本地离线文档配置
 # 用于补充不在飞书知识库中的文档（如 SQL 配置、产品手册等）
 # 文档会自动纳入混合检索引擎，根据用户问题语义匹配相关内容

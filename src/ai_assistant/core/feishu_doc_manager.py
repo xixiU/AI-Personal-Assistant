@@ -31,6 +31,8 @@ class FeishuDocManager:
         sources: List[str] = None,
         keyword_extractor=None,
         local_docs: List[Dict[str, str]] = None,
+        use_gpu: bool = False,
+        gpu_id: int = 0,
     ):
         """
         Args:
@@ -40,6 +42,8 @@ class FeishuDocManager:
             sources: 知识库/云空间 token 列表，限定搜索范围
             keyword_extractor: 关键词提取函数（可选）
             local_docs: 本地离线文档配置列表 [{path, description, keywords}]
+            use_gpu: 是否使用 GPU 加速 Embedding 生成
+            gpu_id: 使用哪张 GPU（0 或 1）
         """
         self.mcp_client = SimpleMCPClient(mcp_url)
         self.cache_dir = Path(cache_dir)
@@ -50,15 +54,19 @@ class FeishuDocManager:
         self._lock = threading.Lock()
         self._indexed = False
 
-        # 混合检索引擎
+        # 混合检索引擎（支持 GPU 加速）
         vector_db_dir = str(Path(cache_dir) / "_vector_db")
-        self._search_engine = HybridSearchEngine(persist_dir=vector_db_dir)
+        self._search_engine = HybridSearchEngine(
+            persist_dir=vector_db_dir,
+            use_gpu=use_gpu,
+            gpu_id=gpu_id
+        )
 
         # 确保缓存目录存在
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         logger.info(
             f"飞书文档管理器初始化: cache_dir={cache_dir}, ttl={cache_ttl}s, "
-            f"sources={self.sources}"
+            f"sources={self.sources}, use_gpu={use_gpu}, gpu_id={gpu_id}"
         )
 
     def get_documents_by_query(self, query_text: str) -> str:

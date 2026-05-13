@@ -11,9 +11,15 @@ from loguru import logger
 
 
 class Text2VecEmbeddingFunction:
-    """基于 ONNX Runtime 的中文 Embedding 函数，无需 PyTorch"""
+    """基于 ONNX Runtime 的中文 Embedding 函数，支持 GPU 加速"""
 
-    def __init__(self, model_dir: str = None):
+    def __init__(self, model_dir: str = None, use_gpu: bool = False, gpu_id: int = 0):
+        """
+        Args:
+            model_dir: 模型目录路径
+            use_gpu: 是否使用 GPU 加速
+            gpu_id: 使用哪张 GPU（0 或 1）
+        """
         import os
         import numpy as np
         from transformers import AutoTokenizer
@@ -35,9 +41,59 @@ class Text2VecEmbeddingFunction:
         if not os.path.exists(onnx_path):
             raise FileNotFoundError(f"ONNX 模型文件不存在: {onnx_path}")
 
-        self._session = ort.InferenceSession(onnx_path, providers=["CPUExecutionProvider"])
+        # 配置 ONNX Runtime 会话选项
+        sess_options = ort.SessionOptions()
+
+        # 选择执行提供者（GPU 或 CPU）
+        providers = []
+        if use_gpu:
+            try:
+                # 检查 CUDA 是否可用
+                available_providers = ort.get_available_providers()
+                if 'CUDAExecutionProvider' in available_providers:
+                    # 配置 CUDA 提供者
+                    cuda_provider_options = {
+                        'device_id': gpu_id,  # 指定使用哪张 GPU
+                        'arena_extend_strategy': 'kNextPowerOfTwo',
+                        'gpu_mem_limit': 2 * 1024 * 1024 * 1024,  # 限制 GPU 内存使用 2GB
+                        'cudnn_conv_algo_search': 'EXHAUSTIVE',
+                        'do_copy_in_default_stream': True,
+                    }
+                    providers = [
+                        ('CUDAExecutionProvider', cuda_provider_options),
+                        'CPUExecutionProvider'  # fallback
+                    ]
+                    logger.info(f"使用 GPU {gpu_id} 加速 Embedding 生成")
+                else:
+                    logger.warning("CUDA 不可用，fallback 到 CPU")
+                    providers = ['CPUExecutionProvider']
+                    # CPU 模式下限制线程数
+                    sess_options.intra_op_num_threads = 2
+                    sess_options.inter_op_num_threads = 2
+                    sess_options.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
+            except Exception as e:
+                logger.warning(f"GPU 初始化失败: {e}，fallback 到 CPU")
+                providers = ['CPUExecutionProvider']
+                sess_options.intra_op_num_threads = 2
+                sess_options.inter_op_num_threads = 2
+                sess_options.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
+        else:
+            # CPU 模式，限制线程数避免 CPU 爆炸
+            providers = ['CPUExecutionProvider']
+            sess_options.intra_op_num_threads = 2
+            sess_options.inter_op_num_threads = 2
+            sess_options.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
+
+        self._session = ort.InferenceSession(
+            onnx_path,
+            sess_options=sess_options,
+            providers=providers
+        )
         self._model_inputs = {inp.name for inp in self._session.get_inputs()}
-        logger.info(f"ONNX 中文 Embedding 模型已加载: {model_dir}")
+
+        # 输出实际使用的提供者
+        actual_providers = self._session.get_providers()
+        logger.info(f"ONNX Embedding 模型已加载: {model_dir}, providers={actual_providers}")
 
     def name(self) -> str:
         """ChromaDB 要求的方法，返回 Embedding 函数名称"""
@@ -124,20 +180,39 @@ class Text2VecEmbeddingFunction:
 class HybridSearchEngine:
     """混合检索引擎：向量检索 + BM25"""
 
-    def __init__(self, persist_dir: str = "./data/vector_db"):
+    def __init__(self, persist_dir: str = "./data/vector_db", use_gpu: bool = False, gpu_id: int = 0):
         """
         Args:
             persist_dir: ChromaDB 持久化目录
+            use_gpu: 是否使用 GPU 加速 Embedding 生成
+            gpu_id: 使用哪张 GPU（0 或 1）
         """
         import chromadb
+        import os
+
+        # 限制 ChromaDB 和 ONNX 的线程数，避免 CPU 爆炸（仅 CPU 模式需要）
+        if not use_gpu:
+            os.environ['OMP_NUM_THREADS'] = '4'
+            os.environ['MKL_NUM_THREADS'] = '4'
+            os.environ['OPENBLAS_NUM_THREADS'] = '4'
+            os.environ['VECLIB_MAXIMUM_THREADS'] = '4'
+            os.environ['NUMEXPR_NUM_THREADS'] = '4'
 
         self.persist_dir = Path(persist_dir)
         self.persist_dir.mkdir(parents=True, exist_ok=True)
 
-        self._chroma_client = chromadb.PersistentClient(path=str(self.persist_dir))
+        # 配置 ChromaDB 使用更少的线程
+        settings = chromadb.Settings(
+            anonymized_telemetry=False,
+            allow_reset=True,
+        )
+        self._chroma_client = chromadb.PersistentClient(
+            path=str(self.persist_dir),
+            settings=settings
+        )
 
-        # 使用 text2vec 中文 Embedding（基于 onnxruntime，无需 GPU）
-        self._embedding_fn = Text2VecEmbeddingFunction()
+        # 使用 text2vec 中文 Embedding（支持 GPU 加速）
+        self._embedding_fn = Text2VecEmbeddingFunction(use_gpu=use_gpu, gpu_id=gpu_id)
 
         self._collection = self._chroma_client.get_or_create_collection(
             name="feishu_docs",

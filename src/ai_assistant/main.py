@@ -13,6 +13,8 @@ import os
 import queue
 import threading
 import requests
+import signal
+import atexit
 from typing import Optional
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -49,6 +51,15 @@ class AIAssistant:
 
         # 初始化日志
         self._setup_logging()
+
+        # 记录进程 PID（用于排查进程退出问题）
+        logger.info(f"Process PID: {os.getpid()}")
+
+        # 注册信号处理器
+        self._setup_signal_handlers()
+
+        # 注册退出清理函数
+        atexit.register(self._cleanup_on_exit)
 
         # 初始化各个模块
         self.context_manager = ContextManager(
@@ -105,6 +116,8 @@ class AIAssistant:
                 sources=self.config.feishu_docs_sources,
                 keyword_extractor=keyword_extractor,
                 local_docs=self.config.local_docs,
+                use_gpu=getattr(self.config, 'vector_db_use_gpu', False),
+                gpu_id=getattr(self.config, 'vector_db_gpu_id', 0),
             )
             # 回填 doc_manager 到 Provider
             self.ai_provider.doc_manager = doc_manager
@@ -133,6 +146,9 @@ class AIAssistant:
             f"AI Assistant initialized (queue_size={self.config.system_event_queue_size}, "
             f"max_workers={self.config.system_max_concurrent_workers})"
         )
+        logger.info(f"Adapters loaded: {[type(a).__name__ for a in self.adapters]}")
+        logger.info(f"AI Provider: {type(self.ai_provider).__name__}")
+        logger.info(f"Webhook server: {'enabled' if self.webhook_server else 'disabled'}")
 
     def _init_adapters(self):
         """初始化 IM 适配器"""
@@ -171,17 +187,17 @@ class AIAssistant:
             # 注入 AI 组件用于 Web 聊天接口
             self.webhook_server.set_ai_components(self.ai_provider, self.context_manager)
 
-            # 在后台线程启动服务器
+            # 在后台线程启动服务器（使用生产级服务器）
             server_thread = threading.Thread(
-                target=self.webhook_server.run,
-                kwargs={"debug": False},
-                daemon=True
+                target=self.webhook_server.run_production,
+                daemon=False,  # 改为非 daemon 线程，避免主线程退出时服务器被强制终止
+                name="webhook-server"
             )
             server_thread.start()
-            logger.info(f"Webhook server started on port {self.config.system_webhook_port}")
+            logger.info(f"Webhook server started on port {self.config.system_webhook_port} (production mode)")
 
         except Exception as e:
-            logger.error(f"Failed to start webhook server: {e}")
+            logger.error(f"Failed to start webhook server: {e}", exc_info=True)
 
     def _start_event_consumer(self):
         """启动事件消费线程，从队列取事件提交到线程池并发处理"""
@@ -211,7 +227,13 @@ class AIAssistant:
             event_data: 事件数据，包含 trace_id, adapter, raw_data
         """
         import time as time_mod
+        import psutil
+        import os
+
         start_time = time_mod.time()
+        process = psutil.Process(os.getpid())
+        start_cpu = process.cpu_percent()
+        start_mem = process.memory_info().rss / 1024 / 1024  # MB
 
         trace_id = event_data["trace_id"]
         adapter = event_data["adapter"]
@@ -221,7 +243,8 @@ class AIAssistant:
         set_trace_id(trace_id)
 
         try:
-            logger.info(f"⏱️  Event processing started (queue_size={self.event_queue.qsize()})")
+            logger.info(f"⏱️  Event processing started (queue_size={self.event_queue.qsize()}, "
+                       f"cpu={start_cpu:.1f}%, mem={start_mem:.1f}MB)")
 
             # 第一步：让适配器处理原始事件（解密、解析、处理欢迎消息等）
             # 适配器返回需要 AI 回复的消息事件，或 None（不需要 AI 回复）
@@ -275,11 +298,19 @@ class AIAssistant:
             self._send_feishu_reply(adapter, message_id, session_id, reply)
             send_duration = time_mod.time() - send_start
 
+            # 计算资源使用
+            end_cpu = process.cpu_percent()
+            end_mem = process.memory_info().rss / 1024 / 1024  # MB
+            cpu_delta = end_cpu - start_cpu
+            mem_delta = end_mem - start_mem
+
             total_duration = time_mod.time() - start_time
-            logger.info(f"⏱️  Total processing time: {total_duration:.2f}s (AI: {ai_duration:.2f}s, Send: {send_duration:.2f}s)")
+            logger.info(f"⏱️  Total processing time: {total_duration:.2f}s "
+                       f"(AI: {ai_duration:.2f}s, Send: {send_duration:.2f}s), "
+                       f"cpu_delta={cpu_delta:.1f}%, mem_delta={mem_delta:.1f}MB")
 
         except Exception as e:
-            logger.error(f"Failed to process event: {e}")
+            logger.error(f"Failed to process event: {e}", exc_info=True)
 
     def _parse_feishu_event(self, event_data: dict, adapter=None) -> Optional[dict]:
         """
@@ -437,6 +468,28 @@ class AIAssistant:
 
         logger.info("Logging configured")
 
+    def _setup_signal_handlers(self):
+        """设置信号处理器（捕获 SIGTERM/SIGINT/SIGHUP）"""
+        def signal_handler(signum, frame):
+            sig_name = signal.Signals(signum).name
+            logger.warning(f"Received signal {sig_name} ({signum}), shutting down gracefully...")
+            self.stop()
+            sys.exit(0)
+
+        # 注册信号处理器
+        signal.signal(signal.SIGTERM, signal_handler)  # kill 命令默认信号
+        signal.signal(signal.SIGINT, signal_handler)   # Ctrl+C
+        if hasattr(signal, 'SIGHUP'):  # Windows 没有 SIGHUP
+            signal.signal(signal.SIGHUP, signal_handler)  # 终端断开
+
+        logger.info("Signal handlers registered (SIGTERM, SIGINT, SIGHUP)")
+
+    def _cleanup_on_exit(self):
+        """进程退出时的清理函数（通过 atexit 注册）"""
+        logger.warning("Process exiting, running cleanup...")
+        if hasattr(self, 'running') and self.running:
+            self.stop()
+
     def start(self):
         """启动 AI 助手"""
         logger.info("=" * 60)
@@ -463,7 +516,18 @@ class AIAssistant:
 
     def stop(self):
         """停止 AI 助手"""
+        logger.info("Stopping AI Assistant...")
         self.running = False
+
+        # 停止 webhook 服务器
+        if self.webhook_server:
+            try:
+                self.webhook_server.shutdown()
+                logger.info("Webhook server stopped")
+            except Exception as e:
+                logger.error(f"Error stopping webhook server: {e}")
+
+        # 关闭线程池
         self.executor.shutdown(wait=True)
         logger.info("AI Assistant stopped")
 
@@ -472,6 +536,8 @@ class AIAssistant:
         from ai_assistant.adapters.feishu_bot import FeishuBotAdapter
 
         poll_interval = self.config.system_poll_interval
+        heartbeat_interval = 60  # 每 60 秒输出一次心跳日志
+        last_heartbeat = time.time()
 
         # 过滤出需要轮询的适配器（排除 webhook 驱动的飞书适配器）
         polling_adapters = [a for a in self.adapters if not isinstance(a, FeishuBotAdapter)]
@@ -492,11 +558,18 @@ class AIAssistant:
                 # 定期清理过期会话
                 self.context_manager.cleanup_expired_sessions()
 
+                # 心跳日志（证明进程还活着）
+                now = time.time()
+                if now - last_heartbeat >= heartbeat_interval:
+                    logger.info(f"💓 Heartbeat: process alive, queue_size={self.event_queue.qsize()}, "
+                               f"active_sessions={len(self.context_manager.sessions)}")
+                    last_heartbeat = now
+
                 # 等待下一次轮询
                 time.sleep(poll_interval)
 
             except Exception as e:
-                logger.error(f"Error in main loop: {e}")
+                logger.error(f"Error in main loop: {e}", exc_info=True)
                 time.sleep(poll_interval)
 
     def _handle_trigger(self, adapter):
@@ -562,18 +635,38 @@ class AIAssistant:
 
 def main():
     """主入口函数"""
-    config_path = "config.yaml"
+    # 设置全局异常处理器（捕获所有未处理的异常）
+    def global_exception_handler(exc_type, exc_value, exc_traceback):
+        if issubclass(exc_type, KeyboardInterrupt):
+            sys.__excepthook__(exc_type, exc_value, exc_traceback)
+            return
+        logger.critical(
+            "Uncaught exception",
+            exc_info=(exc_type, exc_value, exc_traceback)
+        )
 
-    # 检查配置文件
-    if not Path(config_path).exists():
-        print(f"❌ 配置文件不存在: {config_path}")
-        print(f"请先复制 config.example.yaml 为 config.yaml 并配置")
-        print(f"\n命令: cp config.example.yaml config.yaml")
+    sys.excepthook = global_exception_handler
+
+    try:
+        config_path = "config.yaml"
+
+        # 检查配置文件
+        if not Path(config_path).exists():
+            print(f"❌ 配置文件不存在: {config_path}")
+            print(f"请先复制 config.example.yaml 为 config.yaml 并配置")
+            print(f"\n命令: cp config.example.yaml config.yaml")
+            sys.exit(1)
+
+        # 创建并启动助手
+        assistant = AIAssistant(config_path)
+        assistant.start()
+
+    except KeyboardInterrupt:
+        logger.info("Received KeyboardInterrupt, exiting...")
+        sys.exit(0)
+    except Exception as e:
+        logger.critical(f"Fatal error in main(): {e}", exc_info=True)
         sys.exit(1)
-
-    # 创建并启动助手
-    assistant = AIAssistant(config_path)
-    assistant.start()
 
 
 if __name__ == "__main__":

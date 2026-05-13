@@ -26,6 +26,7 @@ class WebhookServer:
         self.port = port
         self.feishu_adapter = None
         self.event_queue: Optional[queue.Queue] = None  # 事件队列（由外部注入）
+        self.server = None  # 用于存储 waitress 服务器实例
 
         # 静态文件目录（src/ai_assistant/static/）
         self.static_dir = os.path.join(os.path.dirname(__file__), "static")
@@ -229,6 +230,26 @@ class WebhookServer:
             return jsonify({"error": str(e)}), 500
 
     def run(self, debug: bool = False):
-        """启动服务器"""
-        logger.info(f"Starting webhook server on {self.host}:{self.port}")
+        """启动服务器（开发模式，使用 Flask 内置服务器）"""
+        logger.info(f"Starting webhook server on {self.host}:{self.port} (development mode)")
         self.app.run(host=self.host, port=self.port, debug=debug)
+
+    def run_production(self):
+        """启动服务器（生产模式，使用 waitress）"""
+        try:
+            from waitress import serve
+            logger.info(f"Starting webhook server on {self.host}:{self.port} (production mode with waitress)")
+            # waitress 是阻塞调用，会一直运行直到被停止
+            serve(self.app, host=self.host, port=self.port, threads=4)
+        except ImportError:
+            logger.warning("waitress not installed, falling back to Flask development server")
+            logger.warning("Install waitress with: pip install waitress")
+            self.run(debug=False)
+        except Exception as e:
+            logger.error(f"Error starting production server: {e}", exc_info=True)
+
+    def shutdown(self):
+        """停止服务器"""
+        # waitress 没有提供优雅停止的 API，只能通过线程退出来停止
+        # 这里主要是为了日志记录
+        logger.info("Webhook server shutdown requested")
