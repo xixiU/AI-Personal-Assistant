@@ -26,12 +26,9 @@ ENV PATH="/opt/venv/bin:$PATH"
 # 升级 pip
 RUN pip install --no-cache-dir --upgrade pip
 
-# 复制项目文件（用于安装依赖）
-COPY ../pyproject.toml /tmp/
-COPY ../src /tmp/src
-
-# 安装依赖（GPU 版本）
-RUN cd /tmp && pip install --no-cache-dir ".[gpu]"
+# 复制依赖文件并安装（GPU 版本）
+COPY ../requirements.txt ../requirements-gpu.txt /tmp/
+RUN pip install --no-cache-dir -r /tmp/requirements-gpu.txt
 
 # Stage 2: 运行阶段
 FROM nvidia/cuda:11.8.0-runtime-ubuntu22.04

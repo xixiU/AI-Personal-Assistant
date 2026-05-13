@@ -11,17 +11,11 @@ index-url = https://pypi.tuna.tsinghua.edu.cn/simple\n\
 trusted-host = pypi.tuna.tsinghua.edu.cn" > /root/.pip/pip.conf
 
 # 设置工作目录
-WORKDIR /tmp
-
-# 复制项目文件（用于安装依赖）
-COPY ../pyproject.toml /tmp/
-COPY ../src /tmp/src
-
-# 安装依赖（CPU 版本）
-RUN pip install --no-cache-dir ".[cpu]"
-
-# 切换到应用目录
 WORKDIR /app
+
+# 复制依赖文件并安装（CPU 版本）
+COPY ../requirements.txt ../requirements-cpu.txt /app/
+RUN pip install --no-cache-dir -r requirements-cpu.txt
 
 # 复制代码
 COPY ../src /app/src
