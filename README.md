@@ -77,10 +77,50 @@ system:
 
 ## 快速开始
 
-### 前提条件
+### 方式 1：Docker 部署（推荐，解决依赖问题）
 
-1. **Python 3.10+** 已安装
+**适用场景**：
+- 系统 glibc 版本较老（< 2.28）
+- 需要 GPU 加速但本地环境不兼容
+- 希望隔离运行环境
+
+```bash
+# 1. 克隆项目
+git clone <repository-url>
+cd AI-Personal-Assistant
+
+# 2. 创建配置文件
+cp config.example.yaml config.yaml
+# 编辑 config.yaml，配置 AI 服务地址
+
+# 3. 构建并启动（自动选择 CPU/GPU）
+chmod +x docker-deploy.sh
+./docker-deploy.sh
+
+# 4. 启动服务
+# GPU 版本
+docker-compose up -d ai-assistant-gpu
+
+# 或 CPU 版本
+docker-compose up -d ai-assistant-cpu
+
+# 5. 查看日志
+docker-compose logs -f
+```
+
+**GPU 版本需要**：
+- NVIDIA GPU
+- nvidia-docker（Container Toolkit）
+- 安装方法：https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html
+
+### 方式 2：本地安装
+
+**前提条件**：
+1. **Python 3.10-3.12** 已安装（注意：3.13 暂不支持）
 2. **AI 服务**：Dify 或其他 OpenAI 兼容的 AI 服务正在运行
+3. **系统要求**：
+   - CPU 版本：任意 Linux/Windows
+   - GPU 版本：glibc >= 2.28 + CUDA 11.8+
 
 ### 安装步骤
 

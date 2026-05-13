@@ -1,0 +1,40 @@
+# CPU 版本 Dockerfile（更小，不需要 CUDA）
+FROM python:3.12-slim
+
+# 设置清华镜像源
+RUN sed -i 's@//.*deb.debian.org@//mirrors.tuna.tsinghua.edu.cn@g' /etc/apt/sources.list.d/debian.sources
+
+# 配置 pip 使用清华源
+RUN mkdir -p /root/.pip && \
+    echo "[global]\n\
+index-url = https://pypi.tuna.tsinghua.edu.cn/simple\n\
+trusted-host = pypi.tuna.tsinghua.edu.cn" > /root/.pip/pip.conf
+
+# 设置工作目录
+WORKDIR /tmp
+
+# 复制项目文件（用于安装依赖）
+COPY ../pyproject.toml /tmp/
+COPY ../src /tmp/src
+
+# 安装依赖（CPU 版本）
+RUN pip install --no-cache-dir ".[cpu]"
+
+# 切换到应用目录
+WORKDIR /app
+
+# 复制代码
+COPY ../src /app/src
+COPY ../run.py /app/
+
+# 创建必要的目录
+RUN mkdir -p /app/logs /app/data
+
+# 暴露端口
+EXPOSE 11111
+
+# 设置环境变量
+ENV PYTHONUNBUFFERED=1
+
+# 启动命令
+CMD ["python", "run.py"]

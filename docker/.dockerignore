@@ -1,0 +1,48 @@
+# Git 相关
+.git
+.gitignore
+
+# Python 相关
+__pycache__
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv
+venv/
+ENV/
+env/
+
+# 日志和数据
+logs/
+*.log
+data/
+*.db
+*.sqlite
+
+# 配置文件（需要单独挂载）
+config.yaml
+
+# 测试
+tests/
+.pytest_cache/
+htmlcov/
+.coverage
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# 文档
+docs/
+*.md
+
+# Docker
+docker/
+
+# 其他
+.DS_Store
+*.bak
+*.tmp
