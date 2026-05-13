@@ -30,8 +30,8 @@ dev = [
     "pytest-asyncio>=0.21.0",
 ]
 cpu = [
-    "onnxruntime>=1.15.0",  # CPU 版本，兼容旧 glibc需要,<1.18.0
+    "onnxruntime>=1.15.0,<1.18.0",  # CPU 版本，兼容旧 glibc (manylinux_2_17)
 ]
 gpu = [
-    "onnxruntime-gpu>=1.15.0",  # GPU 版本，需要 CUDA 11.8+
+    "onnxruntime-gpu>=1.15.0,<1.18.0",  # GPU 版本，兼容旧 glibc (manylinux_2_17)
 ]
