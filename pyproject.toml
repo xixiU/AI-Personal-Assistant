@@ -18,7 +18,7 @@ dependencies = [
     "anthropic>=0.25.0",
     "httpx-sse>=0.4.0",
     "chromadb>=0.4.0",
-    "onnxruntime>=1.15.0,<1.18.0",  # 兼容旧版 glibc (manylinux_2_17)
+    # onnxruntime 不在这里声明，通过 optional-dependencies 选择
     "transformers>=4.30.0",
     "jieba>=0.42.1",
     "rank-bm25>=0.2.2",
@@ -28,4 +28,10 @@ dependencies = [
 dev = [
     "pytest>=7.4.0",
     "pytest-asyncio>=0.21.0",
+]
+cpu = [
+    "onnxruntime>=1.15.0",  # CPU 版本，兼容旧 glibc需要,<1.18.0
+]
+gpu = [
+    "onnxruntime-gpu>=1.15.0",  # GPU 版本，需要 CUDA 11.8+
 ]

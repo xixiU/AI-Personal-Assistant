@@ -95,10 +95,18 @@ cd AI-Personal-Assistant
 
 ```bash
 # 使用 uv（推荐）
-uv sync
+# CPU 版本（默认）
+uv sync --extra cpu
+
+# GPU 版本（需要 CUDA 11.8+）
+uv sync --extra gpu
 
 # 或使用 pip
-pip install -r requirements.txt
+# CPU 版本
+pip install -e ".[cpu]"
+
+# GPU 版本
+pip install -e ".[gpu]"
 
 # 如果需要使用微信适配器，根据微信版本选择安装：
 # 微信 3.9+:
@@ -108,35 +116,28 @@ pip install pywechat127==1.9.7
 pip install git+https://github.com/Hello-Mr-Crab/pywechat.git
 ```
 
-**GPU 加速（可选）**
+**GPU 加速配置**
 
-如果你有 NVIDIA GPU 并希望加速文档检索的 Embedding 生成：
+如果选择了 GPU 版本：
 
 ```bash
 # 1. 确保已安装 CUDA 11.8+ 和 cuDNN
 nvcc --version
 nvidia-smi
 
-# 2. 卸载 CPU 版本，安装 GPU 版本
-pip uninstall onnxruntime
-pip install onnxruntime-gpu
-
-# 或使用 uv
-uv pip uninstall onnxruntime
-uv pip install onnxruntime-gpu
-
-# 3. 验证 CUDA 可用
+# 2. 验证 CUDA 可用
 python -c "import onnxruntime as ort; print(ort.get_available_providers())"
 # 应该看到 'CUDAExecutionProvider'
 
-# 4. 在 config.yaml 中启用 GPU
+# 3. 在 config.yaml 中启用 GPU
 vector_db:
   use_gpu: true
   gpu_id: 0  # 使用第一张 GPU（0 或 1）
 ```
 
 **注意**：
-- `onnxruntime` (CPU) 和 `onnxruntime-gpu` (GPU) 是互斥的，只能安装一个
+- CPU 和 GPU 版本二选一，通过 `--extra cpu` 或 `--extra gpu` 指定
+- GPU 版本需要 NVIDIA GPU + CUDA 11.8+
 - GPU 加速主要提升文档索引和检索速度（5-10x），对于文档数量 > 500 篇时效果明显
 - 如果 GPU 不可用，会自动 fallback 到 CPU 模式
 
