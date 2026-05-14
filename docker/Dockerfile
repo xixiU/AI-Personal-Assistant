@@ -6,12 +6,27 @@ FROM nvidia/cuda:11.8.0-runtime-ubuntu22.04 AS builder
 RUN sed -i 's@//.*archive.ubuntu.com@//mirrors.tuna.tsinghua.edu.cn@g' /etc/apt/sources.list && \
     sed -i 's@//.*security.ubuntu.com@//mirrors.tuna.tsinghua.edu.cn@g' /etc/apt/sources.list
 
+ENV DEBIAN_FRONTEND=noninteractive
+ENV TZ=Asia/Shanghai
+RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
+
 # 安装 Python 3.12 和构建工具
+#RUN apt-get update && apt-get install -y --no-install-recommends \
+#    python3.12 \
+#    python3.12-venv \
+#    python3-pip \
+#    && rm -rf /var/lib/apt/lists/*
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3.12 \
-    python3.12-venv \
-    python3-pip \
-    && rm -rf /var/lib/apt/lists/*
+      software-properties-common \
+      && add-apt-repository ppa:deadsnakes/ppa \
+      && apt-get update \
+      && apt-get install -y --no-install-recommends \
+      python3.12 \
+      python3.12-venv \
+      python3-pip \
+      && rm -rf /var/lib/apt/lists/*
+
 
 # 配置 pip 使用清华源
 RUN mkdir -p /root/.pip && \
@@ -28,7 +43,7 @@ RUN pip install --no-cache-dir --upgrade pip
 
 # 复制依赖文件并安装（GPU 版本）
 COPY ../requirements.txt ../requirements-gpu.txt /tmp/
-RUN pip install --no-cache-dir -r /tmp/requirements-gpu.txt
+RUN pip install -i https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple --no-cache-dir -r /tmp/requirements-gpu.txt 
 
 # Stage 2: 运行阶段
 FROM nvidia/cuda:11.8.0-runtime-ubuntu22.04
@@ -37,10 +52,22 @@ FROM nvidia/cuda:11.8.0-runtime-ubuntu22.04
 RUN sed -i 's@//.*archive.ubuntu.com@//mirrors.tuna.tsinghua.edu.cn@g' /etc/apt/sources.list && \
     sed -i 's@//.*security.ubuntu.com@//mirrors.tuna.tsinghua.edu.cn@g' /etc/apt/sources.list
 
+ENV DEBIAN_FRONTEND=noninteractive
+ENV TZ=Asia/Shanghai
+RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
+
 # 只安装运行时需要的 Python
+#RUN apt-get update && apt-get install -y --no-install-recommends \
+#    python3.12 \
+#    && rm -rf /var/lib/apt/lists/*
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3.12 \
-    && rm -rf /var/lib/apt/lists/*
+      software-properties-common \
+      && add-apt-repository ppa:deadsnakes/ppa \
+      && apt-get update \
+      && apt-get install -y --no-install-recommends \
+      python3.12 \
+      && rm -rf /var/lib/apt/lists/*
 
 # 从构建阶段复制虚拟环境
 COPY --from=builder /opt/venv /opt/venv
