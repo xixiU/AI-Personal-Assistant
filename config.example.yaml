@@ -83,9 +83,15 @@ feishu_docs:
   doc_base_url: "https://xxx.feishu.cn"  # 飞书文档域名（用于生成文档链接）
   cache_dir: "./data/feishu_docs"        # 本地缓存目录
   cache_ttl: 86400                       # 缓存有效期（秒），1天=86400
-  sources:                               # 知识库/云空间 token 列表（限定搜索范围）
-    # - "C5RNwyHtWikA4LkBN9trd4u8zFd"   # 知识库示例（从 URL 中提取 token）
-    # - "HRfkf7lPDlQbqqdswOsrKPsezAd"   # 云空间文件夹示例
+  sources:                               # 文档源配置（必须明确 type，避免 MCP auto 模式重试）
+    # 知识库示例（type: wiki）
+    # - token: "C5RNwyHtWikA4LkBN9trd4u8zFd"
+    #   type: "wiki"
+    # 云空间示例（type: drive）
+    # - token: "HRfkf7lPDlQbqqdswOsrKPsezAd"
+    #   type: "drive"
+    # 兼容旧格式：纯字符串默认按 wiki 处理
+    # - "C5RNwyHtWikA4LkBN9trd4u8zFd"
 
 # 向量数据库配置（用于文档检索）
 vector_db:

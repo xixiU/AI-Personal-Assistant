@@ -52,7 +52,8 @@ class FeishuDocManager:
         self.mcp_client = SimpleMCPClient(mcp_url)
         self.cache_dir = Path(cache_dir)
         self.cache_ttl = cache_ttl
-        self.sources = sources or []
+        # 规范化 sources 为 [{"token": ..., "type": "wiki"|"drive"}, ...]
+        self.sources = self._normalize_sources(sources or [])
         self._keyword_extractor = keyword_extractor
         self._local_docs_config = local_docs or []
         self._lock = threading.Lock()
@@ -74,6 +75,28 @@ class FeishuDocManager:
             f"飞书文档管理器初始化: cache_dir={cache_dir}, ttl={cache_ttl}s, "
             f"sources={self.sources}, use_gpu={use_gpu}, gpu_id={gpu_id}"
         )
+
+    @staticmethod
+    def _normalize_sources(sources: List[Any]) -> List[Dict[str, str]]:
+        """
+        规范化 sources 配置，支持两种格式：
+        1. 字符串：默认按 wiki 处理
+        2. 字典：{"token": "xxx", "type": "wiki"|"drive"}
+        """
+        normalized = []
+        for s in sources:
+            if isinstance(s, str):
+                # 兼容旧格式：纯字符串默认按 wiki 处理
+                normalized.append({"token": s, "type": "wiki"})
+            elif isinstance(s, dict) and s.get("token"):
+                source_type = s.get("type", "wiki")
+                if source_type not in ("wiki", "drive"):
+                    logger.warning(f"未知 source type: {source_type}，按 wiki 处理")
+                    source_type = "wiki"
+                normalized.append({"token": s["token"], "type": source_type})
+            else:
+                logger.warning(f"忽略无效的 source 配置: {s}")
+        return normalized
 
     def get_documents_by_query(self, query_text: str) -> str:
         """
@@ -171,8 +194,8 @@ class FeishuDocManager:
         all_docs = []
 
         # 在线飞书文档
-        for source_token in self.sources:
-            docs = self._get_docs_for_source(source_token)
+        for source in self.sources:
+            docs = self._get_docs_for_source(source["token"], source["type"])
             all_docs.extend(docs)
 
         # 本地离线文档
@@ -193,10 +216,12 @@ class FeishuDocManager:
         """
         all_items = []
 
-        for source_token in self.sources:
-            logger.info(f"列出目录: source={source_token}")
+        for source in self.sources:
+            source_token = source["token"]
+            source_type = source["type"]
+            logger.info(f"列出目录: source={source_token}, type={source_type}")
             try:
-                children = self.mcp_client.list_children(source_token, type_hint="auto", recursive=True)
+                children = self._mcp_list_children(source_token, source_type, recursive=True)
                 items = self._parse_children(children)
                 logger.info(f"  解析到 {len(items)} 个节点")
 
@@ -209,7 +234,7 @@ class FeishuDocManager:
                     # 仅文档构建 URL，folder 不需要
                     url = ""
                     if node_type not in ("folder",) and obj_token:
-                        url = self._build_doc_url(node_token, obj_token, node_type)
+                        url = self._build_doc_url(node_token, obj_token, node_type, source_type)
 
                     all_items.append({
                         "title": title,
@@ -218,9 +243,10 @@ class FeishuDocManager:
                         "obj_token": obj_token,
                         "url": url,
                         "source": source_token,
+                        "source_type": source_type,
                     })
             except Exception as e:
-                logger.error(f"  list_children 失败: {e}")
+                logger.error(f"  list 失败: {e}")
 
         return all_items
 
@@ -261,13 +287,18 @@ class FeishuDocManager:
             logger.info(f"加载本地文档: {len(docs)} 篇")
         return docs
 
-    def _get_docs_for_source(self, source_token: str) -> List[Dict[str, str]]:
-        """获取某个 source token 下的所有文档"""
+    def _get_docs_for_source(self, source_token: str, source_type: str = "wiki") -> List[Dict[str, str]]:
+        """获取某个 source 下的所有文档
+
+        Args:
+            source_token: 源 token
+            source_type: "wiki" 或 "drive"
+        """
         # 检查缓存
         cached = self._load_from_cache(source_token)
         if cached is not None:
             # 缓存存在，检查是否需要更新
-            updated_docs = self._check_and_update(source_token, cached)
+            updated_docs = self._check_and_update(source_token, cached, source_type)
             if updated_docs is not None:
                 self._indexed = False  # 文档有更新，需要重建索引
                 return updated_docs
@@ -275,9 +306,9 @@ class FeishuDocManager:
             return cached
 
         # 无缓存，从 MCP 全量获取
-        logger.info(f"首次从 MCP 获取文档: source={source_token}")
+        logger.info(f"首次从 MCP 获取文档: source={source_token}, type={source_type}")
         try:
-            docs = self._fetch_tree(source_token)
+            docs = self._fetch_tree(source_token, source_type=source_type)
             if docs:
                 self._save_to_cache(source_token, docs)
                 self._indexed = False  # 新文档，需要重建索引
@@ -286,7 +317,21 @@ class FeishuDocManager:
             logger.error(f"MCP 获取文档失败: source={source_token}, error={e}")
             return []
 
-    def _check_and_update(self, source_token: str, cached_docs: List[Dict[str, str]]) -> Optional[List[Dict[str, str]]]:
+    def _mcp_list_children(self, token: str, source_type: str, recursive: bool = True) -> Any:
+        """根据 source_type 调用对应的 MCP 接口列出子节点"""
+        if source_type == "drive":
+            return self.mcp_client.drive_list_folder(token, recursive=recursive)
+        else:  # wiki
+            return self.mcp_client.wiki_list_nodes(token, recursive=recursive)
+
+    def _mcp_read_document(self, token: str, source_type: str) -> Any:
+        """根据 source_type 调用对应的 MCP 接口读取文档"""
+        if source_type == "drive":
+            return self.mcp_client.drive_read_document(token)
+        else:  # wiki
+            return self.mcp_client.wiki_read_document(token)
+
+    def _check_and_update(self, source_token: str, cached_docs: List[Dict[str, str]], source_type: str = "wiki") -> Optional[List[Dict[str, str]]]:
         """
         检查缓存并增量更新
 
@@ -302,9 +347,9 @@ class FeishuDocManager:
             return None
 
         # TTL 过期，获取最新元数据比对
-        logger.info(f"缓存 TTL 过期，检查文档更新: source={source_token}")
+        logger.info(f"缓存 TTL 过期，检查文档更新: source={source_token}, type={source_type}")
         try:
-            latest_meta = self._fetch_metadata_tree(source_token, depth=0)
+            latest_meta = self._fetch_metadata_tree(source_token, source_type=source_type)
         except Exception as e:
             logger.warning(f"获取元数据失败，继续使用旧缓存: {e}")
             return None
@@ -338,7 +383,7 @@ class FeishuDocManager:
         updated_docs = list(cached_docs)  # 复制一份
 
         # 获取完整目录树用于路径信息
-        all_items = self._get_all_items(source_token)
+        all_items = self._get_all_items(source_token, source_type)
         item_map = {}
         for item in all_items:
             t = item.get("obj_token") or item.get("token", "")
@@ -346,25 +391,29 @@ class FeishuDocManager:
                 item_map[t] = item
 
         for token in tokens_to_update:
-            content = self._read_document(token)
+            item = item_map.get(token, {})
+            node_token = item.get("token", "")
+            # wiki 模式用 node_token 读取，drive 模式用 obj_token
+            read_token = node_token if source_type == "wiki" else token
+            content = self._read_document(read_token, source_type)
             if not content:
                 continue
 
-            item = item_map.get(token, {})
             title = item.get("name") or item.get("title") or "未知"
             edit_time = latest_meta.get(token)
             parent_path = item.get("parent_path", "")
             current_path = f"{parent_path}/{title}" if parent_path else title
-            node_token = item.get("node_token") or item.get("token", "")
-            url = self._build_doc_url(node_token, token)
+            url = self._build_doc_url(node_token, token, source_type=source_type)
 
             new_doc = {
                 "title": title,
                 "token": token,
+                "node_token": node_token,
                 "path": current_path,
                 "content": content,
                 "edit_time": edit_time,
                 "url": url,
+                "source_type": source_type,
             }
 
             # 替换或新增
@@ -386,28 +435,32 @@ class FeishuDocManager:
         logger.info(f"增量更新完成: source={source_token}, 更新 {len(tokens_to_update)} 篇, 总计 {len(updated_docs)} 篇")
         return updated_docs
 
-    def _get_all_items(self, source_token: str) -> List[Dict[str, Any]]:
+    def _get_all_items(self, source_token: str, source_type: str = "wiki") -> List[Dict[str, Any]]:
         """获取完整目录树的节点列表（用于路径信息）"""
         try:
-            children = self.mcp_client.list_children(source_token, recursive=True)
+            children = self._mcp_list_children(source_token, source_type, recursive=True)
             return self._parse_children(children)
         except Exception:
             return []
 
-    def _fetch_tree(self, token: str, depth: int = 0, path: str = "") -> List[Dict[str, str]]:
+    def _fetch_tree(self, token: str, depth: int = 0, path: str = "", source_type: str = "wiki") -> List[Dict[str, str]]:
         """
         获取 token 下的所有文档，保留层级路径
 
         使用 MCP 的 recursive=True 参数一次性获取完整目录树，
         然后根据 parent_token 关系构建完整路径。
+
+        Args:
+            token: source token
+            source_type: "wiki"（知识库）或 "drive"（云空间）
         """
         docs = []
         try:
-            # 一次性获取完整目录树
-            children = self.mcp_client.list_children(token, type_hint="auto", recursive=True)
+            # 一次性获取完整目录树（根据类型调用不同接口）
+            children = self._mcp_list_children(token, source_type, recursive=True)
             items = self._parse_children(children)
 
-            logger.info(f"MCP 递归获取到 {len(items)} 个节点")
+            logger.info(f"MCP 递归获取到 {len(items)} 个节点 (type={source_type})")
 
             # 构建 token -> item 映射和 token -> name 映射，用于路径构建
             token_name_map = {token: ""}  # 根节点
@@ -446,17 +499,22 @@ class FeishuDocManager:
 
                 # 读取文档内容（folder 类型跳过）
                 if obj_token and node_type not in ("folder",):
-                    content = self._read_document(obj_token)
+                    # 根据 source_type 选择读取接口
+                    # wiki 模式用 child_token (wiki_token)，drive 模式用 obj_token
+                    read_token = child_token if source_type == "wiki" else obj_token
+                    content = self._read_document(read_token, source_type)
                     if content:
                         # 构建文档 URL
-                        url = self._build_doc_url(child_token, obj_token, node_type)
+                        url = self._build_doc_url(child_token, obj_token, node_type, source_type)
                         docs.append({
                             "title": title,
                             "token": obj_token,
+                            "node_token": child_token,
                             "path": current_path,
                             "content": content,
                             "edit_time": edit_time,
                             "url": url,
+                            "source_type": source_type,
                         })
 
         except Exception as e:
@@ -476,10 +534,10 @@ class FeishuDocManager:
                     return [item for item in result[key] if isinstance(item, dict)]
         return []
 
-    def _read_document(self, token: str) -> Optional[str]:
-        """读取单个文档内容"""
+    def _read_document(self, token: str, source_type: str = "wiki") -> Optional[str]:
+        """读取单个文档内容（根据 source_type 调用对应接口）"""
         try:
-            result = self.mcp_client.read_document(token)
+            result = self._mcp_read_document(token, source_type)
             if isinstance(result, str):
                 return result
             if isinstance(result, dict):
@@ -490,10 +548,10 @@ class FeishuDocManager:
                 )
             return str(result) if result else None
         except Exception as e:
-            logger.warning(f"读取文档失败: token={token}, error={e}")
+            logger.warning(f"读取文档失败: token={token}, type={source_type}, error={e}")
             return None
 
-    def _build_doc_url(self, node_token: str, obj_token: str, node_type: str = "") -> str:
+    def _build_doc_url(self, node_token: str, obj_token: str, node_type: str = "", source_type: str = "") -> str:
         """
         根据 token 构建飞书文档 URL
 
@@ -504,11 +562,15 @@ class FeishuDocManager:
         if not self._doc_base_url:
             return ""
 
-        # 知识库文档优先使用 node_token（wiki 路径）
+        # 优先根据 source_type 判断
+        if source_type == "wiki" and node_token:
+            return f"{self._doc_base_url}/wiki/{node_token}"
+        if source_type == "drive" and obj_token:
+            return f"{self._doc_base_url}/docx/{obj_token}"
+
+        # 兼容：未指定 source_type 时按 token 是否相同判断
         if node_token and node_token != obj_token:
             return f"{self._doc_base_url}/wiki/{node_token}"
-
-        # 云空间文档使用 obj_token
         if obj_token:
             return f"{self._doc_base_url}/docx/{obj_token}"
 
@@ -617,16 +679,15 @@ class FeishuDocManager:
         except (json.JSONDecodeError, OSError):
             return False
 
-    def _fetch_metadata_tree(self, token: str, depth: int) -> Dict[str, Optional[str]]:
+    def _fetch_metadata_tree(self, token: str, source_type: str = "wiki") -> Dict[str, Optional[str]]:
         """获取文档元数据（只获取 token 和 edit_time，不读取内容）"""
         metadata = {}
         try:
-            children = self.mcp_client.list_children(token, recursive=True)
+            children = self._mcp_list_children(token, source_type, recursive=True)
             items = self._parse_children(children)
 
             for item in items:
                 child_token = item.get("obj_token") or item.get("token", "")
-                has_child = item.get("has_child", False)
                 node_type = item.get("type", "")
                 edit_time = item.get("modified_time") or item.get("edit_time") or item.get("update_time")
 

@@ -248,9 +248,36 @@ class SimpleMCPClient:
         return self.call_tool("get_wiki_document_full_content", {"obj_token": obj_token, "obj_type": obj_type})
 
     def list_children(self, token: str, type_hint: str = "auto", recursive: bool = False) -> Any:
-        """列出子内容（统一入口，自动识别知识库/云空间）"""
+        """列出子内容（统一入口，自动识别知识库/云空间，会自动重试两种类型）"""
         return self.call_tool("list_children", {"token": token, "type": type_hint, "recursive": recursive})
 
     def read_document(self, token: str) -> Any:
-        """读取文档内容（统一入口）"""
+        """读取文档内容（统一入口，自动识别）"""
         return self.call_tool("read_document", {"token": token})
+
+    # ========== 知识库专用（推荐，避免 auto 重试） ==========
+
+    def wiki_list_nodes(self, wiki_token: str, recursive: bool = False) -> Any:
+        """【知识库】列出节点的子节点"""
+        return self.call_tool("wiki_list_nodes", {"wiki_token": wiki_token, "recursive": recursive})
+
+    def wiki_read_document(self, wiki_token: str) -> Any:
+        """【知识库】读取文档内容（自动获取 obj_token 后读取）"""
+        return self.call_tool("wiki_read_document", {"wiki_token": wiki_token})
+
+    def wiki_get_node_info(self, wiki_token: str) -> Any:
+        """【知识库】获取节点信息（含 space_id、obj_token）"""
+        return self.call_tool("wiki_get_node_info", {"wiki_token": wiki_token})
+
+    # ========== 云空间专用（推荐，避免 auto 重试） ==========
+
+    def drive_list_folder(self, folder_token: str = None, recursive: bool = False) -> Any:
+        """【云空间】列出文件夹内文件与子文件夹"""
+        args = {"recursive": recursive}
+        if folder_token:
+            args["folder_token"] = folder_token
+        return self.call_tool("drive_list_folder", args)
+
+    def drive_read_document(self, file_id: str) -> Any:
+        """【云空间】读取 docx 文档原始文本"""
+        return self.call_tool("drive_read_document", {"file_id": file_id})
