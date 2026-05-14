@@ -31,7 +31,7 @@ class AIProvider(ABC):
         provider_name = self.__class__.__name__
         model_name = getattr(self, 'model', 'unknown')
 
-        logger.info(f"调用 AI: provider={provider_name}, model={model_name}, messages={len(messages)}")
+        logger.info(f"调用 AI: provider={provider_name}, model={model_name}, messages={messages}")
 
         start = time.time()
         reply = self.send_message(messages, session_id=session_id)
