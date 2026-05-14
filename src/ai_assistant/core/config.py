@@ -50,6 +50,10 @@ class Config:
     system_event_queue_size: int = 100  # 事件队列最大长度
     system_max_concurrent_workers: int = 5  # 最大并发处理数
 
+    # 向量数据库配置
+    vector_db_use_gpu: bool = False  # 是否使用 GPU 加速 Embedding 生成
+    vector_db_gpu_id: int = 0  # 使用哪张 GPU（0 或 1）
+
     # 日志
     logging_level: str = "INFO"
     logging_file: str = "logs/ai-assistant.log"
@@ -134,6 +138,11 @@ class Config:
             config.system_disable_proxy = data["system"].get("disable_proxy", config.system_disable_proxy)
             config.system_event_queue_size = data["system"].get("event_queue_size", config.system_event_queue_size)
             config.system_max_concurrent_workers = data["system"].get("max_concurrent_workers", config.system_max_concurrent_workers)
+
+        # 解析向量数据库配置
+        if "vector_db" in data:
+            config.vector_db_use_gpu = data["vector_db"].get("use_gpu", config.vector_db_use_gpu)
+            config.vector_db_gpu_id = data["vector_db"].get("gpu_id", config.vector_db_gpu_id)
 
         # 解析日志
         if "logging" in data:
