@@ -182,6 +182,48 @@ class FeishuDocManager:
         logger.info(f"文档同步完成: 共 {len(all_docs)} 篇（在线 {len(all_docs) - len(local_docs)}, 本地 {len(local_docs)}）")
         return all_docs
 
+    def list_docs(self) -> List[Dict[str, Any]]:
+        """
+        仅列出所有 source 下的目录结构（不下载内容、不缓存、不建索引）
+
+        用于排查 MCP 是否能正常获取目录。
+
+        Returns:
+            节点列表 [{"title", "type", "token", "obj_token", "url", "source"}]
+        """
+        all_items = []
+
+        for source_token in self.sources:
+            logger.info(f"列出目录: source={source_token}")
+            try:
+                children = self.mcp_client.list_children(source_token, type_hint="auto", recursive=True)
+                items = self._parse_children(children)
+                logger.info(f"  解析到 {len(items)} 个节点")
+
+                for item in items:
+                    title = item.get("name") or item.get("title") or "未知"
+                    node_type = item.get("type", "unknown")
+                    node_token = item.get("token", "")
+                    obj_token = item.get("obj_token") or node_token
+
+                    # 仅文档构建 URL，folder 不需要
+                    url = ""
+                    if node_type not in ("folder",) and obj_token:
+                        url = self._build_doc_url(node_token, obj_token, node_type)
+
+                    all_items.append({
+                        "title": title,
+                        "type": node_type,
+                        "token": node_token,
+                        "obj_token": obj_token,
+                        "url": url,
+                        "source": source_token,
+                    })
+            except Exception as e:
+                logger.error(f"  list_children 失败: {e}")
+
+        return all_items
+
     def _load_all_local_docs(self) -> List[Dict[str, str]]:
         """加载所有本地离线文档"""
         import os

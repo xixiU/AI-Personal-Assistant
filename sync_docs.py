@@ -6,6 +6,7 @@
 用法:
     uv run sync_docs.py                    # 同步文档 + 建立向量索引
     uv run sync_docs.py --no-index         # 仅同步文档到本地，不处理向量数据库
+    uv run sync_docs.py --list-only        # 仅列出目录结构，不下载内容、不缓存
     uv run sync_docs.py --force            # 强制重新获取（清空缓存后重建）
     uv run sync_docs.py --debug            # 输出详细调试信息
     uv run sync_docs.py --config /path/to/config.yaml
@@ -25,6 +26,7 @@ def main():
     parser.add_argument("--config", default="config.yaml", help="配置文件路径")
     parser.add_argument("--force", action="store_true", help="强制重新获取（清空缓存后重建）")
     parser.add_argument("--no-index", action="store_true", help="仅同步文档到本地，不建立向量索引")
+    parser.add_argument("--list-only", action="store_true", help="仅列出目录结构，不下载内容")
     parser.add_argument("--debug", action="store_true", help="输出详细调试信息")
     args = parser.parse_args()
 
@@ -70,6 +72,25 @@ def main():
         batch_size=getattr(config, 'vector_db_batch_size', 32),
         doc_base_url=getattr(config, 'feishu_docs_doc_base_url', ''),
     )
+
+    # 仅列出目录
+    if args.list_only:
+        items = doc_manager.list_docs()
+        if not items:
+            logger.warning("未列出任何节点（MCP 可能未正常返回）")
+            sys.exit(1)
+
+        # 按类型分组统计
+        folder_count = sum(1 for i in items if i["type"] == "folder")
+        doc_count = len(items) - folder_count
+
+        logger.info(f"\n共 {len(items)} 个节点（文件夹 {folder_count}, 文档 {doc_count}）\n")
+
+        for item in items:
+            icon = "📁" if item["type"] == "folder" else "📄"
+            url_info = f" → {item['url']}" if item["url"] else ""
+            logger.info(f"  {icon} [{item['type']}] {item['title']} (token={item['token']}){url_info}")
+        sys.exit(0)
 
     # 同步文档到本地
     docs = doc_manager.sync_docs(force=args.force)
