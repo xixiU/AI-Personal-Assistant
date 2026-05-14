@@ -465,6 +465,7 @@ class FeishuDocManager:
         return docs
 
     def _parse_children(self, result: Any) -> List[Dict[str, Any]]:
+        logger.info(f"MCP 递归获取到 {result}")
         """解析 list_children 返回结果"""
         if isinstance(result, list):
             return [item for item in result if isinstance(item, dict)]
