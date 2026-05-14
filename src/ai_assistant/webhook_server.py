@@ -117,10 +117,20 @@ class WebhookServer:
             # 记录接收到的事件（加密数据无法读取详细信息）
             logger.info(f"📨 Webhook received, data : {data}")
 
+            # 如果是加密数据，先解密以判断事件类型（URL 验证必须同步返回，不能走异步队列）
+            decrypted_data = data
+            if "encrypt" in data and self.feishu_adapter and self.feishu_adapter.encrypt_key:
+                try:
+                    decrypted_data = self.feishu_adapter._decrypt(data["encrypt"])
+                    logger.info(f"📨 Decrypted preview: type={decrypted_data.get('type')}, "
+                                f"event_type={decrypted_data.get('header', {}).get('event_type')}")
+                except Exception as e:
+                    logger.error(f"Failed to decrypt webhook for type check: {e}")
+
             # URL 验证请求需要立即返回 challenge（不放入队列）
-            if data.get("type") == "url_verification":
-                challenge = data.get("challenge", "")
-                logger.info(f"URL verification: returning challenge={challenge}")
+            if decrypted_data.get("type") == "url_verification":
+                challenge = decrypted_data.get("challenge", "")
+                logger.info(f"✅ URL verification: returning challenge={challenge}")
                 return jsonify({"challenge": challenge}), 200
 
             # 将原始事件数据放入队列，由后台线程异步处理
