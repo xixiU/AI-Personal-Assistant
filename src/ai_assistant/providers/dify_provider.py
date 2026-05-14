@@ -114,6 +114,7 @@ class DifyProvider(AIProvider):
             logger.debug(f"Dify API 请求体: {payload}")
 
             # 发送请求
+            logger.info(f"调用 Dify API: app_type={self.app_type}, user={self.user}")
             response = requests.post(
                 endpoint,
                 json=payload,
@@ -138,10 +139,17 @@ class DifyProvider(AIProvider):
                 with self.lock:
                     self.conversation_ids[session_id] = result["conversation_id"]
 
-            # 提取回复内容
+            # 提取回复内容和 token 使用信息
             reply = result.get("answer", "")
+            metadata = result.get("metadata", {})
+            usage = metadata.get("usage", {})
+            input_tokens = usage.get("prompt_tokens", 0)
+            output_tokens = usage.get("completion_tokens", 0)
 
-            logger.info(f"Dify 回复已接收: {len(reply)} 字符")
+            logger.info(
+                f"Dify 回复已接收: {len(reply)} 字符, "
+                f"tokens(input:{input_tokens}, output:{output_tokens})"
+            )
             return reply
 
         except requests.exceptions.Timeout:

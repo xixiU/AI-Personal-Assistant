@@ -120,6 +120,7 @@ class AnthropicProvider(AIProvider):
             system_prompt = "\n\n".join(system_parts)
 
             # 调用 Anthropic API
+            logger.info(f"调用 Claude API: model={self.model}, messages={len(api_messages)}")
             response = self.client.messages.create(
                 model=self.model,
                 max_tokens=4096,
@@ -133,7 +134,10 @@ class AnthropicProvider(AIProvider):
                     reply += block.text
             if not reply:
                 reply = "抱歉，未能生成有效回复。"
-            logger.info(f"Claude 回复已接收: {len(reply)} 字符, tokens={response.usage.input_tokens}+{response.usage.output_tokens}")
+            logger.info(
+                f"Claude 回复已接收: {len(reply)} 字符, "
+                f"tokens(input:{response.usage.input_tokens}, output:{response.usage.output_tokens})"
+            )
             return reply
 
         except anthropic.APITimeoutError:

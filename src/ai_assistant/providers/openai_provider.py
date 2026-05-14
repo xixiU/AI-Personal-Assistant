@@ -66,6 +66,7 @@ class OpenAIProvider(AIProvider):
             }
 
             # 发送请求
+            logger.info(f"调用 OpenAI API: model={self.model}, messages={len(api_messages)}")
             response = requests.post(
                 f"{self.base_url}/v1/chat/completions",
                 json=payload,
@@ -78,7 +79,15 @@ class OpenAIProvider(AIProvider):
             result = response.json()
             reply = result["choices"][0]["message"]["content"]
 
-            logger.info(f"AI 回复已接收: {len(reply)} 字符")
+            # 提取 token 使用信息
+            usage = result.get("usage", {})
+            input_tokens = usage.get("prompt_tokens", 0)
+            output_tokens = usage.get("completion_tokens", 0)
+
+            logger.info(
+                f"AI 回复已接收: {len(reply)} 字符, "
+                f"tokens(input:{input_tokens}, output:{output_tokens})"
+            )
             return reply
 
         except requests.exceptions.Timeout:
