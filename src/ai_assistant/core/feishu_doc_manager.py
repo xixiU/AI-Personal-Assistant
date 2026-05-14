@@ -141,6 +141,33 @@ class FeishuDocManager:
         if self._indexed:
             return
 
+        all_docs = self.sync_docs()
+
+        if all_docs:
+            self._search_engine.index_documents(all_docs)
+            self._indexed = True
+            online_count = sum(1 for d in all_docs if not d.get("token", "").startswith("local_"))
+            local_count = len(all_docs) - online_count
+            logger.info(f"检索索引已建立: {len(all_docs)} 篇文档（在线 {online_count}, 本地 {local_count}）")
+
+    def sync_docs(self, force: bool = False) -> List[Dict[str, str]]:
+        """
+        同步所有文档到本地缓存（不建立向量索引）
+
+        Args:
+            force: 是否强制重新获取（忽略缓存 TTL）
+
+        Returns:
+            所有文档列表
+        """
+        if force:
+            import shutil
+            if self.cache_dir.exists():
+                shutil.rmtree(self.cache_dir)
+                self.cache_dir.mkdir(parents=True, exist_ok=True)
+                logger.info(f"已清空缓存目录: {self.cache_dir}")
+            self._indexed = False
+
         all_docs = []
 
         # 在线飞书文档
@@ -152,10 +179,8 @@ class FeishuDocManager:
         local_docs = self._load_all_local_docs()
         all_docs.extend(local_docs)
 
-        if all_docs:
-            self._search_engine.index_documents(all_docs)
-            self._indexed = True
-            logger.info(f"检索索引已建立: {len(all_docs)} 篇文档（在线 {len(all_docs) - len(local_docs)}, 本地 {len(local_docs)}）")
+        logger.info(f"文档同步完成: 共 {len(all_docs)} 篇（在线 {len(all_docs) - len(local_docs)}, 本地 {len(local_docs)}）")
+        return all_docs
 
     def _load_all_local_docs(self) -> List[Dict[str, str]]:
         """加载所有本地离线文档"""
