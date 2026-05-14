@@ -112,8 +112,8 @@ class Text2VecEmbeddingFunction:
         self._model_inputs = {inp.name for inp in self._sessions[0].get_inputs()}
 
         # 输出实际使用的提供者
-        actual_providers = self._session.get_providers()
-        logger.info(f"ONNX Embedding 模型已加载: {model_dir}, providers={actual_providers}")
+        actual_providers = self._sessions[0].get_providers()
+        logger.info(f"ONNX Embedding 模型已加载: {model_dir}, providers={actual_providers}, GPU数量={len(self._sessions)}")
 
     def name(self) -> str:
         """ChromaDB 要求的方法，返回 Embedding 函数名称"""
