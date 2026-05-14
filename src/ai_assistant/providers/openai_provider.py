@@ -66,7 +66,6 @@ class OpenAIProvider(AIProvider):
             }
 
             # 发送请求
-            logger.info(f"调用 OpenAI API: model={self.model}, messages={len(api_messages)}")
             response = requests.post(
                 f"{self.base_url}/v1/chat/completions",
                 json=payload,

@@ -1,5 +1,7 @@
+import time
 from abc import ABC, abstractmethod
 from typing import List, Optional
+from loguru import logger
 from ai_assistant.core.models import Message
 
 
@@ -19,6 +21,24 @@ class AIProvider(ABC):
             AI 生成的回复文本
         """
         pass
+
+    def call(self, messages: List[Message], session_id: Optional[str] = None) -> str:
+        """
+        统一入口：记录日志 + 计时 + 调用 send_message
+
+        所有外部调用应使用此方法，而非直接调用 send_message。
+        """
+        provider_name = self.__class__.__name__
+        model_name = getattr(self, 'model', 'unknown')
+
+        logger.info(f"调用 AI: provider={provider_name}, model={model_name}, messages={len(messages)}")
+
+        start = time.time()
+        reply = self.send_message(messages, session_id=session_id)
+        duration = time.time() - start
+
+        logger.info(f"AI 回复完成: {len(reply)} 字符, 耗时={duration:.2f}s")
+        return reply
 
     @abstractmethod
     def check_health(self) -> bool:

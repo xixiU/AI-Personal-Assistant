@@ -210,7 +210,7 @@ class WebhookServer:
             context_messages = self.context_manager.get_context(session_id)
 
             # 调用 AI 生成回复
-            reply = self.ai_provider.send_message(context_messages, session_id=session_id)
+            reply = self.ai_provider.call(context_messages, session_id=session_id)
 
             # 将 AI 回复添加到上下文
             ai_message = Message(

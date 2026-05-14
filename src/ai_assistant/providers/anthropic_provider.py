@@ -120,7 +120,6 @@ class AnthropicProvider(AIProvider):
             system_prompt = "\n\n".join(system_parts)
 
             # 调用 Anthropic API
-            logger.info(f"调用 Claude API: model={self.model}, messages={len(api_messages)}")
             response = self.client.messages.create(
                 model=self.model,
                 max_tokens=4096,

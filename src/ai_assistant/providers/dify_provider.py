@@ -114,7 +114,6 @@ class DifyProvider(AIProvider):
             logger.debug(f"Dify API 请求体: {payload}")
 
             # 发送请求
-            logger.info(f"调用 Dify API: app_type={self.app_type}, user={self.user}")
             response = requests.post(
                 endpoint,
                 json=payload,

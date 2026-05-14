@@ -280,11 +280,10 @@ class AIAssistant:
             context_messages = self.context_manager.get_context(session_id)
             logger.info(f"Sending {len(context_messages)} messages to AI")
 
-            # 调用 AI 生成回复（记录耗时）
+            # 调用 AI 生成回复
             ai_start = time_mod.time()
-            reply = self.ai_provider.send_message(context_messages, session_id=session_id)
+            reply = self.ai_provider.call(context_messages, session_id=session_id)
             ai_duration = time_mod.time() - ai_start
-            logger.info(f"⏱️  AI reply received in {ai_duration:.2f}s: {reply[:100]}...")
 
             # 将 AI 回复添加到上下文
             ai_message = Message(
@@ -604,9 +603,7 @@ class AIAssistant:
             logger.info(f"Sending {len(context_messages)} messages to AI")
 
             # 调用 AI 生成回复（传递 session_id 支持多用户并发）
-            reply = self.ai_provider.send_message(context_messages, session_id=session_id)
-
-            logger.info(f"AI reply received: {reply[:100]}...")
+            reply = self.ai_provider.call(context_messages, session_id=session_id)
 
             # 将 AI 回复添加到上下文
             ai_message = Message(
