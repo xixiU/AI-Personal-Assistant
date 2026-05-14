@@ -1,52 +1,84 @@
 version: '3.8'
 
+# AI 自动回复助手 - Docker Compose 配置
+# 提供 GPU 和 CPU 两个版本，根据需要选择启动
+#
+# 使用方法：
+#   GPU 版本: docker-compose up -d ai-assistant-gpu
+#   CPU 版本: docker-compose up -d ai-assistant-cpu
+#   查看日志: docker-compose logs -f
+#   停止服务: docker-compose down
+
 services:
+  # ==========================================
+  # GPU 版本（需要 NVIDIA GPU + nvidia-docker）
+  # 适合文档数量大（>500篇）或高频查询场景
+  # ==========================================
   ai-assistant-gpu:
     build:
-      context: ..
-      dockerfile: docker/Dockerfile
-    image: ai-assistant:gpu
-    container_name: ai-assistant-gpu
-    restart: unless-stopped
+      context: ..                    # 构建上下文为项目根目录
+      dockerfile: docker/Dockerfile  # GPU 版本 Dockerfile
+    image: ai-assistant:gpu          # 构建后的镜像名称
+    container_name: ai-assistant-gpu # 容器名称
+    restart: unless-stopped          # 异常退出时自动重启（手动停止除外）
 
-    # GPU 支持
+    # GPU 资源分配
+    # device_ids: 指定使用宿主机的哪张 GPU
+    #   - ['0'] 使用第一张 GPU
+    #   - ['1'] 使用第二张 GPU
+    #   - ['0', '1'] 使用两张 GPU
+    # 注意：device_ids 指定后，容器内看到的 GPU 编号会重新从 0 开始
     deploy:
       resources:
         reservations:
           devices:
             - driver: nvidia
-              device_ids: ['0']
+              device_ids: ['0']      # 使用宿主机的 GPU 0（如需切换改为 '1'）
               capabilities: [gpu]
 
+    # 端口映射 [宿主机端口:容器端口]
+    # 11111 是 webhook 服务端口，需要与 config.yaml 中的 system.webhook_port 一致
     ports:
       - "11111:11111"
 
+    # 挂载目录（宿主机路径:容器路径）
+    # ro 表示只读，rw 表示读写（默认）
     volumes:
-      - ../config.yaml:/app/config.yaml:ro
-      - ../logs:/app/logs
-      - ../data:/app/data
-      - ../models:/app/models:ro
+      - ../config.yaml:/app/config.yaml:ro  # 配置文件（只读，避免容器修改）
+      - ../logs:/app/logs                    # 日志目录（持久化日志）
+      - ../data:/app/data                    # 数据目录（向量数据库、文档缓存）
+      - ../models:/app/models:ro             # 模型目录（text2vec-base-chinese 等）
 
+    # 环境变量
     environment:
-      - CUDA_VISIBLE_DEVICES=0
-      - PYTHONUNBUFFERED=1
+      - CUDA_VISIBLE_DEVICES=0       # 容器内可见的 GPU 编号（device_ids 已限制后从 0 开始）
+      - PYTHONUNBUFFERED=1           # Python 输出不缓冲，实时显示日志
+      - TZ=Asia/Shanghai             # 时区：东八区（UTC+8）
 
+  # ==========================================
+  # CPU 版本（无需 GPU，体积更小）
+  # 适合文档数量少（<500篇）或测试环境
+  # ==========================================
   ai-assistant-cpu:
     build:
-      context: ..
-      dockerfile: docker/Dockerfile.cpu
-    image: ai-assistant:cpu
-    container_name: ai-assistant-cpu
-    restart: unless-stopped
+      context: ..                        # 构建上下文为项目根目录
+      dockerfile: docker/Dockerfile.cpu  # CPU 版本 Dockerfile
+    image: ai-assistant:cpu              # 构建后的镜像名称
+    container_name: ai-assistant-cpu     # 容器名称
+    restart: unless-stopped              # 异常退出时自动重启
 
+    # 端口映射 [宿主机端口:容器端口]
     ports:
       - "11111:11111"
 
+    # 挂载目录
     volumes:
-      - ../config.yaml:/app/config.yaml:ro
-      - ../logs:/app/logs
-      - ../data:/app/data
-      - ../models:/app/models:ro
+      - ../config.yaml:/app/config.yaml:ro  # 配置文件（只读）
+      - ../logs:/app/logs                    # 日志目录
+      - ../data:/app/data                    # 数据目录
+      - ../models:/app/models:ro             # 模型目录
 
+    # 环境变量
     environment:
-      - PYTHONUNBUFFERED=1
+      - PYTHONUNBUFFERED=1           # Python 输出不缓冲，实时显示日志
+      - TZ=Asia/Shanghai             # 时区：东八区（UTC+8）
