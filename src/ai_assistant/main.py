@@ -118,6 +118,7 @@ class AIAssistant:
                 local_docs=self.config.local_docs,
                 use_gpu=getattr(self.config, 'vector_db_use_gpu', False),
                 gpu_id=getattr(self.config, 'vector_db_gpu_id', 0),
+                batch_size=getattr(self.config, 'vector_db_batch_size', 32),
             )
             # 回填 doc_manager 到 Provider
             self.ai_provider.doc_manager = doc_manager

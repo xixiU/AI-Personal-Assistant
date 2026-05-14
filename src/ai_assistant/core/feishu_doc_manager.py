@@ -33,6 +33,7 @@ class FeishuDocManager:
         local_docs: List[Dict[str, str]] = None,
         use_gpu: bool = False,
         gpu_id: int = 0,
+        batch_size: int = 32,
     ):
         """
         Args:
@@ -44,6 +45,7 @@ class FeishuDocManager:
             local_docs: 本地离线文档配置列表 [{path, description, keywords}]
             use_gpu: 是否使用 GPU 加速 Embedding 生成
             gpu_id: 使用哪张 GPU（0 或 1）
+            batch_size: Embedding 批处理大小（GPU: 128-256, CPU: 16-32）
         """
         self.mcp_client = SimpleMCPClient(mcp_url)
         self.cache_dir = Path(cache_dir)
@@ -59,7 +61,8 @@ class FeishuDocManager:
         self._search_engine = HybridSearchEngine(
             persist_dir=vector_db_dir,
             use_gpu=use_gpu,
-            gpu_id=gpu_id
+            gpu_id=gpu_id,
+            batch_size=batch_size
         )
 
         # 确保缓存目录存在

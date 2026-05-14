@@ -53,6 +53,7 @@ class Config:
     # 向量数据库配置
     vector_db_use_gpu: bool = False  # 是否使用 GPU 加速 Embedding 生成
     vector_db_gpu_id: int = 0  # 使用哪张 GPU（0 或 1）
+    vector_db_batch_size: int = 32  # Embedding 批处理大小（GPU: 128-256, CPU: 16-32）
 
     # 日志
     logging_level: str = "INFO"
@@ -143,6 +144,7 @@ class Config:
         if "vector_db" in data:
             config.vector_db_use_gpu = data["vector_db"].get("use_gpu", config.vector_db_use_gpu)
             config.vector_db_gpu_id = data["vector_db"].get("gpu_id", config.vector_db_gpu_id)
+            config.vector_db_batch_size = data["vector_db"].get("batch_size", config.vector_db_batch_size)
 
         # 解析日志
         if "logging" in data:

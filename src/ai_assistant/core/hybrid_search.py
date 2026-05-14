@@ -13,12 +13,13 @@ from loguru import logger
 class Text2VecEmbeddingFunction:
     """基于 ONNX Runtime 的中文 Embedding 函数，支持 GPU 加速"""
 
-    def __init__(self, model_dir: str = None, use_gpu: bool = False, gpu_id: int = 0):
+    def __init__(self, model_dir: str = None, use_gpu: bool = False, gpu_id: int = 0, batch_size: int = 32):
         """
         Args:
             model_dir: 模型目录路径
             use_gpu: 是否使用 GPU 加速
             gpu_id: 使用哪张 GPU（0 或 1）
+            batch_size: 批处理大小（GPU: 128-256, CPU: 16-32）
         """
         import os
         import numpy as np
@@ -26,6 +27,7 @@ class Text2VecEmbeddingFunction:
         import onnxruntime as ort
 
         self._np = np
+        self._batch_size = batch_size
 
         if model_dir is None:
             model_dir = "./models/text2vec-base-chinese"
@@ -137,6 +139,21 @@ class Text2VecEmbeddingFunction:
 
         texts = [str(t) if not isinstance(t, str) else t for t in texts]
 
+        # 分批处理，避免单次请求过大导致 GPU OOM
+        total = len(texts)
+        if total > self._batch_size:
+            logger.info(f"分批处理 Embedding: total={total}, batch_size={self._batch_size}")
+            all_embeddings = []
+            for i in range(0, total, self._batch_size):
+                batch = texts[i:i + self._batch_size]
+                batch_embeddings = self._encode_batch(batch)
+                all_embeddings.extend(batch_embeddings)
+            return all_embeddings
+        else:
+            return self._encode_batch(texts)
+
+    def _encode_batch(self, texts: List[str]) -> List[List[float]]:
+        """单批次 Embedding 计算"""
         try:
             # 不使用 return_tensors，直接返回 Python 对象
             encoded = self._tokenizer(
@@ -180,12 +197,19 @@ class Text2VecEmbeddingFunction:
 class HybridSearchEngine:
     """混合检索引擎：向量检索 + BM25"""
 
-    def __init__(self, persist_dir: str = "./data/vector_db", use_gpu: bool = False, gpu_id: int = 0):
+    def __init__(self, persist_dir: str = "./data/vector_db", use_gpu: bool = False, gpu_id: int = 0, batch_size: int = 32):
         """
         Args:
             persist_dir: ChromaDB 持久化目录
             use_gpu: 是否使用 GPU 加速 Embedding 生成
             gpu_id: 使用哪张 GPU（0 或 1）
+            batch_size: Embedding 批处理大小
+                       显存占用估算（text2vec-base-chinese）：
+                       - batch_size=32:  约 1-1.5GB
+                       - batch_size=64:  约 2-3GB
+                       - batch_size=128: 约 4-6GB
+                       - batch_size=256: 约 8-12GB
+                       建议：GPU 显存 ≥ 16GB 时用 128-256，否则用 32-64
         """
         import chromadb
         import os
@@ -212,7 +236,7 @@ class HybridSearchEngine:
         )
 
         # 使用 text2vec 中文 Embedding（支持 GPU 加速）
-        self._embedding_fn = Text2VecEmbeddingFunction(use_gpu=use_gpu, gpu_id=gpu_id)
+        self._embedding_fn = Text2VecEmbeddingFunction(use_gpu=use_gpu, gpu_id=gpu_id, batch_size=batch_size)
 
         self._collection = self._chroma_client.get_or_create_collection(
             name="feishu_docs",
