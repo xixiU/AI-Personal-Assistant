@@ -1,6 +1,6 @@
 # 多阶段构建：最小化镜像大小
 # Stage 1: 构建阶段
-FROM nvidia/cuda:11.8.0-runtime-ubuntu22.04 AS builder
+FROM nvidia/cuda:11.8.0-cudnn8-runtime-ubuntu22.04 AS builder
 
 # 设置清华镜像源
 RUN sed -i 's@//.*archive.ubuntu.com@//mirrors.tuna.tsinghua.edu.cn@g' /etc/apt/sources.list && \
@@ -46,7 +46,7 @@ COPY ../requirements.txt ../requirements-gpu.txt /tmp/
 RUN pip install -i https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple --no-cache-dir -r /tmp/requirements-gpu.txt 
 
 # Stage 2: 运行阶段
-FROM nvidia/cuda:11.8.0-runtime-ubuntu22.04
+FROM nvidia/cuda:11.8.0-cudnn8-runtime-ubuntu22.04
 
 # 设置清华镜像源
 RUN sed -i 's@//.*archive.ubuntu.com@//mirrors.tuna.tsinghua.edu.cn@g' /etc/apt/sources.list && \
