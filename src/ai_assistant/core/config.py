@@ -32,6 +32,7 @@ class Config:
     # 飞书文档配置
     feishu_docs_enabled: bool = False
     feishu_docs_mcp_url: str = "http://localhost:50070/sse"
+    feishu_docs_doc_base_url: str = ""  # 飞书文档域名（如 https://xxx.feishu.cn）
     feishu_docs_cache_dir: str = "./data/feishu_docs"
     feishu_docs_cache_ttl: int = 86400  # 缓存有效期（秒），默认1天
     feishu_docs_sources: List[str] = None  # 知识库/云空间 token 列表
@@ -119,6 +120,7 @@ class Config:
             docs = data["feishu_docs"]
             config.feishu_docs_enabled = docs.get("enabled", config.feishu_docs_enabled)
             config.feishu_docs_mcp_url = docs.get("mcp_url", config.feishu_docs_mcp_url)
+            config.feishu_docs_doc_base_url = docs.get("doc_base_url", config.feishu_docs_doc_base_url)
             config.feishu_docs_cache_dir = docs.get("cache_dir", config.feishu_docs_cache_dir)
             config.feishu_docs_cache_ttl = docs.get("cache_ttl", config.feishu_docs_cache_ttl)
             config.feishu_docs_sources = docs.get("sources", config.feishu_docs_sources)

@@ -315,12 +315,13 @@ class HybridSearchEngine:
             title = doc.get("title", "")
             path = doc.get("path", "")
             content = doc.get("content", "")
+            url = doc.get("url", "")
 
             if len(content) <= CHUNK_SIZE * 2:
                 # 短文档：整篇索引
                 ids.append(token)
                 documents.append(f"{title}\n{title}\n{path}\n{content}")
-                metadatas.append({"title": title, "path": path, "token": token})
+                metadatas.append({"title": title, "path": path, "token": token, "url": url})
             else:
                 # 长文档：分块索引，每块带标题前缀
                 chunks = self._split_text(content, CHUNK_SIZE, CHUNK_OVERLAP)
@@ -328,7 +329,7 @@ class HybridSearchEngine:
                     chunk_id = f"{token}_chunk{i}"
                     ids.append(chunk_id)
                     documents.append(f"{title}\n{path}\n{chunk}")
-                    metadatas.append({"title": title, "path": path, "token": token, "chunk": i})
+                    metadatas.append({"title": title, "path": path, "token": token, "chunk": i, "url": url})
 
         if ids:
             batch_size = 5000
@@ -428,6 +429,7 @@ class HybridSearchEngine:
                             "token": original_token,
                             "title": metadata.get("title", ""),
                             "path": metadata.get("path", ""),
+                            "url": metadata.get("url", ""),
                             "score": score,
                         }
 
@@ -458,6 +460,7 @@ class HybridSearchEngine:
                     "token": doc.get("token", ""),
                     "title": doc.get("title", ""),
                     "path": doc.get("path", ""),
+                    "url": doc.get("url", ""),
                     "score": score,
                 })
             return docs
@@ -507,6 +510,7 @@ class HybridSearchEngine:
                     "token": token,
                     "title": full_doc.get("title", ""),
                     "path": full_doc.get("path", ""),
+                    "url": full_doc.get("url", ""),
                     "content": full_doc.get("content", ""),
                     "score": scores[token],
                 })

@@ -80,6 +80,7 @@ adapters:
 feishu_docs:
   enabled: false  # 默认关闭
   mcp_url: "http://localhost:50070/sse"  # MCP 服务器地址
+  doc_base_url: "https://xxx.feishu.cn"  # 飞书文档域名（用于生成文档链接）
   cache_dir: "./data/feishu_docs"        # 本地缓存目录
   cache_ttl: 86400                       # 缓存有效期（秒），1天=86400
   sources:                               # 知识库/云空间 token 列表（限定搜索范围）

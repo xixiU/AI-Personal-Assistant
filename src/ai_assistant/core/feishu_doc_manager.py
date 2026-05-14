@@ -34,6 +34,7 @@ class FeishuDocManager:
         use_gpu: bool = False,
         gpu_id: int = 0,
         batch_size: int = 32,
+        doc_base_url: str = "",
     ):
         """
         Args:
@@ -46,6 +47,7 @@ class FeishuDocManager:
             use_gpu: 是否使用 GPU 加速 Embedding 生成
             gpu_id: 使用哪张 GPU（0 或 1）
             batch_size: Embedding 批处理大小（GPU: 128-256, CPU: 16-32）
+            doc_base_url: 飞书文档域名（如 https://xxx.feishu.cn），用于生成文档链接
         """
         self.mcp_client = SimpleMCPClient(mcp_url)
         self.cache_dir = Path(cache_dir)
@@ -55,6 +57,7 @@ class FeishuDocManager:
         self._local_docs_config = local_docs or []
         self._lock = threading.Lock()
         self._indexed = False
+        self._doc_base_url = doc_base_url.rstrip('/') if doc_base_url else ""
 
         # 混合检索引擎（支持 GPU 加速）
         vector_db_dir = str(Path(cache_dir) / "_vector_db")
@@ -114,7 +117,13 @@ class FeishuDocManager:
             if total_chars + len(content) > max_total_chars:
                 logger.debug(f"总字符数达到上限 {max_total_chars}，跳过: {doc['title']}")
                 continue
-            result_parts.append(f"## {doc['title']}")
+
+            # 文档标题 + 原始链接
+            doc_url = doc.get("url", "")
+            if doc_url:
+                result_parts.append(f"## {doc['title']}\n📎 原文链接: {doc_url}")
+            else:
+                result_parts.append(f"## {doc['title']}")
             result_parts.append(content)
             result_parts.append("")
             total_chars += len(content)
@@ -279,6 +288,8 @@ class FeishuDocManager:
             edit_time = latest_meta.get(token)
             parent_path = item.get("parent_path", "")
             current_path = f"{parent_path}/{title}" if parent_path else title
+            node_token = item.get("node_token") or item.get("token", "")
+            url = self._build_doc_url(node_token, token)
 
             new_doc = {
                 "title": title,
@@ -286,6 +297,7 @@ class FeishuDocManager:
                 "path": current_path,
                 "content": content,
                 "edit_time": edit_time,
+                "url": url,
             }
 
             # 替换或新增
@@ -369,12 +381,15 @@ class FeishuDocManager:
                 if obj_token and node_type not in ("folder",):
                     content = self._read_document(obj_token)
                     if content:
+                        # 构建文档 URL
+                        url = self._build_doc_url(child_token, obj_token, node_type)
                         docs.append({
                             "title": title,
                             "token": obj_token,
                             "path": current_path,
                             "content": content,
                             "edit_time": edit_time,
+                            "url": url,
                         })
 
         except Exception as e:
@@ -409,6 +424,27 @@ class FeishuDocManager:
         except Exception as e:
             logger.warning(f"读取文档失败: token={token}, error={e}")
             return None
+
+    def _build_doc_url(self, node_token: str, obj_token: str, node_type: str = "") -> str:
+        """
+        根据 token 构建飞书文档 URL
+
+        飞书文档 URL 格式：
+        - 知识库文档：{base_url}/wiki/{node_token}
+        - 云空间文档：{base_url}/docx/{obj_token}
+        """
+        if not self._doc_base_url:
+            return ""
+
+        # 知识库文档优先使用 node_token（wiki 路径）
+        if node_token and node_token != obj_token:
+            return f"{self._doc_base_url}/wiki/{node_token}"
+
+        # 云空间文档使用 obj_token
+        if obj_token:
+            return f"{self._doc_base_url}/docx/{obj_token}"
+
+        return ""
 
     def _extract_keywords(self, query_text: str) -> List[str]:
         """从查询文本中提取关键词，优先使用 AI 辅助提取"""
@@ -557,6 +593,7 @@ class FeishuDocManager:
                             "path": doc_info.get("path", ""),
                             "content": content,
                             "edit_time": doc_info.get("edit_time"),
+                            "url": doc_info.get("url", ""),
                         })
                 return docs
             except Exception as e:
@@ -594,6 +631,7 @@ class FeishuDocManager:
                         "token": doc.get("token", ""),
                         "path": doc.get("path", ""),
                         "edit_time": doc.get("edit_time"),
+                        "url": doc.get("url", ""),
                         "filename": filename,
                     })
 
