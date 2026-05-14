@@ -52,7 +52,7 @@ class Config:
 
     # 向量数据库配置
     vector_db_use_gpu: bool = False  # 是否使用 GPU 加速 Embedding 生成
-    vector_db_gpu_id: int = 0  # 使用哪张 GPU（0 或 1）
+    vector_db_gpu_id: Any = 0  # GPU 配置：单卡用 int (0/1)，多卡用 list ([0,1]) 或 str ("0,1")
     vector_db_batch_size: int = 32  # Embedding 批处理大小（GPU: 128-256, CPU: 16-32）
 
     # 日志

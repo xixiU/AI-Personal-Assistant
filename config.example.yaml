@@ -89,7 +89,12 @@ feishu_docs:
 # 向量数据库配置（用于文档检索）
 vector_db:
   use_gpu: false  # 是否使用 GPU 加速 Embedding 生成（需要安装 onnxruntime-gpu）
-  gpu_id: 0       # 使用哪张 GPU（0 或 1）
+  gpu_id: 0       # GPU 配置（支持单卡和多卡）
+                  # 单卡: gpu_id: 0 或 gpu_id: 1
+                  # 多卡: gpu_id: "0,1" 或 gpu_id: [0, 1]
+                  # 注意：容器内 GPU 编号从 0 开始，与 docker-compose.yml 的 device_ids 无关
+                  #      例如 device_ids: ['1'] 时，容器内只有 GPU 0（对应宿主机 GPU 1）
+                  # 多卡模式：不同 batch 轮询分配到不同 GPU，提升大量文档索引速度
   batch_size: 32  # Embedding 批处理大小，影响显存占用和处理速度
                   # 显存占用估算（text2vec-base-chinese）：
                   #   batch_size=32:  约 1-1.5GB

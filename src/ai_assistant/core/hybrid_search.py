@@ -18,7 +18,9 @@ class Text2VecEmbeddingFunction:
         Args:
             model_dir: 模型目录路径
             use_gpu: 是否使用 GPU 加速
-            gpu_id: 使用哪张 GPU（0 或 1）
+            gpu_id: 使用哪张 GPU（单卡模式）或 GPU 列表（多卡模式）
+                   - 单卡: gpu_id=0 或 gpu_id=1
+                   - 多卡: gpu_id=[0, 1] 或 gpu_id="0,1"
             batch_size: 批处理大小（GPU: 128-256, CPU: 16-32）
         """
         import os
@@ -28,6 +30,14 @@ class Text2VecEmbeddingFunction:
 
         self._np = np
         self._batch_size = batch_size
+
+        # 解析 GPU ID（支持单卡和多卡）
+        if isinstance(gpu_id, (list, tuple)):
+            self._gpu_ids = list(gpu_id)
+        elif isinstance(gpu_id, str):
+            self._gpu_ids = [int(x.strip()) for x in gpu_id.split(',')]
+        else:
+            self._gpu_ids = [gpu_id]
 
         if model_dir is None:
             model_dir = "./models/text2vec-base-chinese"
@@ -47,51 +57,59 @@ class Text2VecEmbeddingFunction:
         sess_options = ort.SessionOptions()
 
         # 选择执行提供者（GPU 或 CPU）
-        providers = []
+        self._sessions = []  # 多卡模式：每张卡一个 session
+        self._current_session_idx = 0  # 轮询索引
+
         if use_gpu:
-            try:
-                # 检查 CUDA 是否可用
-                available_providers = ort.get_available_providers()
-                if 'CUDAExecutionProvider' in available_providers:
-                    # 配置 CUDA 提供者
-                    cuda_provider_options = {
-                        'device_id': gpu_id,  # 指定使用哪张 GPU
-                        'arena_extend_strategy': 'kNextPowerOfTwo',
-                        'gpu_mem_limit': 2 * 1024 * 1024 * 1024,  # 限制 GPU 内存使用 2GB
-                        'cudnn_conv_algo_search': 'EXHAUSTIVE',
-                        'do_copy_in_default_stream': True,
-                    }
-                    providers = [
-                        ('CUDAExecutionProvider', cuda_provider_options),
-                        'CPUExecutionProvider'  # fallback
-                    ]
-                    logger.info(f"使用 GPU {gpu_id} 加速 Embedding 生成")
-                else:
-                    logger.warning("CUDA 不可用，fallback 到 CPU")
-                    providers = ['CPUExecutionProvider']
-                    # CPU 模式下限制线程数
-                    sess_options.intra_op_num_threads = 2
-                    sess_options.inter_op_num_threads = 2
-                    sess_options.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
-            except Exception as e:
-                logger.warning(f"GPU 初始化失败: {e}，fallback 到 CPU")
-                providers = ['CPUExecutionProvider']
-                sess_options.intra_op_num_threads = 2
-                sess_options.inter_op_num_threads = 2
-                sess_options.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
-        else:
+            for gpu_id in self._gpu_ids:
+                try:
+                    # 检查 CUDA 是否可用
+                    available_providers = ort.get_available_providers()
+                    if 'CUDAExecutionProvider' in available_providers:
+                        # 配置 CUDA 提供者（优化内存管理）
+                        cuda_provider_options = {
+                            'device_id': gpu_id,  # 指定使用哪张 GPU
+                            'arena_extend_strategy': 'kSameAsRequested',  # 按需分配，避免浪费
+                            # 移除 gpu_mem_limit，让 ONNX Runtime 自由管理显存
+                            'cudnn_conv_algo_search': 'EXHAUSTIVE',
+                            'do_copy_in_default_stream': True,
+                        }
+                        providers = [
+                            ('CUDAExecutionProvider', cuda_provider_options),
+                            'CPUExecutionProvider'  # fallback
+                        ]
+
+                        session = ort.InferenceSession(
+                            onnx_path,
+                            sess_options=sess_options,
+                            providers=providers
+                        )
+                        self._sessions.append(session)
+                        logger.info(f"使用 GPU {gpu_id} 加速 Embedding 生成")
+                    else:
+                        logger.warning("CUDA 不可用，fallback 到 CPU")
+                        break
+                except Exception as e:
+                    logger.warning(f"GPU {gpu_id} 初始化失败: {e}")
+                    continue
+
+        # 如果没有成功初始化任何 GPU session，使用 CPU
+        if not self._sessions:
+            logger.info("使用 CPU 模式")
             # CPU 模式，限制线程数避免 CPU 爆炸
-            providers = ['CPUExecutionProvider']
             sess_options.intra_op_num_threads = 2
             sess_options.inter_op_num_threads = 2
             sess_options.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
 
-        self._session = ort.InferenceSession(
-            onnx_path,
-            sess_options=sess_options,
-            providers=providers
-        )
-        self._model_inputs = {inp.name for inp in self._session.get_inputs()}
+            session = ort.InferenceSession(
+                onnx_path,
+                sess_options=sess_options,
+                providers=['CPUExecutionProvider']
+            )
+            self._sessions.append(session)
+
+        # 使用第一个 session 获取模型输入信息
+        self._model_inputs = {inp.name for inp in self._sessions[0].get_inputs()}
 
         # 输出实际使用的提供者
         actual_providers = self._session.get_providers()
@@ -154,6 +172,8 @@ class Text2VecEmbeddingFunction:
 
     def _encode_batch(self, texts: List[str]) -> List[List[float]]:
         """单批次 Embedding 计算"""
+        import gc
+
         try:
             # 不使用 return_tensors，直接返回 Python 对象
             encoded = self._tokenizer(
@@ -177,12 +197,16 @@ class Text2VecEmbeddingFunction:
         }
         ort_inputs = {k: v for k, v in ort_inputs.items() if k in self._model_inputs}
 
-        outputs = self._session.run(None, ort_inputs)
+        # 多卡轮询：选择下一个 session
+        session = self._sessions[self._current_session_idx]
+        self._current_session_idx = (self._current_session_idx + 1) % len(self._sessions)
+
+        outputs = session.run(None, ort_inputs)
 
         # Mean pooling
         token_embeddings = outputs[0]
-        attention_mask = encoded["attention_mask"]
-        mask_expanded = self._np.expand_dims(attention_mask, axis=-1)
+        attention_mask_np = encoded["attention_mask"]
+        mask_expanded = self._np.expand_dims(attention_mask_np, axis=-1)
         sum_embeddings = (token_embeddings * mask_expanded).sum(axis=1)
         sum_mask = mask_expanded.sum(axis=1).clip(min=1e-9)
         embeddings = sum_embeddings / sum_mask
@@ -191,7 +215,14 @@ class Text2VecEmbeddingFunction:
         norms = self._np.linalg.norm(embeddings, axis=1, keepdims=True).clip(min=1e-9)
         embeddings = embeddings / norms
 
-        return embeddings.tolist()
+        result = embeddings.tolist()
+
+        # 显式释放显存，避免累积 OOM
+        del input_ids, attention_mask, token_type_ids, ort_inputs
+        del outputs, token_embeddings, mask_expanded, sum_embeddings, sum_mask, embeddings
+        gc.collect()
+
+        return result
 
 
 class HybridSearchEngine:
@@ -202,7 +233,10 @@ class HybridSearchEngine:
         Args:
             persist_dir: ChromaDB 持久化目录
             use_gpu: 是否使用 GPU 加速 Embedding 生成
-            gpu_id: 使用哪张 GPU（0 或 1）
+            gpu_id: GPU 配置（支持单卡和多卡）
+                   - 单卡: gpu_id=0 或 gpu_id=1
+                   - 多卡: gpu_id=[0, 1] 或 gpu_id="0,1"
+                   多卡模式下，不同 batch 会轮询分配到不同 GPU，提升吞吐量
             batch_size: Embedding 批处理大小
                        显存占用估算（text2vec-base-chinese）：
                        - batch_size=32:  约 1-1.5GB
