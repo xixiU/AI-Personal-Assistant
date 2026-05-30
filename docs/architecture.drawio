@@ -1,0 +1,179 @@
+<mxfile host="app.diagrams.net" modified="2026-05-30T10:00:00.000Z" agent="Claude" version="24.0.0">
+  <diagram id="arch-overview" name="整体架构">
+    <mxGraphModel dx="1422" dy="762" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1600" pageHeight="900" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <!-- 标题 -->
+        <mxCell id="title" value="AI 自动回复助手 - 整体架构" style="text;html=1;align=center;verticalAlign=middle;fontSize=20;fontStyle=1;fillColor=none;strokeColor=none;" vertex="1" parent="1">
+          <mxGeometry x="500" y="20" width="400" height="40" as="geometry" />
+        </mxCell>
+
+        <!-- 接入层 -->
+        <mxCell id="layer-input" value="接入层" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=11;fontStyle=1;verticalAlign=top;spacingTop=5;" vertex="1" parent="1">
+          <mxGeometry x="200" y="80" width="1000" height="100" as="geometry" />
+        </mxCell>
+
+        <mxCell id="feishu-input" value="飞书机器人&#xa;(Webhook API)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="270" y="110" width="140" height="50" as="geometry" />
+        </mxCell>
+
+        <mxCell id="wechat-input" value="微信&#xa;(GUI 轮询)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="470" y="110" width="140" height="50" as="geometry" />
+        </mxCell>
+
+        <mxCell id="web-input" value="Web 页面&#xa;(/api/chat)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="670" y="110" width="140" height="50" as="geometry" />
+        </mxCell>
+
+        <mxCell id="other-input" value="更多 IM...&#xa;(钉钉/企微)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#b3b3b3;fontSize=12;fontStyle=2;fontColor=#999999;" vertex="1" parent="1">
+          <mxGeometry x="870" y="110" width="140" height="50" as="geometry" />
+        </mxCell>
+
+        <!-- 服务层 -->
+        <mxCell id="layer-service" value="服务层 (Flask + Waitress)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=11;fontStyle=1;verticalAlign=top;spacingTop=5;" vertex="1" parent="1">
+          <mxGeometry x="200" y="220" width="1000" height="100" as="geometry" />
+        </mxCell>
+
+        <mxCell id="webhook-endpoint" value="/webhook/feishu&#xa;事件接收 &lt;200ms" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#82b366;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="250" y="250" width="150" height="50" as="geometry" />
+        </mxCell>
+
+        <mxCell id="chat-endpoint" value="/api/chat&#xa;Web 聊天接口" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#82b366;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="440" y="250" width="150" height="50" as="geometry" />
+        </mxCell>
+
+        <mxCell id="health-endpoint" value="/health&#xa;健康检查" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#82b366;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="630" y="250" width="150" height="50" as="geometry" />
+        </mxCell>
+
+        <mxCell id="static-endpoint" value="/&#xa;Web 前端页面" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#82b366;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="820" y="250" width="150" height="50" as="geometry" />
+        </mxCell>
+
+        <!-- 并发处理层 -->
+        <mxCell id="layer-concurrent" value="并发处理层" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=11;fontStyle=1;verticalAlign=top;spacingTop=5;" vertex="1" parent="1">
+          <mxGeometry x="350" y="360" width="700" height="80" as="geometry" />
+        </mxCell>
+
+        <mxCell id="queue" value="事件队列 (Queue)&#xa;削峰 + 异步解耦" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#9673a6;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="400" y="380" width="180" height="45" as="geometry" />
+        </mxCell>
+
+        <mxCell id="threadpool" value="线程池 (ThreadPoolExecutor)&#xa;N worker 并发处理" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#9673a6;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="650" y="380" width="220" height="45" as="geometry" />
+        </mxCell>
+
+        <!-- 核心模块层 -->
+        <mxCell id="context-mgr" value="Context Manager&#xa;会话历史管理&#xa;(线程安全 RLock)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="230" y="490" width="170" height="60" as="geometry" />
+        </mxCell>
+
+        <mxCell id="ai-provider" value="AI Provider&#xa;Claude / OpenAI / Dify / Ollama" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="450" y="490" width="200" height="60" as="geometry" />
+        </mxCell>
+
+        <mxCell id="search-engine" value="混合检索引擎&#xa;向量 + BM25 + RRF 融合" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="700" y="490" width="200" height="60" as="geometry" />
+        </mxCell>
+
+        <mxCell id="trace" value="Trace ID&#xa;(contextvars)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="950" y="490" width="130" height="60" as="geometry" />
+        </mxCell>
+
+        <!-- 数据层 -->
+        <mxCell id="layer-data" value="数据层" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;fontStyle=1;verticalAlign=top;spacingTop=5;" vertex="1" parent="1">
+          <mxGeometry x="200" y="600" width="1000" height="100" as="geometry" />
+        </mxCell>
+
+        <mxCell id="chromadb" value="ChromaDB&#xa;向量数据库" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=10;fillColor=#ffffff;strokeColor=#d6b656;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="270" y="620" width="120" height="60" as="geometry" />
+        </mxCell>
+
+        <mxCell id="bm25" value="BM25 索引&#xa;(jieba 分词)" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=10;fillColor=#ffffff;strokeColor=#d6b656;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="440" y="620" width="120" height="60" as="geometry" />
+        </mxCell>
+
+        <mxCell id="mcp-client" value="MCP 客户端&#xa;(飞书文档)" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=10;fillColor=#ffffff;strokeColor=#d6b656;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="610" y="620" width="120" height="60" as="geometry" />
+        </mxCell>
+
+        <mxCell id="local-cache" value="本地文档缓存&#xa;(目录结构)" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=10;fillColor=#ffffff;strokeColor=#d6b656;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="780" y="620" width="120" height="60" as="geometry" />
+        </mxCell>
+
+        <mxCell id="embedding-model" value="text2vec-base-chinese&#xa;(ONNX + GPU)" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=10;fillColor=#ffffff;strokeColor=#d6b656;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="950" y="620" width="150" height="60" as="geometry" />
+        </mxCell>
+
+        <!-- 外部服务 -->
+        <mxCell id="layer-external" value="外部服务" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontSize=11;fontStyle=1;verticalAlign=top;spacingTop=5;" vertex="1" parent="1">
+          <mxGeometry x="200" y="740" width="1000" height="80" as="geometry" />
+        </mxCell>
+
+        <mxCell id="anthropic-api" value="Anthropic API&#xa;(Claude)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#666666;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="250" y="760" width="130" height="45" as="geometry" />
+        </mxCell>
+
+        <mxCell id="openai-api" value="OpenAI 兼容 API&#xa;(GPT/Ollama/Azure)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#666666;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="420" y="760" width="160" height="45" as="geometry" />
+        </mxCell>
+
+        <mxCell id="dify-api" value="Dify 平台" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#666666;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="620" y="760" width="130" height="45" as="geometry" />
+        </mxCell>
+
+        <mxCell id="feishu-mcp" value="飞书 MCP 服务器&#xa;(知识库+云空间)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#666666;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="790" y="760" width="160" height="45" as="geometry" />
+        </mxCell>
+
+        <mxCell id="feishu-api" value="飞书开放平台&#xa;(消息回复)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#666666;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="990" y="760" width="130" height="45" as="geometry" />
+        </mxCell>
+
+        <!-- 连接线 -->
+        <mxCell id="e1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;" edge="1" source="feishu-input" target="webhook-endpoint" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e2" style="edgeStyle=orthogonalEdgeStyle;rounded=1;" edge="1" source="web-input" target="chat-endpoint" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e3" style="edgeStyle=orthogonalEdgeStyle;rounded=1;" edge="1" source="webhook-endpoint" target="queue" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e4" style="edgeStyle=orthogonalEdgeStyle;rounded=1;" edge="1" source="queue" target="threadpool" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e5" style="edgeStyle=orthogonalEdgeStyle;rounded=1;" edge="1" source="threadpool" target="ai-provider" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e6" style="edgeStyle=orthogonalEdgeStyle;rounded=1;" edge="1" source="threadpool" target="search-engine" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e7" style="edgeStyle=orthogonalEdgeStyle;rounded=1;" edge="1" source="threadpool" target="context-mgr" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e8" style="edgeStyle=orthogonalEdgeStyle;rounded=1;" edge="1" source="search-engine" target="chromadb" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e9" style="edgeStyle=orthogonalEdgeStyle;rounded=1;" edge="1" source="search-engine" target="bm25" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e10" style="edgeStyle=orthogonalEdgeStyle;rounded=1;" edge="1" source="search-engine" target="mcp-client" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e11" style="edgeStyle=orthogonalEdgeStyle;rounded=1;" edge="1" source="ai-provider" target="anthropic-api" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e12" style="edgeStyle=orthogonalEdgeStyle;rounded=1;" edge="1" source="ai-provider" target="openai-api" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e13" style="edgeStyle=orthogonalEdgeStyle;rounded=1;" edge="1" source="mcp-client" target="feishu-mcp" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

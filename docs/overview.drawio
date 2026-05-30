@@ -1,0 +1,104 @@
+<mxfile host="app.diagrams.net" modified="2026-05-30T10:00:00.000Z" agent="Claude" version="24.0.0">
+  <diagram id="overview" name="系统概览">
+    <mxGraphModel dx="1100" dy="600" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1100" pageHeight="500" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <!-- 用户侧 -->
+        <mxCell id="feishu-user" value="飞书群&#xa;@ 机器人" style="shape=mxgraph.basic.smiley;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;whiteSpace=wrap;" vertex="1" parent="1">
+          <mxGeometry x="50" y="80" width="80" height="70" as="geometry" />
+        </mxCell>
+
+        <mxCell id="wechat-user" value="微信&#xa;聊天窗口" style="shape=mxgraph.basic.smiley;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;whiteSpace=wrap;" vertex="1" parent="1">
+          <mxGeometry x="50" y="200" width="80" height="70" as="geometry" />
+        </mxCell>
+
+        <mxCell id="web-user" value="浏览器&#xa;Web 页面" style="shape=mxgraph.basic.smiley;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;whiteSpace=wrap;" vertex="1" parent="1">
+          <mxGeometry x="50" y="320" width="80" height="70" as="geometry" />
+        </mxCell>
+
+        <!-- 核心系统 -->
+        <mxCell id="system" value="AI 自动回复助手" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=14;fontStyle=1;verticalAlign=top;spacingTop=8;" vertex="1" parent="1">
+          <mxGeometry x="250" y="60" width="280" height="360" as="geometry" />
+        </mxCell>
+
+        <mxCell id="sys-webhook" value="事件接收&#xa;(Webhook + 轮询)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#6c8ebf;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="280" y="100" width="220" height="40" as="geometry" />
+        </mxCell>
+
+        <mxCell id="sys-queue" value="事件队列 + 线程池&#xa;(并发处理)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#6c8ebf;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="280" y="160" width="220" height="40" as="geometry" />
+        </mxCell>
+
+        <mxCell id="sys-search" value="混合检索引擎&#xa;(向量 + BM25 + RRF)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#6c8ebf;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="280" y="220" width="220" height="40" as="geometry" />
+        </mxCell>
+
+        <mxCell id="sys-ai" value="AI Provider&#xa;(Claude / GPT / Dify / Ollama)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#6c8ebf;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="280" y="280" width="220" height="40" as="geometry" />
+        </mxCell>
+
+        <mxCell id="sys-reply" value="智能回复&#xa;(附原文链接)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#6c8ebf;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="280" y="340" width="220" height="40" as="geometry" />
+        </mxCell>
+
+        <!-- 知识库 -->
+        <mxCell id="kb-group" value="私域知识库" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=14;fontStyle=1;verticalAlign=top;spacingTop=8;" vertex="1" parent="1">
+          <mxGeometry x="650" y="60" width="200" height="200" as="geometry" />
+        </mxCell>
+
+        <mxCell id="kb-wiki" value="飞书知识库" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#82b366;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="680" y="100" width="140" height="35" as="geometry" />
+        </mxCell>
+
+        <mxCell id="kb-drive" value="飞书云空间" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#82b366;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="680" y="150" width="140" height="35" as="geometry" />
+        </mxCell>
+
+        <mxCell id="kb-local" value="本地文档&#xa;(md/txt/sql/yaml)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#82b366;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="680" y="200" width="140" height="35" as="geometry" />
+        </mxCell>
+
+        <!-- 大模型 -->
+        <mxCell id="llm-group" value="大模型服务" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=14;fontStyle=1;verticalAlign=top;spacingTop=8;" vertex="1" parent="1">
+          <mxGeometry x="650" y="300" width="200" height="120" as="geometry" />
+        </mxCell>
+
+        <mxCell id="llm-claude" value="Claude (Anthropic)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#b85450;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="680" y="335" width="140" height="30" as="geometry" />
+        </mxCell>
+
+        <mxCell id="llm-openai" value="GPT / Ollama / Dify" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#b85450;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="680" y="375" width="140" height="30" as="geometry" />
+        </mxCell>
+
+        <!-- 连接线 -->
+        <mxCell id="c1" value="提问" style="edgeStyle=orthogonalEdgeStyle;rounded=1;fontSize=10;" edge="1" source="feishu-user" target="sys-webhook" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="c2" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=1;" edge="1" source="wechat-user" target="sys-webhook" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="c3" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=1;" edge="1" source="web-user" target="sys-webhook" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="c4" value="检索文档" style="edgeStyle=orthogonalEdgeStyle;rounded=1;fontSize=10;" edge="1" source="sys-search" target="kb-group" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="c5" value="调用模型" style="edgeStyle=orthogonalEdgeStyle;rounded=1;fontSize=10;" edge="1" source="sys-ai" target="llm-group" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="c6" value="回复" style="edgeStyle=orthogonalEdgeStyle;rounded=1;fontSize=10;dashed=1;" edge="1" source="sys-reply" target="feishu-user" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="220" y="360" />
+              <mxPoint x="220" y="115" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
