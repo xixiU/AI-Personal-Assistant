@@ -605,6 +605,10 @@ class FeishuDocManager:
         try:
             result = self._mcp_read_document(token, source_type)
             if isinstance(result, str):
+                # 检测 MCP 返回的错误信息（QPS 限制、404 等）
+                if result.startswith("Error executing tool") or result.startswith("Error:"):
+                    logger.warning(f"文档读取返回错误（可能 QPS 限制），跳过: token={token}, error={result[:100]}")
+                    return None
                 return result
             if isinstance(result, dict):
                 return (
