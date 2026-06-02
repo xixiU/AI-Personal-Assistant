@@ -72,6 +72,7 @@ class AIAssistant:
 
         # 先初始化 Provider（文档管理器需要用到 Provider 的关键词提取能力）
         doc_manager = None
+        self.doc_manager = None
 
         if provider_type == "anthropic":
             from ai_assistant.providers.anthropic_provider import AnthropicProvider
@@ -123,6 +124,7 @@ class AIAssistant:
             )
             # 回填 doc_manager 到 Provider
             self.ai_provider.doc_manager = doc_manager
+            self.doc_manager = doc_manager
             logger.info("飞书文档管理器已启用")
 
         self.reply_executor = ReplyExecutor(
@@ -519,6 +521,10 @@ class AIAssistant:
         """停止 AI 助手"""
         logger.info("Stopping AI Assistant...")
         self.running = False
+
+        # 停止飞书文档后台同步
+        if self.doc_manager:
+            self.doc_manager.stop_background_sync()
 
         # 停止 webhook 服务器
         if self.webhook_server:

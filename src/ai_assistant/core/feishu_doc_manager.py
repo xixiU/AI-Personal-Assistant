@@ -59,6 +59,9 @@ class FeishuDocManager:
         self._lock = threading.Lock()
         self._indexed = False
         self._doc_base_url = doc_base_url.rstrip('/') if doc_base_url else ""
+        self._sync_interval = 1800  # 定时同步间隔（秒），默认 30 分钟
+        self._sync_thread = None
+        self._stop_event = threading.Event()
 
         # 混合检索引擎（支持 GPU 加速）
         vector_db_dir = str(Path(cache_dir) / "_vector_db")
@@ -75,6 +78,58 @@ class FeishuDocManager:
             f"飞书文档管理器初始化: cache_dir={cache_dir}, ttl={cache_ttl}s, "
             f"sources={self.sources}, use_gpu={use_gpu}, gpu_id={gpu_id}"
         )
+
+        # 启动后台定时同步线程
+        self._start_background_sync()
+
+    def _start_background_sync(self):
+        """启动后台定时同步线程，首次启动时立即执行一次同步"""
+        if not self.sources:
+            return
+
+        self._sync_thread = threading.Thread(
+            target=self._background_sync_loop,
+            name="feishu-doc-sync",
+            daemon=True
+        )
+        self._sync_thread.start()
+        logger.info(f"后台文档同步线程已启动，间隔 {self._sync_interval}s")
+
+    def _background_sync_loop(self):
+        """后台同步循环：启动时立即同步一次，之后每隔 N 秒增量检查"""
+        # 启动时立即同步一次
+        self._do_incremental_sync()
+
+        while not self._stop_event.is_set():
+            # 等待下一次同步（可被 stop 中断）
+            if self._stop_event.wait(timeout=self._sync_interval):
+                break
+            self._do_incremental_sync()
+
+    def _do_incremental_sync(self):
+        """执行一次增量同步：比对 edit_time，只更新有变化的文档，重建索引"""
+        try:
+            logger.info("开始定时增量同步...")
+            all_docs = self.sync_docs(force=False, ignore_ttl=True)
+
+            if all_docs:
+                with self._lock:
+                    self._search_engine.index_documents(all_docs)
+                    self._indexed = True
+                online_count = sum(1 for d in all_docs if not d.get("token", "").startswith("local_"))
+                local_count = len(all_docs) - online_count
+                logger.info(f"定时同步完成，索引已更新: {len(all_docs)} 篇文档（在线 {online_count}, 本地 {local_count}）")
+            else:
+                logger.info("定时同步完成，无文档")
+        except Exception as e:
+            logger.error(f"定时同步异常: {e}")
+
+    def stop_background_sync(self):
+        """停止后台同步线程（用于优雅退出）"""
+        self._stop_event.set()
+        if self._sync_thread and self._sync_thread.is_alive():
+            self._sync_thread.join(timeout=5)
+            logger.info("后台文档同步线程已停止")
 
     @staticmethod
     def _normalize_sources(sources: List[Any]) -> List[Dict[str, str]]:
@@ -160,25 +215,35 @@ class FeishuDocManager:
         return result
 
     def _ensure_indexed(self):
-        """确保文档已加载到缓存并建立检索索引（含在线文档 + 本地文档）"""
+        """确保文档已建立检索索引（后台同步线程负责加载和更新）"""
         if self._indexed:
             return
 
-        all_docs = self.sync_docs()
+        # 后台同步还没完成，尝试从本地缓存快速加载
+        with self._lock:
+            if self._indexed:
+                return
 
-        if all_docs:
-            self._search_engine.index_documents(all_docs)
-            self._indexed = True
-            online_count = sum(1 for d in all_docs if not d.get("token", "").startswith("local_"))
-            local_count = len(all_docs) - online_count
-            logger.info(f"检索索引已建立: {len(all_docs)} 篇文档（在线 {online_count}, 本地 {local_count}）")
+            all_docs = []
+            for source in self.sources:
+                cached = self._load_from_cache(source["token"])
+                if cached:
+                    all_docs.extend(cached)
+            local_docs = self._load_all_local_docs()
+            all_docs.extend(local_docs)
 
-    def sync_docs(self, force: bool = False) -> List[Dict[str, str]]:
+            if all_docs:
+                self._search_engine.index_documents(all_docs)
+                self._indexed = True
+                logger.info(f"从本地缓存快速加载索引: {len(all_docs)} 篇文档")
+
+    def sync_docs(self, force: bool = False, ignore_ttl: bool = False) -> List[Dict[str, str]]:
         """
         同步所有文档到本地缓存（不建立向量索引）
 
         Args:
-            force: 是否强制重新获取（忽略缓存 TTL）
+            force: 是否强制重新获取（清空缓存全量拉取）
+            ignore_ttl: 是否忽略 TTL 强制检查更新（增量比对 edit_time）
 
         Returns:
             所有文档列表
@@ -195,7 +260,7 @@ class FeishuDocManager:
 
         # 在线飞书文档
         for source in self.sources:
-            docs = self._get_docs_for_source(source["token"], source["type"])
+            docs = self._get_docs_for_source(source["token"], source["type"], ignore_ttl=ignore_ttl)
             all_docs.extend(docs)
 
         # 本地离线文档
@@ -287,18 +352,19 @@ class FeishuDocManager:
             logger.info(f"加载本地文档: {len(docs)} 篇")
         return docs
 
-    def _get_docs_for_source(self, source_token: str, source_type: str = "wiki") -> List[Dict[str, str]]:
+    def _get_docs_for_source(self, source_token: str, source_type: str = "wiki", ignore_ttl: bool = False) -> List[Dict[str, str]]:
         """获取某个 source 下的所有文档
 
         Args:
             source_token: 源 token
             source_type: "wiki" 或 "drive"
+            ignore_ttl: 是否忽略 TTL 强制检查更新（定时同步时使用）
         """
         # 检查缓存
         cached = self._load_from_cache(source_token)
         if cached is not None:
             # 缓存存在，检查是否需要更新
-            updated_docs = self._check_and_update(source_token, cached, source_type)
+            updated_docs = self._check_and_update(source_token, cached, source_type, ignore_ttl=ignore_ttl)
             if updated_docs is not None:
                 self._indexed = False  # 文档有更新，需要重建索引
                 return updated_docs
@@ -331,7 +397,7 @@ class FeishuDocManager:
         else:  # wiki
             return self.mcp_client.wiki_read_document(token)
 
-    def _check_and_update(self, source_token: str, cached_docs: List[Dict[str, str]], source_type: str = "wiki") -> Optional[List[Dict[str, str]]]:
+    def _check_and_update(self, source_token: str, cached_docs: List[Dict[str, str]], source_type: str = "wiki", ignore_ttl: bool = False) -> Optional[List[Dict[str, str]]]:
         """
         检查缓存并增量更新
 
@@ -341,13 +407,13 @@ class FeishuDocManager:
         """
         cache_path = self._get_cache_path(source_token)
 
-        # TTL 内直接返回
-        if self._is_cache_valid(cache_path):
+        # TTL 内直接返回（定时同步时跳过 TTL 检查）
+        if not ignore_ttl and self._is_cache_valid(cache_path):
             logger.info(f"缓存 TTL 有效: source={source_token}, docs={len(cached_docs)}")
             return None
 
-        # TTL 过期，获取最新元数据比对
-        logger.info(f"缓存 TTL 过期，检查文档更新: source={source_token}, type={source_type}")
+        # 获取最新元数据比对
+        logger.info(f"检查文档更新: source={source_token}, type={source_type}")
         try:
             latest_meta = self._fetch_metadata_tree(source_token, source_type=source_type)
         except Exception as e:
@@ -466,9 +532,9 @@ class FeishuDocManager:
             token_name_map = {token: ""}  # 根节点
             token_parent_map = {}
             for item in items:
-                node_token = item.get("token", "")
+                node_token = item.get("node_token") or item.get("token", "")
                 name = item.get("name") or item.get("title") or "未知"
-                parent = item.get("parent_token", token)
+                parent = item.get("parent_node_token") or item.get("parent_token", token)
                 if node_token:
                     token_name_map[node_token] = name
                     token_parent_map[node_token] = parent
@@ -488,9 +554,9 @@ class FeishuDocManager:
                 return "/".join(parts)
 
             for item in items:
-                child_token = item.get("token", "")
+                child_token = item.get("node_token") or item.get("token", "")
                 title = item.get("name") or item.get("title") or "未知"
-                node_type = item.get("type", "")
+                node_type = item.get("obj_type") or item.get("type", "")
                 obj_token = item.get("obj_token") or child_token
                 edit_time = item.get("modified_time") or item.get("edit_time") or item.get("update_time")
 

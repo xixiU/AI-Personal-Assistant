@@ -521,7 +521,7 @@ class HybridSearchEngine:
         self, query: str, docs: List[Dict[str, Any]], threshold: float = 0.35
     ) -> List[Dict[str, Any]]:
         """
-        用 Embedding 相似度过滤标题与 query 明显不相关的文档
+        用 Embedding 相似度过滤标题+目录路径与 query 明显不相关的文档
 
         threshold: 相似度低于此值的文档被过滤（0.35 比较宽松，只过滤明显不相关的）
         """
@@ -530,10 +530,19 @@ class HybridSearchEngine:
         if not docs:
             return docs
 
-        titles = [doc["title"] for doc in docs]
-        # 计算 query 和所有标题的 Embedding
+        # 标题 + 目录路径组合匹配，提高准确度
+        title_with_paths = []
+        for doc in docs:
+            title = doc.get("title", "")
+            path = doc.get("path", "")
+            if path and path != title:
+                title_with_paths.append(f"{path}/{title}")
+            else:
+                title_with_paths.append(title)
+
+        # 计算 query 和所有标题+路径的 Embedding
         query_emb = np.array(self._embedding_fn._encode([query]))  # (1, dim)
-        title_embs = np.array(self._embedding_fn._encode(titles))  # (n, dim)
+        title_embs = np.array(self._embedding_fn._encode(title_with_paths))  # (n, dim)
 
         # 余弦相似度（已 L2 归一化，直接点积）
         similarities = (query_emb @ title_embs.T).flatten()
@@ -544,7 +553,7 @@ class HybridSearchEngine:
             if similarities[i] >= threshold:
                 filtered.append(doc)
             else:
-                removed.append(f"{doc['title']}({similarities[i]:.3f})")
+                removed.append(f"{title_with_paths[i]}({similarities[i]:.3f})")
 
         # 至少保留 3 个结果，避免过度过滤
         if len(filtered) < 3 and len(docs) >= 3:
