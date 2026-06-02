@@ -21,13 +21,12 @@ services:
     image: ai-assistant:gpu          # 构建后的镜像名称
     container_name: ai-assistant-gpu # 容器名称
     restart: unless-stopped          # 异常退出时自动重启（手动停止除外）
+    # network_mode: host               # 使用宿主机网络（解决内网 DNS 解析问题）
+    # cat /etc/resolv.conf
+    dns:
+      - 192.168.75.14                # 使用宿主机内网 DNS（能解析 xfchat.iflytek.com 内网地址）
 
     # GPU 资源分配
-    # device_ids: 指定使用宿主机的哪张 GPU
-    #   - ['0'] 使用第一张 GPU
-    #   - ['1'] 使用第二张 GPU
-    #   - ['0', '1'] 使用两张 GPU
-    # 注意：device_ids 指定后，容器内看到的 GPU 编号会重新从 0 开始
     deploy:
       resources:
         reservations:
