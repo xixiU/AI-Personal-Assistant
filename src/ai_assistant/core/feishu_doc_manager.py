@@ -360,10 +360,13 @@ class FeishuDocManager:
             source_type: "wiki" 或 "drive"
             ignore_ttl: 是否忽略 TTL 强制检查更新（定时同步时使用）
         """
+        logger.info(f"获取文档源: source={source_token}, type={source_type}")
+
         # 检查缓存
         cached = self._load_from_cache(source_token)
         if cached is not None:
             # 缓存存在，检查是否需要更新
+            logger.debug(f"发现缓存，检查更新: source={source_token}, type={source_type}")
             updated_docs = self._check_and_update(source_token, cached, source_type, ignore_ttl=ignore_ttl)
             if updated_docs is not None:
                 self._indexed = False  # 文档有更新，需要重建索引
@@ -392,9 +395,12 @@ class FeishuDocManager:
 
     def _mcp_read_document(self, token: str, source_type: str) -> Any:
         """根据 source_type 调用对应的 MCP 接口读取文档"""
+        logger.debug(f"MCP 读取文档: token={token}, source_type={source_type}")
         if source_type == "drive":
+            logger.debug(f"调用 drive_read_document: file_id={token}")
             return self.mcp_client.drive_read_document(token)
         else:  # wiki
+            logger.debug(f"调用 wiki_read_document: wiki_token={token}")
             return self.mcp_client.wiki_read_document(token)
 
     def _check_and_update(self, source_token: str, cached_docs: List[Dict[str, str]], source_type: str = "wiki", ignore_ttl: bool = False) -> Optional[List[Dict[str, str]]]:
@@ -405,6 +411,7 @@ class FeishuDocManager:
             None: 缓存有效，无需更新（调用方直接使用 cached_docs）
             List: 更新后的文档列表
         """
+        logger.debug(f"进入 _check_and_update: source={source_token}, type={source_type}, cached_docs={len(cached_docs)}")
         cache_path = self._get_cache_path(source_token)
 
         # TTL 内直接返回（定时同步时跳过 TTL 检查）
@@ -604,8 +611,13 @@ class FeishuDocManager:
         try:
             result = self._mcp_read_document(token, source_type)
             if isinstance(result, str):
+                # 检测 MCP 返回的错误信息
                 if result.startswith("Error executing tool") or result.startswith("Error:"):
                     logger.warning(f"文档读取返回错误，跳过: title='{title}', token={token}, error={result[:200]}")
+                    return None
+                # 检测不支持的文档类型（MCP 返回的 JSON 格式错误）
+                if '"error"' in result and '不支持的文档类型' in result:
+                    logger.info(f"文档类型不支持（旧版飞书文档），跳过: title='{title}', token={token}")
                     return None
                 return result
             if isinstance(result, dict):
