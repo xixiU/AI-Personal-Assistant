@@ -583,6 +583,9 @@ class FeishuDocManager:
                 parts.reverse()
                 return "/".join(parts)
 
+            success_count = 0
+            fail_count = 0
+            skip_count = 0
             for item in items:
                 child_token = item.get("node_token") or item.get("token", "")
                 title = item.get("name") or item.get("title") or "未知"
@@ -593,8 +596,17 @@ class FeishuDocManager:
                 # 构建完整路径
                 current_path = build_path(child_token)
 
-                # 读取文档内容（folder 类型跳过）
-                if obj_token and node_type not in ("folder",):
+                # 跳过不可读的类型
+                skip_types = ("folder", "file")
+                if source_type == "drive":
+                    skip_types = ("folder", "file", "shortcut")
+
+                if node_type in skip_types:
+                    skip_count += 1
+                    continue
+
+                # 读取文档内容
+                if obj_token:
                     # 根据 source_type 选择读取接口
                     # wiki 模式用 child_token (wiki_token)，drive 模式用 obj_token
                     read_token = child_token if source_type == "wiki" else obj_token
@@ -612,6 +624,11 @@ class FeishuDocManager:
                             "url": url,
                             "source_type": source_type,
                         })
+                        success_count += 1
+                    else:
+                        fail_count += 1
+
+            logger.info(f"全量同步完成: token={token}, 成功 {success_count} 篇, 失败 {fail_count} 篇, 跳过 {skip_count} 篇")
 
         except Exception as e:
             logger.error(f"获取文档树失败: token={token}, error={e}")
