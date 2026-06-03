@@ -458,11 +458,34 @@ class FeishuDocManager:
         # 获取完整目录树用于路径信息
         all_items = self._get_all_items(source_token, source_type)
         item_map = {}
+        token_name_map = {source_token: ""}
+        token_parent_map = {}
         for item in all_items:
             t = item.get("obj_token") or item.get("token", "")
+            nt = item.get("node_token") or item.get("token", "")
+            name = item.get("name") or item.get("title") or "未知"
+            parent = item.get("parent_node_token") or item.get("parent_token", source_token)
             if t:
                 item_map[t] = item
+            if nt:
+                token_name_map[nt] = name
+                token_parent_map[nt] = parent
 
+        def build_path(node_tk: str) -> str:
+            parts = []
+            current = node_tk
+            visited = set()
+            while current and current != source_token and current not in visited:
+                visited.add(current)
+                name = token_name_map.get(current, "")
+                if name:
+                    parts.append(name)
+                current = token_parent_map.get(current)
+            parts.reverse()
+            return "/".join(parts)
+
+        success_count = 0
+        fail_count = 0
         for token in tokens_to_update:
             item = item_map.get(token, {})
             node_token = item.get("node_token") or item.get("token", "")
@@ -471,10 +494,11 @@ class FeishuDocManager:
             read_token = node_token if source_type == "wiki" else token
             content = self._read_document(read_token, source_type, title=title)
             if not content:
+                fail_count += 1
                 continue
+            success_count += 1
             edit_time = latest_meta.get(token)
-            parent_path = item.get("parent_path", "")
-            current_path = f"{parent_path}/{title}" if parent_path else title
+            current_path = build_path(node_token) if node_token else title
             url = self._build_doc_url(node_token, token, source_type=source_type)
 
             new_doc = {
@@ -504,7 +528,7 @@ class FeishuDocManager:
 
         # 保存更新后的缓存
         self._save_to_cache(source_token, updated_docs)
-        logger.info(f"增量更新完成: source={source_token}, 更新 {len(tokens_to_update)} 篇, 总计 {len(updated_docs)} 篇")
+        logger.info(f"增量更新完成: source={source_token}, 成功 {success_count} 篇, 失败 {fail_count} 篇, 总计 {len(updated_docs)} 篇")
         return updated_docs
 
     def _get_all_items(self, source_token: str, source_type: str = "wiki") -> List[Dict[str, Any]]:
