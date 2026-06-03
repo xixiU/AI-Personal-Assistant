@@ -605,7 +605,7 @@ class FeishuDocManager:
             result = self._mcp_read_document(token, source_type)
             if isinstance(result, str):
                 if result.startswith("Error executing tool") or result.startswith("Error:"):
-                    logger.warning(f"文档读取返回错误，跳过: title='{title}', token={token}, error={result[:120]}")
+                    logger.warning(f"文档读取返回错误，跳过: title='{title}', token={token}, error={result[:200]}")
                     return None
                 return result
             if isinstance(result, dict):
