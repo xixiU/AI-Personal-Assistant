@@ -465,7 +465,7 @@ class FeishuDocManager:
 
         for token in tokens_to_update:
             item = item_map.get(token, {})
-            node_token = item.get("token", "")
+            node_token = item.get("node_token") or item.get("token", "")
             title = item.get("name") or item.get("title") or "未知"
             # wiki 模式用 node_token 读取，drive 模式用 obj_token
             read_token = node_token if source_type == "wiki" else token
