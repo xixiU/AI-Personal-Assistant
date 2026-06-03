@@ -459,13 +459,12 @@ class FeishuDocManager:
         for token in tokens_to_update:
             item = item_map.get(token, {})
             node_token = item.get("token", "")
+            title = item.get("name") or item.get("title") or "未知"
             # wiki 模式用 node_token 读取，drive 模式用 obj_token
             read_token = node_token if source_type == "wiki" else token
-            content = self._read_document(read_token, source_type)
+            content = self._read_document(read_token, source_type, title=title)
             if not content:
                 continue
-
-            title = item.get("name") or item.get("title") or "未知"
             edit_time = latest_meta.get(token)
             parent_path = item.get("parent_path", "")
             current_path = f"{parent_path}/{title}" if parent_path else title
@@ -568,7 +567,7 @@ class FeishuDocManager:
                     # 根据 source_type 选择读取接口
                     # wiki 模式用 child_token (wiki_token)，drive 模式用 obj_token
                     read_token = child_token if source_type == "wiki" else obj_token
-                    content = self._read_document(read_token, source_type)
+                    content = self._read_document(read_token, source_type, title=title)
                     if content:
                         # 构建文档 URL
                         url = self._build_doc_url(child_token, obj_token, node_type, source_type)
@@ -600,14 +599,13 @@ class FeishuDocManager:
                     return [item for item in result[key] if isinstance(item, dict)]
         return []
 
-    def _read_document(self, token: str, source_type: str = "wiki") -> Optional[str]:
+    def _read_document(self, token: str, source_type: str = "wiki", title: str = "") -> Optional[str]:
         """读取单个文档内容（根据 source_type 调用对应接口）"""
         try:
             result = self._mcp_read_document(token, source_type)
             if isinstance(result, str):
-                # 检测 MCP 返回的错误信息（QPS 限制、404 等）
                 if result.startswith("Error executing tool") or result.startswith("Error:"):
-                    logger.warning(f"文档读取返回错误（可能 QPS 限制），跳过: token={token}, error={result[:100]}")
+                    logger.warning(f"文档读取返回错误，跳过: title='{title}', token={token}, error={result[:120]}")
                     return None
                 return result
             if isinstance(result, dict):
@@ -618,7 +616,7 @@ class FeishuDocManager:
                 )
             return str(result) if result else None
         except Exception as e:
-            logger.warning(f"读取文档失败: token={token}, type={source_type}, error={e}")
+            logger.warning(f"读取文档失败: title='{title}', token={token}, type={source_type}, error={e}")
             return None
 
     def _build_doc_url(self, node_token: str, obj_token: str, node_type: str = "", source_type: str = "") -> str:
