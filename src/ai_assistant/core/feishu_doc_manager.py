@@ -62,6 +62,7 @@ class FeishuDocManager:
         self._sync_interval = 1800  # 定时同步间隔（秒），默认 30 分钟
         self._sync_thread = None
         self._stop_event = threading.Event()
+        self._ai_provider = None  # AI provider 用于标题过滤，在初始化后设置
 
         # 混合检索引擎（支持 GPU 加速）
         vector_db_dir = str(Path(cache_dir) / "_vector_db")
@@ -190,15 +191,35 @@ class FeishuDocManager:
             logger.warning("未配置飞书文档 sources，跳过文档检索")
             return ""
 
+        # 清理 query：去掉飞书 @ 提及
+        cleaned_query = re.sub(r'@_user_\d+\s*', '', query_text)
+        cleaned_query = cleaned_query.strip()
+
+        # 用大模型提取关键词增强检索
+        keywords = self._extract_keywords(cleaned_query)
+        if keywords:
+            # 关键词拼接到 query 前面，提高权重
+            enhanced_query = " ".join(keywords) + " " + cleaned_query
+            logger.info(f"关键词增强检索: '{cleaned_query}' → keywords={keywords}")
+        else:
+            enhanced_query = cleaned_query
+
         # 确保文档已加载并建立索引
         self._ensure_indexed()
 
-        # 使用混合检索
-        results = self._search_engine.search(query_text, top_k=self.MAX_DOCS_IN_PROMPT)
+        # 使用混合检索（返回更多候选）
+        candidates = self._search_engine.search(enhanced_query, top_k=self.MAX_DOCS_IN_PROMPT)
 
-        if not results:
+        if not candidates:
             logger.info(f"检索无结果: '{query_text[:50]}'")
             return ""
+
+        # 用 AI 过滤标题：判断哪些文档标题与 query 相关
+        results = self._filter_docs_by_ai(cleaned_query, candidates)
+
+        if not results:
+            logger.info(f"AI 过滤后无结果，使用原始检索结果")
+            results = candidates[:self.MAX_DOCS_IN_PROMPT]
 
         # 拼接文档内容，限制总字符数避免 prompt 过大
         max_total_chars = 50000
@@ -916,3 +937,63 @@ class FeishuDocManager:
                 logger.info(f"缓存已保存: source={source_token}, docs={len(docs)}")
             except Exception as e:
                 logger.error(f"保存缓存失败: source={source_token}, error={e}")
+
+    def _filter_docs_by_ai(self, query: str, docs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """用 AI 过滤文档：判断标题（含父目录）与 query 的相关性"""
+        if not self._ai_provider or not docs:
+            logger.debug(f"无 AI provider 或无文档，返回前 {self.MAX_DOCS_IN_PROMPT} 篇")
+            return docs[:self.MAX_DOCS_IN_PROMPT]
+
+        try:
+            # 构造候选列表：编号 + 路径（含父目录）
+            candidates_lines = []
+            for i, doc in enumerate(docs, 1):
+                path = doc.get("path", doc.get("title", ""))
+                candidates_lines.append(f"{i}. {path}")
+
+            candidates_text = "\n".join(candidates_lines)
+
+            logger.info(f"AI 标题过滤输入:\n查询: {query}\n候选文档({len(docs)}篇):\n{candidates_text}")
+
+            # 调用 AI 判断相关性
+            prompt = f"""用户查询: {query}
+
+以下是候选文档列表（含完整父目录路径）：
+{candidates_text}
+
+请判断哪些文档标题与用户查询相关，返回相关文档的编号，用逗号分隔。只输出编号，不要其他内容。"""
+
+            response = self._ai_provider.client.messages.create(
+                model=self._ai_provider.model,
+                max_tokens=100,
+                messages=[{"role": "user", "content": prompt}]
+            )
+
+            text = response.content[0].text.strip()
+            logger.info(f"AI 标题过滤输出: {text}")
+
+            # 解析返回的编号
+            selected_indices = []
+            for part in text.replace('，', ',').split(','):
+                try:
+                    idx = int(part.strip())
+                    if 1 <= idx <= len(docs):
+                        selected_indices.append(idx - 1)  # 转为 0-based
+                except:
+                    continue
+
+            if selected_indices:
+                filtered = [docs[i] for i in selected_indices[:self.MAX_DOCS_IN_PROMPT]]
+                logger.info(f"AI 过滤后保留 {len(filtered)} 篇: {[d['title'] for d in filtered]}")
+                return filtered
+            else:
+                logger.warning("AI 未返回有效编号，使用原始排序")
+                return docs[:self.MAX_DOCS_IN_PROMPT]
+
+        except Exception as e:
+            logger.warning(f"AI 过滤失败: {e}，使用原始排序")
+            return docs[:self.MAX_DOCS_IN_PROMPT]
+
+    def set_ai_provider(self, ai_provider):
+        """设置 AI provider（用于标题过滤）"""
+        self._ai_provider = ai_provider

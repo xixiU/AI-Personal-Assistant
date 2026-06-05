@@ -115,7 +115,13 @@ class AnthropicProvider(AIProvider):
                     logger.warning(f"文档获取失败，降级到无文档模式: {e}")
 
             if len(system_parts) > 1:
-                system_parts.append("请基于以上文档内容回答用户的问题。如果文档中没有相关信息，请如实告知。")
+                system_parts.append(
+                    "请基于以上文档内容回答用户的问题。如果文档中没有相关信息，请如实告知。\n"
+                    "回答完成后，在末尾附加参考文档链接（除非用户明确要求不附加），格式如下：\n"
+                    "---\n"
+                    "📎 参考文档：\n"
+                    "- [文档标题](原文链接)"
+                )
 
             system_prompt = "\n\n".join(system_parts)
 

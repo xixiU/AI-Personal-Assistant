@@ -228,7 +228,13 @@ class Text2VecEmbeddingFunction:
 class HybridSearchEngine:
     """混合检索引擎：向量检索 + BM25"""
 
-    def __init__(self, persist_dir: str = "./data/vector_db", use_gpu: bool = False, gpu_id: int = 0, batch_size: int = 32):
+    def __init__(
+        self,
+        persist_dir: str = "./data/vector_db",
+        use_gpu: bool = False,
+        gpu_id: int = 0,
+        batch_size: int = 32
+    ):
         """
         Args:
             persist_dir: ChromaDB 持久化目录
@@ -318,17 +324,17 @@ class HybridSearchEngine:
             url = doc.get("url", "")
 
             if len(content) <= CHUNK_SIZE * 2:
-                # 短文档：整篇索引
+                # 短文档：整篇索引，标题重复 3 次提高权重
                 ids.append(token)
-                documents.append(f"{title}\n{title}\n{path}\n{content}")
+                documents.append(f"{title}\n{title}\n{title}\n{path}\n{content}")
                 metadatas.append({"title": title, "path": path, "token": token, "url": url})
             else:
-                # 长文档：分块索引，每块带标题前缀
+                # 长文档：分块索引，每块都重复标题 3 次提高权重
                 chunks = self._split_text(content, CHUNK_SIZE, CHUNK_OVERLAP)
                 for i, chunk in enumerate(chunks):
                     chunk_id = f"{token}_chunk{i}"
                     ids.append(chunk_id)
-                    documents.append(f"{title}\n{path}\n{chunk}")
+                    documents.append(f"{title}\n{title}\n{title}\n{path}\n{chunk}")
                     metadatas.append({"title": title, "path": path, "token": token, "chunk": i, "url": url})
 
         if ids:
@@ -340,11 +346,15 @@ class HybridSearchEngine:
                     metadatas=metadatas[i:i+batch_size],
                 )
 
-        # BM25 索引：全文索引（不分块，精确匹配需要完整内容）
+        # BM25 索引：全文索引（不分块），标题重复 5 次提高权重
         self._bm25_docs = docs
         self._bm25_corpus = []
         for doc in docs:
-            text = f"{doc.get('title', '')} {doc.get('path', '')} {doc.get('content', '')}"
+            title = doc.get('title', '')
+            path = doc.get('path', '')
+            content = doc.get('content', '')
+            # 标题重复 5 次，大幅提高标题关键词的匹配权重
+            text = f"{title} {title} {title} {title} {title} {path} {content}"
             tokens = list(jieba.cut(text))
             self._bm25_corpus.append(tokens)
 
@@ -377,17 +387,17 @@ class HybridSearchEngine:
             return []
 
         # 1. 向量检索
-        vector_results = self._vector_search(query, top_k=top_k * 2)
+        vector_results = self._vector_search(query, top_k=top_k * 3)
 
         # 2. BM25 检索
-        bm25_results = self._bm25_search(query, top_k=top_k * 2)
+        bm25_results = self._bm25_search(query, top_k=top_k * 3)
 
-        # 3. RRF 融合（BM25 权重更高，因为中文场景下关键词匹配更可靠）
-        fused = self._rrf_fusion(vector_results, bm25_results, k=60, bm25_weight=1.5)
+        # 3. RRF 融合（向量和 BM25 等权）
+        fused = self._rrf_fusion(vector_results, bm25_results, k=60, bm25_weight=1.0)
         fused_titles = [d['title'] for d in fused]
 
-        # 4. 标题相关性过滤：用 Embedding 计算 query 与标题的相似度，过滤明显不相关的
-        fused = self._filter_by_title_relevance(query, fused, threshold=0.35)
+        # 取 top_k（不再做标题过滤，让调用方决定是否过滤）
+        results = fused[:top_k * 2]  # 多返回一些候选，让上层做 AI 过滤
 
         # 取 top_k
         results = fused[:top_k]
@@ -555,9 +565,9 @@ class HybridSearchEngine:
             else:
                 removed.append(f"{title_with_paths[i]}({similarities[i]:.3f})")
 
-        # 至少保留 3 个结果，避免过度过滤
-        if len(filtered) < 3 and len(docs) >= 3:
-            filtered = docs[:3]
+        # 至少保留 5 个结果，避免过度过滤
+        if len(filtered) < 5 and len(docs) >= 5:
+            filtered = docs[:5]
 
         if removed:
             logger.info(f"标题相关性过滤: 移除{len(removed)}篇(阈值{threshold}): {removed}")

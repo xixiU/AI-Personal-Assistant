@@ -124,6 +124,8 @@ class AIAssistant:
             )
             # 回填 doc_manager 到 Provider
             self.ai_provider.doc_manager = doc_manager
+            # 设置 AI provider 到 doc_manager（用于标题过滤）
+            doc_manager.set_ai_provider(self.ai_provider)
             self.doc_manager = doc_manager
             logger.info("飞书文档管理器已启用")
 
