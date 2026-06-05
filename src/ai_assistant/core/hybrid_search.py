@@ -396,11 +396,8 @@ class HybridSearchEngine:
         fused = self._rrf_fusion(vector_results, bm25_results, k=60, bm25_weight=1.0)
         fused_titles = [d['title'] for d in fused]
 
-        # 取 top_k（不再做标题过滤，让调用方决定是否过滤）
-        results = fused[:top_k * 2]  # 多返回一些候选，让上层做 AI 过滤
-
-        # 取 top_k
-        results = fused[:top_k]
+        # 返回更多候选，让上层做 AI 过滤
+        results = fused[:top_k * 2]
 
         # 详细日志
         vector_titles = [f"{d['title']}({d['score']:.3f})" for d in vector_results[:5]]
