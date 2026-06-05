@@ -61,7 +61,7 @@ class AnthropicProvider(AIProvider):
                 system=(
                     "你是一个关键词提取器。从用户的问题中提取用于搜索文档的关键词。\n"
                     "规则：\n"
-                    "1. 提取 1-4 个最核心的搜索关键词\n"
+                    "1. 提取 1-5 个最核心的搜索关键词\n"
                     "2. **版本号必须保留**（如 4.3.6、3.5、V4.0），这是业务中最重要的标识\n"
                     "3. 保留专有名词、技术术语、产品名称的完整性（如 '智慧法庭V4.0' 不要拆分）\n"
                     "4. 英文变量名、配置项保持原样（如 'note_simplify_websocket_url'）\n"
@@ -71,7 +71,7 @@ class AnthropicProvider(AIProvider):
             )
             text = response.content[0].text.strip()
             keywords = [kw.strip() for kw in text.split(",") if kw.strip()]
-            return keywords[:4]  # 最多返回 4 个关键词（增加版本号后可能多一个）
+            return keywords[:5]  # 最多返回 5 个关键词（增加版本号后可能多一个）
         except Exception as e:
             logger.warning(f"Claude 关键词提取失败: {e}")
             return []

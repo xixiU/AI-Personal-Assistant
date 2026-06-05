@@ -772,7 +772,7 @@ class FeishuDocManager:
         # 提取连续中文或英文片段
         segments = re.findall(r'[\u4e00-\u9fff]{2,}|[a-zA-Z0-9_.]{2,}', text)
         keywords = [s for s in segments if len(s) >= 2]
-        return keywords[:3]
+        return keywords[:4]
 
     def _filter_relevant_docs(
         self, docs: List[Dict[str, str]], keywords: List[str]
