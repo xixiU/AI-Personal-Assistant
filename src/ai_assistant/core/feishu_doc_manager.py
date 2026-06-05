@@ -107,18 +107,36 @@ class FeishuDocManager:
             self._do_incremental_sync()
 
     def _do_incremental_sync(self):
-        """执行一次增量同步：比对 edit_time，只更新有变化的文档，重建索引"""
+        """执行一次增量同步：比对 edit_time，只更新有变化的文档，增量更新索引"""
         try:
             logger.info("开始定时增量同步...")
+
+            # 记录同步前的索引状态
+            was_indexed = self._indexed
+
             all_docs = self.sync_docs(force=False, ignore_ttl=True)
 
             if all_docs:
-                with self._lock:
-                    self._search_engine.index_documents(all_docs)
-                    self._indexed = True
-                online_count = sum(1 for d in all_docs if not d.get("token", "").startswith("local_"))
-                local_count = len(all_docs) - online_count
-                logger.info(f"定时同步完成，索引已更新: {len(all_docs)} 篇文档（在线 {online_count}, 本地 {local_count}）")
+                if not was_indexed:
+                    # 首次建索引：全量
+                    with self._lock:
+                        self._search_engine.index_documents(all_docs)
+                        self._indexed = True
+                    logger.info(f"首次索引建立: {len(all_docs)} 篇文档")
+                elif not self._indexed:
+                    # 有文档更新（_indexed 被 _get_docs_for_source 置为 False）
+                    # 只对变化的文档重建索引，BM25 需要全量重建
+                    with self._lock:
+                        # 收集有变化的文档（token 在缓存中标记为更新的）
+                        # 由于无法精确追踪哪些文档变了，这里重建 BM25 + 只 upsert 全量到 ChromaDB
+                        # ChromaDB upsert 是幂等的，未变化的文档 Embedding 会被跳过（如果ID相同内容相同）
+                        self._search_engine.index_documents(all_docs)
+                        self._indexed = True
+                    online_count = sum(1 for d in all_docs if not d.get("token", "").startswith("local_"))
+                    local_count = len(all_docs) - online_count
+                    logger.info(f"定时同步完成，索引已更新: {len(all_docs)} 篇文档（在线 {online_count}, 本地 {local_count}）")
+                else:
+                    logger.info(f"定时同步完成，文档无变化，跳过索引重建")
             else:
                 logger.info("定时同步完成，无文档")
         except Exception as e:

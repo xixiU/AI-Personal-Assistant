@@ -332,7 +332,7 @@ class HybridSearchEngine:
                     metadatas.append({"title": title, "path": path, "token": token, "chunk": i, "url": url})
 
         if ids:
-            batch_size = 5000
+            batch_size = 500
             for i in range(0, len(ids), batch_size):
                 self._collection.upsert(
                     ids=ids[i:i+batch_size],
