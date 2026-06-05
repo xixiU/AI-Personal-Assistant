@@ -25,6 +25,9 @@ services:
     # cat /etc/resolv.conf
     dns:
       - 192.168.75.14                # 使用宿主机内网 DNS（能解析 xfchat.iflytek.com 内网地址）
+    # 自选
+    networks:
+      - ai-net
 
     # GPU 资源分配
     deploy:
@@ -70,7 +73,9 @@ services:
     # 端口映射 [宿主机端口:容器端口]
     ports:
       - "11111:11111"
-
+    # 自选
+    networks:
+      - ai-net
     # 挂载目录
     volumes:
       - ../config.yaml:/app/config.yaml:ro  # 配置文件（只读）
@@ -82,3 +87,11 @@ services:
     environment:
       - PYTHONUNBUFFERED=1           # Python 输出不缓冲，实时显示日志
       - TZ=Asia/Shanghai             # 时区：东八区（UTC+8）
+  
+# 新增：自定义网络，使用不冲突的网段
+networks:
+  ai-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.88.0.0/24
