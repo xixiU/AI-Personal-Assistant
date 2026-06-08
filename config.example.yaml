@@ -126,3 +126,8 @@ logging:
   file: "logs/ai-assistant.log"
   rotation: "daily"
   retention: 7
+
+# 对话历史
+chat_history:
+  enabled: true                       # 是否开启对话历史保存（默认开启）
+  dir: "./data/chat_history"          # 保存目录（按天分文件，JSONL 格式）

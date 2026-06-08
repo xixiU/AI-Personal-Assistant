@@ -51,6 +51,10 @@ class Config:
     system_event_queue_size: int = 100  # 事件队列最大长度
     system_max_concurrent_workers: int = 5  # 最大并发处理数
 
+    # 对话历史
+    chat_history_enabled: bool = True  # 默认开启
+    chat_history_dir: str = "./data/chat_history"
+
     # 向量数据库配置
     vector_db_use_gpu: bool = False  # 是否使用 GPU 加速 Embedding 生成
     vector_db_gpu_id: Any = 0  # GPU 配置：单卡用 int (0/1)，多卡用 list ([0,1]) 或 str ("0,1")
@@ -152,6 +156,11 @@ class Config:
         if "logging" in data:
             config.logging_level = data["logging"].get("level", config.logging_level)
             config.logging_file = data["logging"].get("file", config.logging_file)
+
+        # 解析对话历史
+        if "chat_history" in data:
+            config.chat_history_enabled = data["chat_history"].get("enabled", config.chat_history_enabled)
+            config.chat_history_dir = data["chat_history"].get("dir", config.chat_history_dir)
 
         # 解析适配器
         if "adapters" in data:

@@ -134,6 +134,18 @@ class AIAssistant:
             notification=self.config.reply_notification
         )
 
+        # 初始化对话历史管理器
+        from ai_assistant.core.chat_history import ChatHistoryManager
+        if getattr(self.config, 'chat_history_enabled', True):
+            self.chat_history = ChatHistoryManager(
+                history_dir=getattr(self.config, 'chat_history_dir', './data/chat_history')
+            )
+            # 设置到 AIProvider 基类（所有渠道共享）
+            from ai_assistant.core.ai_provider import AIProvider
+            AIProvider.set_chat_history(self.chat_history)
+        else:
+            self.chat_history = None
+
         # 事件队列 + 线程池（支持多用户并发）
         self.event_queue = queue.Queue(maxsize=self.config.system_event_queue_size)
         self.executor = ThreadPoolExecutor(
@@ -268,6 +280,7 @@ class AIAssistant:
             session_id = parsed["chat_id"]
             text = parsed["text"]
             message_id = parsed["message_id"]
+            user_id = parsed.get("sender_id", "unknown")
 
             logger.info(f"Processing message for session: {session_id},text:{text}")
 

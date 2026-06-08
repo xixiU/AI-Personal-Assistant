@@ -8,6 +8,13 @@ from ai_assistant.core.models import Message
 class AIProvider(ABC):
     """AI Provider 抽象基类"""
 
+    _chat_history = None  # 对话历史管理器（类级共享）
+
+    @classmethod
+    def set_chat_history(cls, chat_history):
+        """设置对话历史管理器（所有 Provider 共享）"""
+        cls._chat_history = chat_history
+
     @abstractmethod
     def send_message(self, messages: List[Message], session_id: Optional[str] = None) -> str:
         """
@@ -24,7 +31,7 @@ class AIProvider(ABC):
 
     def call(self, messages: List[Message], session_id: Optional[str] = None) -> str:
         """
-        统一入口：记录日志 + 计时 + 调用 send_message
+        统一入口：记录日志 + 计时 + 调用 send_message + 保存历史
 
         所有外部调用应使用此方法，而非直接调用 send_message。
         """
@@ -38,6 +45,26 @@ class AIProvider(ABC):
         duration = time.time() - start
 
         logger.info(f"AI 回复完成: {len(reply)} 字符, 耗时={duration:.2f}s")
+
+        # 保存对话历史
+        if self._chat_history:
+            try:
+                # 提取最后一条用户消息作为 query
+                query = ""
+                for msg in reversed(messages):
+                    if msg.role == "user":
+                        query = " ".join(c.data for c in msg.content if c.type == "text")
+                        break
+                if query:
+                    self._chat_history.save(
+                        session_id=session_id or "unknown",
+                        query=query,
+                        answer=reply,
+                        latency_ms=int(duration * 1000),
+                    )
+            except Exception as e:
+                logger.warning(f"保存对话历史失败: {e}")
+
         return reply
 
     @abstractmethod

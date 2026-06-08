@@ -455,6 +455,7 @@
             .welcome-tips { grid-template-columns: 1fr; }
         }
     </style>
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
 </head>
 <body>
     <aside class="sidebar">
@@ -655,10 +656,26 @@
             if (imageUrl) html += `<img src="${imageUrl}" alt="图片">`;
 
             let text = content;
-            text = text.replace(/```(\w+)?\n([\s\S]*?)```/g, '<pre><code>$2</code></pre>');
-            text = text.replace(/`([^`]+)`/g, '<code>$1</code>');
-            text = text.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
-            text = text.replace(/\n/g, '<br>');
+            // 使用 marked.js 渲染 markdown（支持链接、代码块、表格等）
+            if (typeof marked !== 'undefined') {
+                marked.setOptions({
+                    breaks: true,
+                    gfm: true,
+                });
+                // 所有链接新标签页打开
+                const renderer = new marked.Renderer();
+                renderer.link = function(href, title, text) {
+                    return `<a href="${href}" target="_blank" rel="noopener">${text}</a>`;
+                };
+                text = marked.parse(text, { renderer: renderer });
+            } else {
+                // 降级：简单正则处理
+                text = text.replace(/```(\w+)?\n([\s\S]*?)```/g, '<pre><code>$2</code></pre>');
+                text = text.replace(/`([^`]+)`/g, '<code>$1</code>');
+                text = text.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+                text = text.replace(/\[([^\]]+)\]\((https?:\/\/[^\)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+                text = text.replace(/\n/g, '<br>');
+            }
             html += text;
 
             contentEl.innerHTML = html;
