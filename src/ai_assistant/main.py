@@ -152,6 +152,8 @@ class AIAssistant:
             max_workers=self.config.system_max_concurrent_workers,
             thread_name_prefix="event-worker"
         )
+        self._processing_sessions = set()  # 正在处理中的 session，防重复提交
+        self._processing_lock = threading.Lock()
 
         # 初始化适配器
         self.adapters = []
@@ -282,6 +284,19 @@ class AIAssistant:
             message_id = parsed["message_id"]
             user_id = parsed.get("sender_id", "unknown")
 
+            # 防重复：同一 session 已有请求在处理中，将消息加入上下文但跳过 AI 调用
+            with self._processing_lock:
+                if session_id in self._processing_sessions:
+                    logger.info(f"Session {session_id} 已有请求在处理中，消息已加入上下文，跳过本次 AI 调用")
+                    user_message = Message(
+                        role="user",
+                        content=[Content(type="text", data=text)],
+                        timestamp=datetime.now()
+                    )
+                    self.context_manager.add_message(session_id, user_message)
+                    return
+                self._processing_sessions.add(session_id)
+
             logger.info(f"Processing message for session: {session_id},text:{text}")
 
             # 构建用户消息
@@ -329,6 +344,11 @@ class AIAssistant:
 
         except Exception as e:
             logger.error(f"Failed to process event: {e}", exc_info=True)
+        finally:
+            # 释放 session 处理锁
+            if 'session_id' in dir():
+                with self._processing_lock:
+                    self._processing_sessions.discard(session_id)
 
     def _parse_feishu_event(self, event_data: dict, adapter=None) -> Optional[dict]:
         """

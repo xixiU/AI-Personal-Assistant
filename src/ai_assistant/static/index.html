@@ -664,8 +664,10 @@
                 });
                 // 所有链接新标签页打开
                 const renderer = new marked.Renderer();
-                renderer.link = function(href, title, text) {
-                    return `<a href="${href}" target="_blank" rel="noopener">${text}</a>`;
+                renderer.link = function(token) {
+                    const href = token.href || '';
+                    const linkText = token.text || href;
+                    return `<a href="${href}" target="_blank" rel="noopener">${linkText}</a>`;
                 };
                 text = marked.parse(text, { renderer: renderer });
             } else {
