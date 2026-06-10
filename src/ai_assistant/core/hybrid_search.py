@@ -305,6 +305,9 @@ class HybridSearchEngine:
             return
 
         from rank_bm25 import BM25Okapi
+        import time
+
+        start_time = time.time()
 
         CHUNK_SIZE = 1000  # 向量索引的分块大小（字符）
         CHUNK_OVERLAP = 100  # 分块重叠
@@ -337,16 +340,23 @@ class HybridSearchEngine:
                     documents.append(f"{title}\n{title}\n{title}\n{path}\n{chunk}")
                     metadatas.append({"title": title, "path": path, "token": token, "chunk": i, "url": url})
 
+        logger.info(f"开始向量索引: {len(docs)} 篇文档 → {len(ids)} 个向量（包含分块）")
+
         if ids:
             batch_size = 500
             for i in range(0, len(ids), batch_size):
+                batch_end = min(i + batch_size, len(ids))
                 self._collection.upsert(
-                    ids=ids[i:i+batch_size],
-                    documents=documents[i:i+batch_size],
-                    metadatas=metadatas[i:i+batch_size],
+                    ids=ids[i:batch_end],
+                    documents=documents[i:batch_end],
+                    metadatas=metadatas[i:batch_end],
                 )
+                logger.info(f"向量索引进度: {batch_end}/{len(ids)}")
+
+        vector_time = time.time() - start_time
 
         # BM25 索引：全文索引（不分块），标题重复 5 次提高权重
+        logger.info(f"开始 BM25 索引: {len(docs)} 篇文档")
         self._bm25_docs = docs
         self._bm25_corpus = []
         for doc in docs:
@@ -359,7 +369,13 @@ class HybridSearchEngine:
             self._bm25_corpus.append(tokens)
 
         self._bm25 = BM25Okapi(self._bm25_corpus)
-        logger.info(f"文档索引完成: 向量={self._collection.count()}, BM25={len(self._bm25_corpus)}, 原始文档={len(docs)}")
+        bm25_time = time.time() - start_time - vector_time
+        total_time = time.time() - start_time
+
+        logger.info(
+            f"文档索引完成: 向量={self._collection.count()}, BM25={len(self._bm25_corpus)}, "
+            f"原始文档={len(docs)}, 耗时 {total_time:.1f}s (向量 {vector_time:.1f}s, BM25 {bm25_time:.1f}s)"
+        )
 
     @staticmethod
     def _split_text(text: str, chunk_size: int, overlap: int) -> List[str]:

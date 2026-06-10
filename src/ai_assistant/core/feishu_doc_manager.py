@@ -113,29 +113,25 @@ class FeishuDocManager:
             logger.info("开始定时增量同步...")
 
             # 记录同步前的索引状态
-            was_indexed = self._indexed
+            with self._lock:
+                was_indexed = self._indexed
+                need_rebuild = not self._indexed
 
             all_docs = self.sync_docs(force=False, ignore_ttl=True)
 
             if all_docs:
-                if not was_indexed:
-                    # 首次建索引：全量
+                if not was_indexed or need_rebuild:
+                    # 需要重建索引：在锁外执行（避免阻塞前台请求）
+                    logger.info(f"开始重建索引...({len(all_docs)} 篇文档，{'首次' if not was_indexed else '增量'})")
+                    self._search_engine.index_documents(all_docs)
+
+                    # 索引完成后，设置标志位
                     with self._lock:
-                        self._search_engine.index_documents(all_docs)
                         self._indexed = True
-                    logger.info(f"首次索引建立: {len(all_docs)} 篇文档")
-                elif not self._indexed:
-                    # 有文档更新（_indexed 被 _get_docs_for_source 置为 False）
-                    # 只对变化的文档重建索引，BM25 需要全量重建
-                    with self._lock:
-                        # 收集有变化的文档（token 在缓存中标记为更新的）
-                        # 由于无法精确追踪哪些文档变了，这里重建 BM25 + 只 upsert 全量到 ChromaDB
-                        # ChromaDB upsert 是幂等的，未变化的文档 Embedding 会被跳过（如果ID相同内容相同）
-                        self._search_engine.index_documents(all_docs)
-                        self._indexed = True
+
                     online_count = sum(1 for d in all_docs if not d.get("token", "").startswith("local_"))
                     local_count = len(all_docs) - online_count
-                    logger.info(f"定时同步完成，索引已更新: {len(all_docs)} 篇文档（在线 {online_count}, 本地 {local_count}）")
+                    logger.info(f"索引重建完成: {len(all_docs)} 篇文档（在线 {online_count}, 本地 {local_count}）")
                 else:
                     logger.info(f"定时同步完成，文档无变化，跳过索引重建")
             else:
@@ -207,6 +203,11 @@ class FeishuDocManager:
         # 确保文档已加载并建立索引
         self._ensure_indexed()
 
+        # 检查索引是否就绪（可能正在后台重建）
+        if not self._indexed:
+            logger.warning(f"文档索引正在后台重建中，暂时无法检索，请稍后再试")
+            return ""
+
         # 使用混合检索（返回更多候选）
         candidates = self._search_engine.search(enhanced_query, top_k=self.MAX_DOCS_IN_PROMPT)
 
@@ -255,14 +256,24 @@ class FeishuDocManager:
 
     def _ensure_indexed(self):
         """确保文档已建立检索索引（后台同步线程负责加载和更新）"""
+        # 快速路径：已经建立索引，直接返回
         if self._indexed:
             return
 
-        # 后台同步还没完成，尝试从本地缓存快速加载
+        # 慢速路径：从本地缓存快速加载（不阻塞太久）
         with self._lock:
+            # 双重检查：等锁期间可能已被其他线程完成
             if self._indexed:
                 return
 
+            # 标记为"正在加载"，避免重复加载
+            loading_flag = "_loading_index"
+            if hasattr(self, loading_flag):
+                logger.info("索引正在加载中，请稍候...")
+                return
+            setattr(self, loading_flag, True)
+
+        try:
             all_docs = []
             for source in self.sources:
                 cached = self._load_from_cache(source["token"])
@@ -272,9 +283,14 @@ class FeishuDocManager:
             all_docs.extend(local_docs)
 
             if all_docs:
+                logger.info(f"从本地缓存加载索引: {len(all_docs)} 篇文档")
                 self._search_engine.index_documents(all_docs)
-                self._indexed = True
-                logger.info(f"从本地缓存快速加载索引: {len(all_docs)} 篇文档")
+
+                with self._lock:
+                    self._indexed = True
+                logger.info(f"索引加载完成: {len(all_docs)} 篇文档")
+        finally:
+            delattr(self, loading_flag)
 
     def sync_docs(self, force: bool = False, ignore_ttl: bool = False) -> List[Dict[str, str]]:
         """
