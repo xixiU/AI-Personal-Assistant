@@ -31,7 +31,8 @@
 
 ### 系统要求
 - Python 3.10+
-- Windows 10/11（微信适配器依赖 pywinauto）
+- Linux / Windows 10/11 均支持
+- （微信适配器仅限 Windows，依赖 pywinauto）
 - （可选）NVIDIA GPU + CUDA 11.x/12.x（用于向量化加速）
 
 ### 1. 安装依赖
