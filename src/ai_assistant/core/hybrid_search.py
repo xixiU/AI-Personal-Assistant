@@ -171,7 +171,7 @@ class Text2VecEmbeddingFunction:
             return self._encode_batch(texts)
 
     def _encode_batch(self, texts: List[str]) -> List[List[float]]:
-        """单批次 Embedding 计算"""
+        """单批次 Embedding 计算，带 OOM 自动降级"""
         import gc
 
         try:
@@ -201,7 +201,27 @@ class Text2VecEmbeddingFunction:
         session = self._sessions[self._current_session_idx]
         self._current_session_idx = (self._current_session_idx + 1) % len(self._sessions)
 
-        outputs = session.run(None, ort_inputs)
+        # OOM 容错：捕获 ONNX Runtime 异常
+        try:
+            outputs = session.run(None, ort_inputs)
+        except Exception as e:
+            # 检测 OOM 错误
+            if "Failed to allocate memory" in str(e) or "RUNTIME_EXCEPTION" in str(e):
+                logger.info(f"Embedding 计算 OOM: batch_size={len(texts)}, 触发自动降级")
+                # 递归降级：拆分成两半重试
+                if len(texts) <= 4:
+                    # 已经降到极小 batch，无法继续降级
+                    logger.error(f"Embedding OOM 无法恢复: batch_size={len(texts)} 已是最小")
+                    raise RuntimeError(f"GPU 显存不足，无法处理 batch_size={len(texts)} 的 Embedding 计算") from e
+
+                mid = len(texts) // 2
+                logger.info(f"拆分 batch 重试: {len(texts)} → {mid} + {len(texts) - mid}")
+                left_embs = self._encode_batch(texts[:mid])
+                right_embs = self._encode_batch(texts[mid:])
+                return left_embs + right_embs
+            else:
+                # 非 OOM 错误，直接抛出
+                raise
 
         # Mean pooling
         token_embeddings = outputs[0]
@@ -343,15 +363,36 @@ class HybridSearchEngine:
         logger.info(f"开始向量索引: {len(docs)} 篇文档 → {len(ids)} 个向量（包含分块）")
 
         if ids:
-            batch_size = 500
-            for i in range(0, len(ids), batch_size):
-                batch_end = min(i + batch_size, len(ids))
-                self._collection.upsert(
-                    ids=ids[i:batch_end],
-                    documents=documents[i:batch_end],
-                    metadatas=metadatas[i:batch_end],
-                )
-                logger.info(f"向量索引进度: {batch_end}/{len(ids)}")
+            # 预计算 embeddings，避免 ChromaDB 内部调用时的不可控批次
+            # upsert batch 大小取 embedding batch_size 的一半，避免 OOM
+            upsert_batch_size = min(self._embedding_fn._batch_size // 2, 128)
+            logger.info(f"向量索引配置: embedding_batch={self._embedding_fn._batch_size}, upsert_batch={upsert_batch_size}")
+
+            for i in range(0, len(ids), upsert_batch_size):
+                batch_end = min(i + upsert_batch_size, len(ids))
+                batch_docs = documents[i:batch_end]
+
+                # 手动计算 embeddings，完全控制批次大小
+                try:
+                    batch_embeddings = self._embedding_fn._encode(batch_docs)
+                    self._collection.upsert(
+                        ids=ids[i:batch_end],
+                        embeddings=batch_embeddings,  # 传入预计算的 embeddings
+                        metadatas=metadatas[i:batch_end],
+                    )
+                    logger.info(f"向量索引进度: {batch_end}/{len(ids)}")
+                except Exception as e:
+                    # OOM 容错：降级到更小的 batch 重试
+                    if "Failed to allocate memory" in str(e) or "RUNTIME_EXCEPTION" in str(e):
+                        logger.warning(f"向量索引 OOM，自动降级重试: batch={len(batch_docs)} → {len(batch_docs)//2}")
+                        self._index_batch_with_retry(
+                            ids[i:batch_end],
+                            batch_docs,
+                            metadatas[i:batch_end],
+                            initial_batch_size=len(batch_docs) // 2
+                        )
+                    else:
+                        raise
 
         vector_time = time.time() - start_time
 
@@ -376,6 +417,50 @@ class HybridSearchEngine:
             f"文档索引完成: 向量={self._collection.count()}, BM25={len(self._bm25_corpus)}, "
             f"原始文档={len(docs)}, 耗时 {total_time:.1f}s (向量 {vector_time:.1f}s, BM25 {bm25_time:.1f}s)"
         )
+
+    def _index_batch_with_retry(
+        self,
+        ids: List[str],
+        documents: List[str],
+        metadatas: List[Dict[str, str]],
+        initial_batch_size: int
+    ) -> None:
+        """
+        OOM 容错：自动降级 batch size 重试索引
+
+        Args:
+            ids: 文档 ID 列表
+            documents: 文档内容列表
+            metadatas: 文档元数据列表
+            initial_batch_size: 初始批次大小
+        """
+        batch_size = initial_batch_size
+        min_batch_size = 8  # 最小批次，避免无限降级
+
+        while batch_size >= min_batch_size:
+            try:
+                logger.info(f"OOM 重试: batch_size={batch_size}, total={len(ids)}")
+                for i in range(0, len(ids), batch_size):
+                    batch_end = min(i + batch_size, len(ids))
+                    batch_docs = documents[i:batch_end]
+                    batch_embeddings = self._embedding_fn._encode(batch_docs)
+                    self._collection.upsert(
+                        ids=ids[i:batch_end],
+                        embeddings=batch_embeddings,
+                        metadatas=metadatas[i:batch_end],
+                    )
+                logger.info(f"OOM 重试成功: batch_size={batch_size}")
+                return
+            except Exception as e:
+                if "Failed to allocate memory" in str(e) or "RUNTIME_EXCEPTION" in str(e):
+                    batch_size = batch_size // 2
+                    logger.warning(f"OOM 重试失败，继续降级: batch_size → {batch_size}")
+                else:
+                    raise
+
+        # 所有重试失败
+        logger.error(f"向量索引彻底失败: 已降级到 batch_size={min_batch_size} 仍然 OOM")
+        raise RuntimeError(f"向量索引 OOM，即使降级到 batch_size={min_batch_size} 仍失败")
 
     @staticmethod
     def _split_text(text: str, chunk_size: int, overlap: int) -> List[str]:
