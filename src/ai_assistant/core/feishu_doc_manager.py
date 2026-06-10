@@ -58,6 +58,7 @@ class FeishuDocManager:
         self._local_docs_config = local_docs or []
         self._lock = threading.Lock()
         self._indexed = False
+        self._indexing_in_progress = False  # 是否有线程正在索引
         self._doc_base_url = doc_base_url.rstrip('/') if doc_base_url else ""
         self._sync_interval = 1800  # 定时同步间隔（秒），默认 30 分钟
         self._sync_thread = None
@@ -121,17 +122,28 @@ class FeishuDocManager:
 
             if all_docs:
                 if not was_indexed or need_rebuild:
-                    # 需要重建索引：在锁外执行（避免阻塞前台请求）
-                    logger.info(f"开始重建索引...({len(all_docs)} 篇文档，{'首次' if not was_indexed else '增量'})")
-                    self._search_engine.index_documents(all_docs)
-
-                    # 索引完成后，设置标志位
+                    # 抢占索引权：只有一个线程能执行索引
                     with self._lock:
-                        self._indexed = True
+                        if self._indexing_in_progress:
+                            logger.info("其他线程正在索引中，跳过本次索引重建")
+                            return
+                        self._indexing_in_progress = True
 
-                    online_count = sum(1 for d in all_docs if not d.get("token", "").startswith("local_"))
-                    local_count = len(all_docs) - online_count
-                    logger.info(f"索引重建完成: {len(all_docs)} 篇文档（在线 {online_count}, 本地 {local_count}）")
+                    try:
+                        logger.info(f"[后台同步] 开始重建索引...({len(all_docs)} 篇文档)")
+                        self._search_engine.index_documents(all_docs)
+
+                        with self._lock:
+                            self._indexed = True
+                            self._indexing_in_progress = False
+
+                        online_count = sum(1 for d in all_docs if not d.get("token", "").startswith("local_"))
+                        local_count = len(all_docs) - online_count
+                        logger.info(f"[后台同步] 索引重建完成: {len(all_docs)} 篇文档（在线 {online_count}, 本地 {local_count}）")
+                    except Exception as e:
+                        with self._lock:
+                            self._indexing_in_progress = False
+                        raise e
                 else:
                     logger.info(f"定时同步完成，文档无变化，跳过索引重建")
             else:
@@ -260,18 +272,14 @@ class FeishuDocManager:
         if self._indexed:
             return
 
-        # 慢速路径：从本地缓存快速加载（不阻塞太久）
+        # 检查是否有其他线程正在索引
         with self._lock:
-            # 双重检查：等锁期间可能已被其他线程完成
             if self._indexed:
                 return
-
-            # 标记为"正在加载"，避免重复加载
-            loading_flag = "_loading_index"
-            if hasattr(self, loading_flag):
-                logger.info("索引正在加载中，请稍候...")
+            if self._indexing_in_progress:
+                logger.info("其他线程正在索引中，跳过重复加载")
                 return
-            setattr(self, loading_flag, True)
+            self._indexing_in_progress = True
 
         try:
             all_docs = []
@@ -283,14 +291,20 @@ class FeishuDocManager:
             all_docs.extend(local_docs)
 
             if all_docs:
-                logger.info(f"从本地缓存加载索引: {len(all_docs)} 篇文档")
+                logger.info(f"[前台请求] 从本地缓存加载索引: {len(all_docs)} 篇文档")
                 self._search_engine.index_documents(all_docs)
 
                 with self._lock:
                     self._indexed = True
-                logger.info(f"索引加载完成: {len(all_docs)} 篇文档")
-        finally:
-            delattr(self, loading_flag)
+                    self._indexing_in_progress = False
+                logger.info(f"[前台请求] 索引加载完成: {len(all_docs)} 篇文档")
+            else:
+                with self._lock:
+                    self._indexing_in_progress = False
+        except Exception:
+            with self._lock:
+                self._indexing_in_progress = False
+            raise
 
     def sync_docs(self, force: bool = False, ignore_ttl: bool = False) -> List[Dict[str, str]]:
         """
