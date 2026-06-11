@@ -114,15 +114,15 @@ class FeishuDocManager:
         try:
             logger.info("开始定时增量同步...")
 
-            # 记录同步前的索引状态
-            with self._lock:
-                was_indexed = self._indexed
-                need_rebuild = not self._indexed
-
             all_docs = self.sync_docs(force=False, ignore_ttl=True)
 
             if all_docs:
-                if not was_indexed or need_rebuild:
+                # sync_docs 内部发现文档有更新时会设 self._indexed=False
+                # 因此在 sync_docs 之后检查 _indexed 来决定是否需要重建
+                with self._lock:
+                    need_rebuild = not self._indexed
+
+                if need_rebuild:
                     # 抢占索引权：只有一个线程能执行索引
                     with self._lock:
                         if self._indexing_in_progress:
