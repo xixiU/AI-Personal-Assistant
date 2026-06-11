@@ -6,9 +6,9 @@ Dify API Provider
 
 import requests
 import threading
-from typing import List, Dict, Optional
+from typing import Any, Dict, List, Optional
 from loguru import logger
-from ai_assistant.core.ai_provider import AIProvider
+from ai_assistant.core.ai_provider import AIProvider, KeywordExtractionResult
 from ai_assistant.core.models import Message
 
 
@@ -164,28 +164,33 @@ class DifyProvider(AIProvider):
     def check_health(self) -> bool:
         """检查 Dify API 服务健康状态"""
         try:
+            # 实际健康检查需要有效请求，当前简化为直接返回 True
+            # 如需真实检查，可启用下方注释代码
             # headers = {
             #     "Authorization": f"Bearer {self.api_key}",
             #     "Content-Type": "application/json"
             # }
-
-            # # 尝试发送一个简单的测试请求
             # endpoint = f"{self.base_url}/chat-messages" if self.app_type == "chat" else f"{self.base_url}/completion-messages"
-            # payload = {
-            #     "inputs": {},
-            #     "query": "test" if self.app_type == "chat" else None,
-            #     "response_mode": "blocking",
-            #     "user": self.user
-            # }
-
-            # response = requests.post(
-            #     endpoint,
-            #     json=payload,
-            #     headers=headers,
-            #     timeout=5
-            # )
+            # payload = {"inputs": {}, "query": "test", "response_mode": "blocking", "user": self.user}
+            # response = requests.post(endpoint, json=payload, headers=headers, timeout=5)
             # return response.status_code in [200, 201]
             return True
         except Exception as e:
             logger.warning(f"Dify 健康检查失败: {e}")
             return False
+
+    def extract_keywords(self, query_text: str) -> KeywordExtractionResult:
+        """
+        Dify 平台不适合做轻量关键词提取调用，返回保守降级值。
+        由 feishu_doc_manager 降级到规则提取处理。
+        """
+        logger.debug("DifyProvider 不支持关键词提取，返回降级值（继续走检索）")
+        return KeywordExtractionResult(keywords=[], is_generic_tech=False)
+
+    def filter_docs_by_relevance(self, query: str, candidates: List[Dict[str, Any]], max_docs: int = 3) -> List[int]:
+        """
+        Dify 平台不适合做文档相关性过滤调用，返回空列表。
+        由调用方降级处理（使用原始检索结果）。
+        """
+        logger.debug("DifyProvider 不支持文档过滤，返回空列表（由调用方降级）")
+        return []

@@ -15,6 +15,7 @@ from loguru import logger
 
 from ai_assistant.core.simple_mcp_client import SimpleMCPClient
 from ai_assistant.core.hybrid_search import HybridSearchEngine
+from ai_assistant.core.ai_provider import KeywordExtractionResult
 
 
 class FeishuDocManager:
@@ -203,8 +204,17 @@ class FeishuDocManager:
         cleaned_query = re.sub(r'@_user_\d+\s*', '', query_text)
         cleaned_query = cleaned_query.strip()
 
-        # 用大模型提取关键词增强检索
-        keywords = self._extract_keywords(cleaned_query)
+        # 用大模型提取关键词 + 判断是否通用技术问题
+        kw_result = self._extract_keywords(cleaned_query)
+
+        # 通用技术问题（Redis/Nginx/Docker 等标准组件问题）直接跳过文档检索
+        if kw_result.is_generic_tech:
+            logger.info(
+                f"问题分类为通用技术问题，跳过文档检索（直接用大模型知识回答）: '{cleaned_query[:60]}'"
+            )
+            return ""
+
+        keywords = kw_result.keywords
         if keywords:
             # 关键词拼接到 query 前面，提高权重
             enhanced_query = " ".join(keywords) + " " + cleaned_query
@@ -766,22 +776,37 @@ class FeishuDocManager:
 
         return ""
 
-    def _extract_keywords(self, query_text: str) -> List[str]:
-        """从查询文本中提取关键词，优先使用 AI 辅助提取"""
-        # 优先使用 AI 提取关键词
+    def _extract_keywords(self, query_text: str) -> KeywordExtractionResult:
+        """
+        从查询文本中提取关键词，并判断是否为通用技术问题。
+
+        优先通过已注入的 AI provider 调用，降级到规则提取（此时 is_generic_tech=False）。
+        """
+        # 优先通过 AI provider 提取（统一接口，所有 Provider 均支持）
+        if self._ai_provider:
+            try:
+                result = self._ai_provider.extract_keywords(query_text)
+                # provider 返回了有效关键词或进行了分类，直接使用
+                if result.keywords or result.is_generic_tech:
+                    return result
+                # keywords 为空时降级，但保留 is_generic_tech=False
+            except Exception as e:
+                logger.warning(f"AI 关键词提取失败，降级到规则提取: {e}")
+
+        # 兼容旧的 keyword_extractor callable（deprecated）
         if self._keyword_extractor:
             try:
                 keywords = self._keyword_extractor(query_text)
                 if keywords:
-                    logger.info(f"AI 关键词提取: '{query_text}' → {keywords}")
-                    return keywords
+                    logger.info(f"callable 关键词提取: '{query_text[:50]}' → {keywords}")
+                    return KeywordExtractionResult(keywords=keywords, is_generic_tech=False)
             except Exception as e:
-                logger.warning(f"AI 关键词提取失败，降级到规则提取: {e}")
+                logger.warning(f"callable 关键词提取失败，降级到规则提取: {e}")
 
-        # 降级：规则提取
+        # 最终降级：规则提取
         keywords = self._extract_keywords_by_rules(query_text)
-        logger.info(f"规则关键词提取: '{query_text}' → {keywords}")
-        return keywords
+        logger.info(f"规则关键词提取: '{query_text[:50]}' → {keywords}")
+        return KeywordExtractionResult(keywords=keywords, is_generic_tech=False)
 
     def _extract_keywords_by_rules(self, query_text: str) -> List[str]:
         """基于规则的关键词提取（降级方案）"""
@@ -975,49 +1000,24 @@ class FeishuDocManager:
             return docs[:self.MAX_DOCS_IN_PROMPT]
 
         try:
-            # 构造候选列表：编号 + 路径（含父目录）
             candidates_lines = []
             for i, doc in enumerate(docs, 1):
                 path = doc.get("path", doc.get("title", ""))
                 candidates_lines.append(f"{i}. {path}")
-
             candidates_text = "\n".join(candidates_lines)
 
             logger.info(f"AI 标题过滤输入:\n查询: {query}\n候选文档({len(docs)}篇):\n{candidates_text}")
 
-            # 调用 AI 判断相关性
-            prompt = f"""用户查询: {query}
-
-以下是候选文档列表（含完整父目录路径）：
-{candidates_text}
-
-请判断哪些文档标题与用户查询相关，返回相关文档的编号，用逗号分隔。只输出编号，不要其他内容。"""
-
-            response = self._ai_provider.client.messages.create(
-                model=self._ai_provider.model,
-                max_tokens=100,
-                messages=[{"role": "user", "content": prompt}]
+            selected_indices = self._ai_provider.filter_docs_by_relevance(
+                query, docs, max_docs=self.MAX_DOCS_IN_PROMPT
             )
 
-            text = response.content[0].text.strip()
-            logger.info(f"AI 标题过滤输出: {text}")
-
-            # 解析返回的编号
-            selected_indices = []
-            for part in text.replace('，', ',').split(','):
-                try:
-                    idx = int(part.strip())
-                    if 1 <= idx <= len(docs):
-                        selected_indices.append(idx - 1)  # 转为 0-based
-                except:
-                    continue
-
             if selected_indices:
-                filtered = [docs[i] for i in selected_indices[:self.MAX_DOCS_IN_PROMPT]]
+                filtered = [docs[i] for i in selected_indices]
                 logger.info(f"AI 过滤后保留 {len(filtered)} 篇: {[d['title'] for d in filtered]}")
                 return filtered
             else:
-                logger.warning("AI 未返回有效编号，使用原始排序")
+                logger.warning("AI 未返回有效文档下标，使用原始排序")
                 return docs[:self.MAX_DOCS_IN_PROMPT]
 
         except Exception as e:

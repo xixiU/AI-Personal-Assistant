@@ -105,17 +105,14 @@ class AIAssistant:
         # 初始化飞书文档管理器（如果启用）
         if self.config.feishu_docs_enabled:
             from ai_assistant.core.feishu_doc_manager import FeishuDocManager
-            # 如果是 Anthropic Provider，使用 Claude 辅助提取关键词
-            keyword_extractor = None
-            if provider_type == "anthropic" and hasattr(self.ai_provider, 'extract_keywords'):
-                keyword_extractor = self.ai_provider.extract_keywords
+            # 所有 Provider 均通过基类 extract_keywords() 接口提供关键词提取能力，
+            # 无需再按 provider_type 判断，直接由 set_ai_provider() 注入
 
             doc_manager = FeishuDocManager(
                 mcp_url=self.config.feishu_docs_mcp_url,
                 cache_dir=self.config.feishu_docs_cache_dir,
                 cache_ttl=self.config.feishu_docs_cache_ttl,
                 sources=self.config.feishu_docs_sources,
-                keyword_extractor=keyword_extractor,
                 local_docs=self.config.local_docs,
                 use_gpu=getattr(self.config, 'vector_db_use_gpu', False),
                 gpu_id=getattr(self.config, 'vector_db_gpu_id', 0),
@@ -124,7 +121,7 @@ class AIAssistant:
             )
             # 回填 doc_manager 到 Provider
             self.ai_provider.doc_manager = doc_manager
-            # 设置 AI provider 到 doc_manager（用于标题过滤）
+            # 注入 AI provider，同时启用关键词提取、通用问题分类、文档标题过滤
             doc_manager.set_ai_provider(self.ai_provider)
             self.doc_manager = doc_manager
             logger.info("飞书文档管理器已启用")

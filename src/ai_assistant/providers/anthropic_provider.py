@@ -5,11 +5,16 @@ Anthropic Claude Provider
 文档内容在调用前注入 system prompt，Claude 基于文档生成回复。
 """
 
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 from loguru import logger
 import anthropic
 
-from ai_assistant.core.ai_provider import AIProvider
+from ai_assistant.core.ai_provider import (
+    AIProvider,
+    KeywordExtractionResult,
+    _KEYWORD_EXTRACTION_SYSTEM_PROMPT,
+    _parse_keyword_extraction_response,
+)
 from ai_assistant.core.models import Message
 
 
@@ -47,34 +52,27 @@ class AnthropicProvider(AIProvider):
         self.client = anthropic.Anthropic(**client_kwargs)
         logger.info(f"Anthropic Provider 初始化: model={model}, base_url={base_url or '默认'}, docs={'启用' if doc_manager else '禁用'}")
 
-    def extract_keywords(self, query_text: str) -> List[str]:
+    def extract_keywords(self, query_text: str) -> KeywordExtractionResult:
         """
-        使用 Claude 从用户查询中提取搜索关键词
-
-        使用轻量请求，让 Claude 理解用户意图后提取关键词。
+        使用 Claude 从用户查询中提取搜索关键词 + 判断是否通用技术问题
         """
         try:
             response = self.client.messages.create(
                 model=self.model,
-                max_tokens=100,
+                max_tokens=150,
                 messages=[{"role": "user", "content": query_text}],
-                system=(
-                    "你是一个关键词提取器。从用户的问题中提取用于搜索文档的关键词。\n"
-                    "规则：\n"
-                    "1. 提取 1-5 个最核心的搜索关键词\n"
-                    "2. **版本号必须保留**（如 4.3.6、3.5、V4.0），这是业务中最重要的标识\n"
-                    "3. 保留专有名词、技术术语、产品名称的完整性（如 '智慧法庭V4.0' 不要拆分）\n"
-                    "4. 英文变量名、配置项保持原样（如 'note_simplify_websocket_url'）\n"
-                    "5. 去除无意义的词（如 '帮我找'、'是什么'、'怎么'、'有什么'）\n"
-                    "6. 只输出关键词，用逗号分隔，不要输出其他内容"
-                ),
+                system=_KEYWORD_EXTRACTION_SYSTEM_PROMPT,
             )
             text = response.content[0].text.strip()
-            keywords = [kw.strip() for kw in text.split(",") if kw.strip()]
-            return keywords[:5]  # 最多返回 5 个关键词（增加版本号后可能多一个）
+            result = _parse_keyword_extraction_response(text, query_text[:50])
+            logger.info(
+                f"Claude 关键词提取: keywords={result.keywords}, "
+                f"generic={result.is_generic_tech}, query='{query_text[:50]}'"
+            )
+            return result
         except Exception as e:
-            logger.warning(f"Claude 关键词提取失败: {e}")
-            return []
+            logger.warning(f"Claude 关键词提取失败，返回降级值: {e}")
+            return KeywordExtractionResult(keywords=[], is_generic_tech=False)
 
     def send_message(self, messages: List[Message], session_id: Optional[str] = None) -> str:
         """发送消息到 Claude 并获取回复"""
@@ -171,6 +169,45 @@ class AnthropicProvider(AIProvider):
         except Exception as e:
             logger.warning(f"Anthropic 健康检查失败: {e}")
             return False
+
+    def filter_docs_by_relevance(self, query: str, candidates: List[Dict[str, Any]], max_docs: int = 3) -> List[int]:
+        """用 Claude 判断候选文档标题与 query 的相关性，返回 0-based 下标列表"""
+        if not candidates:
+            return []
+        try:
+            candidates_lines = []
+            for i, doc in enumerate(candidates, 1):
+                path = doc.get("path", doc.get("title", ""))
+                candidates_lines.append(f"{i}. {path}")
+            candidates_text = "\n".join(candidates_lines)
+
+            prompt = f"""用户查询: {query}
+
+以下是候选文档列表（含完整父目录路径）：
+{candidates_text}
+
+请判断哪些文档标题与用户查询相关，返回相关文档的编号，用逗号分隔。只输出编号，不要其他内容。"""
+
+            response = self.client.messages.create(
+                model=self.model,
+                max_tokens=100,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            text = response.content[0].text.strip()
+            logger.info(f"Claude 标题过滤输出: {text}")
+
+            selected_indices = []
+            for part in text.replace('，', ',').split(','):
+                try:
+                    idx = int(part.strip())
+                    if 1 <= idx <= len(candidates):
+                        selected_indices.append(idx - 1)  # 转为 0-based
+                except ValueError:
+                    continue
+            return selected_indices[:max_docs]
+        except Exception as e:
+            logger.warning(f"Claude 标题过滤失败: {e}")
+            return []
 
     def _load_local_docs(self, query_text: str) -> str:
         """
