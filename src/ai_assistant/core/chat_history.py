@@ -27,6 +27,7 @@ class ChatHistoryManager:
         query: str,
         answer: str,
         latency_ms: Optional[int] = None,
+        source: str = "unknown",
     ):
         """
         保存一条对话记录
@@ -36,10 +37,12 @@ class ChatHistoryManager:
             query: 用户提问
             answer: AI 回复
             latency_ms: 响应耗时（毫秒）
+            source: 提问来源（"feishu", "wechat", "web"）
         """
         record = {
             "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "session_id": session_id,
+            "source": source,
             "query": query,
             "answer": answer,
             "latency_ms": latency_ms,

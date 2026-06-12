@@ -312,7 +312,7 @@ class AIAssistant:
 
             # 调用 AI 生成回复
             ai_start = time_mod.time()
-            reply = self.ai_provider.call(context_messages, session_id=session_id)
+            reply = self.ai_provider.call(context_messages, session_id=session_id, source="feishu")
             ai_duration = time_mod.time() - ai_start
 
             # 将 AI 回复添加到上下文
@@ -642,7 +642,16 @@ class AIAssistant:
             logger.info(f"Sending {len(context_messages)} messages to AI")
 
             # 调用 AI 生成回复（传递 session_id 支持多用户并发）
-            reply = self.ai_provider.call(context_messages, session_id=session_id)
+            # 根据适配器类型判断来源
+            adapter_class_name = adapter.__class__.__name__
+            if adapter_class_name == "WeChatAdapter":
+                source = "wechat"
+            elif adapter_class_name == "FeishuBotAdapter":
+                source = "feishu"
+            else:
+                source = "unknown"
+
+            reply = self.ai_provider.call(context_messages, session_id=session_id, source=source)
 
             # 将 AI 回复添加到上下文
             ai_message = Message(
@@ -652,9 +661,7 @@ class AIAssistant:
             )
             self.context_manager.add_message(session_id, ai_message)
 
-            # 执行回复
-            adapter_class_name = adapter.__class__.__name__
-
+            # 执行回复（adapter_class_name 已在上面获取）
             if adapter_class_name == "FeishuBotAdapter":
                 if adapter.send_reply(reply):
                     logger.info("Reply sent via Feishu Bot API successfully")

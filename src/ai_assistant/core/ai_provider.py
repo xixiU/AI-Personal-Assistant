@@ -96,11 +96,16 @@ class AIProvider(ABC):
         """
         pass
 
-    def call(self, messages: List[Message], session_id: Optional[str] = None) -> str:
+    def call(self, messages: List[Message], session_id: Optional[str] = None, source: str = "unknown") -> str:
         """
         统一入口：记录日志 + 计时 + 调用 send_message + 保存历史
 
         所有外部调用应使用此方法，而非直接调用 send_message。
+
+        Args:
+            messages: 消息列表
+            session_id: 会话 ID
+            source: 提问来源（"feishu", "wechat", "web"）
         """
         provider_name = self.__class__.__name__
         model_name = getattr(self, 'model', 'unknown')
@@ -128,6 +133,7 @@ class AIProvider(ABC):
                         query=query,
                         answer=reply,
                         latency_ms=int(duration * 1000),
+                        source=source,
                     )
             except Exception as e:
                 logger.warning(f"保存对话历史失败: {e}")
