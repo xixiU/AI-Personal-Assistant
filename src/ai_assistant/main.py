@@ -408,7 +408,7 @@ class AIAssistant:
 
     def _send_feishu_reply(self, adapter, message_id: str, chat_id: str, reply_text: str):
         """
-        通过飞书适配器发送回复（线程安全，不依赖 adapter 共享状态）
+        通过飞书适配器发送回复（使用消息卡片样式，支持 Markdown）
 
         Args:
             adapter: 飞书适配器实例
@@ -416,31 +416,12 @@ class AIAssistant:
             chat_id: 聊天 ID
             reply_text: 回复文本
         """
-        import json as json_mod
+        from ai_assistant.utils.feishu_message import FeishuMessageBuilder
 
         try:
             token = adapter.get_tenant_access_token()
-            url = f"{adapter.base_url}/open-apis/im/v1/messages/{message_id}/reply"
-
-            headers = {
-                "Authorization": f"Bearer {token}",
-                "Content-Type": "application/json"
-            }
-
-            payload = {
-                "msg_type": "text",
-                "content": json_mod.dumps({"text": reply_text})
-            }
-
-            response = requests.post(url, headers=headers, json=payload, timeout=10)
-            response.raise_for_status()
-            result = response.json()
-
-            if result.get("code") == 0:
-                logger.info(f"Reply sent successfully to message {message_id}")
-            else:
-                logger.error(f"Failed to send reply: code={result.get('code')}, msg={result.get('msg')}")
-
+            payload = FeishuMessageBuilder.ai_reply_card(reply_text)
+            FeishuMessageBuilder.send(adapter.base_url, token, message_id, payload)
         except Exception as e:
             logger.error(f"Error sending feishu reply: {e}")
 

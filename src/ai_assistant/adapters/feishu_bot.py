@@ -352,7 +352,7 @@ class FeishuBotAdapter(IMAdapter):
 
     def send_reply(self, reply_text: str) -> bool:
         """
-        回复消息（使用 reply 接口，保持消息线程）
+        回复消息（使用消息卡片样式，保持消息线程）
 
         Args:
             reply_text: 回复文本
@@ -365,6 +365,8 @@ class FeishuBotAdapter(IMAdapter):
             return False
 
         try:
+            from ai_assistant.utils.feishu_message import FeishuMessageBuilder
+
             token = self.get_tenant_access_token()
             message_id = self.latest_message["message_id"]
             chat_id = self.latest_message.get("chat_id", "")
@@ -372,34 +374,13 @@ class FeishuBotAdapter(IMAdapter):
             logger.info(f"📤 Sending reply to message_id={message_id}, chat_id={chat_id}")
             logger.debug(f"Reply content: {reply_text[:100]}")
 
-            # 使用 reply 接口回复具体消息，保持消息线程
-            url = f"{self.base_url}/open-apis/im/v1/messages/{message_id}/reply"
+            payload = FeishuMessageBuilder.ai_reply_card(reply_text)
+            success = FeishuMessageBuilder.send(self.base_url, token, message_id, payload)
 
-            headers = {
-                "Authorization": f"Bearer {token}",
-                "Content-Type": "application/json"
-            }
-
-            payload = {
-                "msg_type": "text",
-                "content": json.dumps({"text": reply_text})
-            }
-
-            logger.debug(f"API request: POST {url}")
-            response = requests.post(url, headers=headers, json=payload, timeout=10)
-            response.raise_for_status()
-            result = response.json()
-
-            logger.debug(f"API response: {json.dumps(result, ensure_ascii=False)}")
-
-            if result.get("code") == 0:
-                logger.info(f"✅ Reply sent successfully to message {message_id}")
+            if success:
                 self.latest_event = None
                 self.latest_message = None
-                return True
-            else:
-                logger.error(f"❌ Failed to send reply: code={result.get('code')}, msg={result.get('msg')}")
-                return False
+            return success
 
         except Exception as e:
             logger.error(f"❌ Error sending reply: {e}", exc_info=True)
