@@ -524,15 +524,34 @@ class FeishuDocManager:
                 # 已更新的文档
                 tokens_to_update.append(token)
 
-        if not tokens_to_update:
+        # 找出远端已删除的文档（缓存中有但远端目录树中不存在）
+        tokens_to_delete = []
+        for token in cached_map:
+            if token not in latest_meta:
+                tokens_to_delete.append(token)
+
+        if not tokens_to_update and not tokens_to_delete:
             logger.info(f"文档未更新，继续使用缓存: source={source_token}")
             # 刷新 TTL
             self._save_to_cache(source_token, cached_docs)
             return None
 
         # 增量更新：只拉取有变化的文档
-        logger.info(f"增量更新 {len(tokens_to_update)} 篇文档: source={source_token}")
+        logger.info(f"增量同步: 新增/更新 {len(tokens_to_update)} 篇, 删除 {len(tokens_to_delete)} 篇, source={source_token}")
         updated_docs = list(cached_docs)  # 复制一份
+
+        # 删除远端已移除的文档
+        if tokens_to_delete:
+            delete_set = set(tokens_to_delete)
+            deleted_titles = [d.get("title", "") for d in updated_docs if d.get("token") in delete_set]
+            updated_docs = [d for d in updated_docs if d.get("token") not in delete_set]
+            logger.info(f"删除本地缓存中已失效的文档({len(deleted_titles)}篇): {deleted_titles}")
+
+        # 如果没有需要新增/更新的文档，直接保存并返回
+        if not tokens_to_update:
+            self._save_to_cache(source_token, updated_docs)
+            logger.info(f"增量同步完成(仅删除): source={source_token}, 删除 {len(tokens_to_delete)} 篇, 总计 {len(updated_docs)} 篇")
+            return updated_docs
 
         # 获取完整目录树用于路径信息
         all_items = self._get_all_items(source_token, source_type)
@@ -607,7 +626,11 @@ class FeishuDocManager:
 
         # 保存更新后的缓存
         self._save_to_cache(source_token, updated_docs)
-        logger.info(f"增量更新完成: source={source_token}, 成功 {success_count} 篇, 失败 {fail_count} 篇, 总计 {len(updated_docs)} 篇")
+        logger.info(
+            f"增量同步完成: source={source_token}, "
+            f"新增/更新成功 {success_count} 篇, 失败 {fail_count} 篇, "
+            f"删除 {len(tokens_to_delete)} 篇, 总计 {len(updated_docs)} 篇"
+        )
         return updated_docs
 
     def _get_all_items(self, source_token: str, source_type: str = "wiki") -> List[Dict[str, Any]]:
