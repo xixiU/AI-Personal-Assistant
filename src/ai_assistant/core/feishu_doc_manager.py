@@ -228,7 +228,8 @@ class FeishuDocManager:
         # 检查索引是否就绪（可能正在后台重建）
         if not self._indexed:
             logger.warning(f"文档索引正在后台重建中，暂时无法检索，请稍后再试")
-            return ""
+            from ai_assistant.core.ai_provider import DocIndexingInProgressError
+            raise DocIndexingInProgressError("文档索引正在更新中，请稍后再试")
 
         # 使用混合检索（返回更多候选）
         candidates = self._search_engine.search(enhanced_query, top_k=self.MAX_DOCS_IN_PROMPT)

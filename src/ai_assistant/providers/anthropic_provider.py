@@ -14,6 +14,7 @@ from ai_assistant.core.ai_provider import (
     KeywordExtractionResult,
     _KEYWORD_EXTRACTION_SYSTEM_PROMPT,
     _parse_keyword_extraction_response,
+    DocIndexingInProgressError,
 )
 from ai_assistant.core.models import Message
 
@@ -110,6 +111,10 @@ class AnthropicProvider(AIProvider):
                     doc_content = self.doc_manager.get_documents_by_query(last_user_text)
                     if doc_content:
                         system_parts.append(doc_content)
+                except DocIndexingInProgressError:
+                    # 索引正在更新，直接返回提示，不调用 AI API
+                    logger.info("文档索引正在更新中，返回提示信息")
+                    return "📚 文档索引正在更新中，请稍后（约1-2分钟）再试，或者您可以先问我通用技术问题。"
                 except Exception as e:
                     logger.warning(f"文档获取失败，降级到无文档模式: {e}")
 

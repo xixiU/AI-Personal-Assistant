@@ -7,6 +7,11 @@ from loguru import logger
 from ai_assistant.core.models import Message
 
 
+class DocIndexingInProgressError(Exception):
+    """文档索引正在更新中，暂时无法检索"""
+    pass
+
+
 @dataclass
 class KeywordExtractionResult:
     """
