@@ -82,19 +82,76 @@ class AIProvider(ABC):
 
     _chat_history = None  # 对话历史管理器（类级共享）
 
+    def __init__(self):
+        """初始化 Provider，设置 doc_manager 为 None（由外部注入）"""
+        self.doc_manager = None
+
     @classmethod
     def set_chat_history(cls, chat_history):
         """设置对话历史管理器（所有 Provider 共享）"""
         cls._chat_history = chat_history
 
-    @abstractmethod
     def send_message(self, messages: List[Message], session_id: Optional[str] = None) -> str:
         """
-        发送消息到 AI 模型并获取回复
+        模板方法：统一文档检索 + 分发给子类实现
+
+        - 若无 doc_manager 或无用户消息，doc_context 为空字符串
+        - 若文档索引正在更新，捕获异常并返回友好提示（不调用底层 API）
+        - 否则将 doc_context 传给子类的 _send_with_context 实现
 
         Args:
             messages: 消息列表（包含上下文）
             session_id: 会话 ID，用于维持多用户对话上下文
+
+        Returns:
+            AI 生成的回复文本
+        """
+        try:
+            doc_context = self._get_doc_context(messages)
+        except DocIndexingInProgressError:
+            logger.info("文档索引正在更新中，返回提示信息")
+            return "📚 文档索引正在更新中，请稍后（约1-2分钟）再试，或者您可以先问我通用技术问题。"
+        return self._send_with_context(messages, doc_context, session_id)
+
+    def _get_doc_context(self, messages: List[Message]) -> str:
+        """
+        统一的文档检索逻辑。异常（DocIndexingInProgressError）向上抛出。
+        """
+        if not self.doc_manager:
+            return ""
+        last_user_text = self._extract_last_user_text(messages)
+        if not last_user_text:
+            return ""
+        try:
+            return self.doc_manager.get_documents_by_query(last_user_text)
+        except DocIndexingInProgressError:
+            raise
+        except Exception as e:
+            logger.warning(f"文档获取失败，降级到无文档模式: {e}")
+            return ""
+
+    @staticmethod
+    def _extract_last_user_text(messages: List[Message]) -> str:
+        """从消息列表中提取最后一条用户文本"""
+        for msg in reversed(messages):
+            if msg.role == "user":
+                return "".join(c.data for c in msg.content if c.type == "text")
+        return ""
+
+    @abstractmethod
+    def _send_with_context(
+        self,
+        messages: List[Message],
+        doc_context: str,
+        session_id: Optional[str] = None,
+    ) -> str:
+        """
+        子类实现：把 doc_context 注入到自己合适的位置后调用底层 API
+
+        Args:
+            messages: 消息列表（包含上下文）
+            doc_context: 文档检索结果（空字符串表示无文档）
+            session_id: 会话 ID
 
         Returns:
             AI 生成的回复文本

@@ -81,8 +81,6 @@ class AIAssistant:
                 model=self.config.ai_primary_model,
                 base_url=self.config.ai_primary_base_url if self.config.ai_primary_base_url else None,
                 timeout=self.config.ai_timeout,
-                doc_manager=None,  # 稍后设置
-                local_docs=self.config.local_docs,
             )
         elif provider_type == "dify":
             from ai_assistant.providers.dify_provider import DifyProvider

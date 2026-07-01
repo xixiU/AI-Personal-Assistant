@@ -14,7 +14,6 @@ from ai_assistant.core.ai_provider import (
     KeywordExtractionResult,
     _KEYWORD_EXTRACTION_SYSTEM_PROMPT,
     _parse_keyword_extraction_response,
-    DocIndexingInProgressError,
 )
 from ai_assistant.core.models import Message
 
@@ -28,8 +27,6 @@ class AnthropicProvider(AIProvider):
         model: str = "claude-sonnet-4-20250514",
         base_url: str = None,
         timeout: int = 90,
-        doc_manager=None,
-        local_docs: list = None,  # 保留参数兼容性，但不再使用
     ):
         """
         Args:
@@ -37,12 +34,10 @@ class AnthropicProvider(AIProvider):
             model: 模型名称
             base_url: API 基础 URL（可选，用于代理或兼容服务）
             timeout: 请求超时时间（秒）
-            doc_manager: 飞书文档管理器实例（可选）
-            local_docs: 已废弃，本地文档现在由文档管理器统一管理
         """
+        super().__init__()
         self.model = model
         self.timeout = timeout
-        self.doc_manager = doc_manager
 
         # 初始化 Anthropic 客户端
         client_kwargs = {"api_key": api_key, "timeout": timeout}
@@ -51,7 +46,7 @@ class AnthropicProvider(AIProvider):
             logger.info(f"使用自定义 base_url: {base_url}")
 
         self.client = anthropic.Anthropic(**client_kwargs)
-        logger.info(f"Anthropic Provider 初始化: model={model}, base_url={base_url or '默认'}, docs={'启用' if doc_manager else '禁用'}")
+        logger.info(f"Anthropic Provider 初始化: model={model}, base_url={base_url or '默认'}")
 
     def extract_keywords(self, query_text: str) -> KeywordExtractionResult:
         """
@@ -75,19 +70,21 @@ class AnthropicProvider(AIProvider):
             logger.warning(f"Claude 关键词提取失败，返回降级值: {e}")
             return KeywordExtractionResult(keywords=[], is_generic_tech=False)
 
-    def send_message(self, messages: List[Message], session_id: Optional[str] = None) -> str:
+    def _send_with_context(
+        self,
+        messages: List[Message],
+        doc_context: str,
+        session_id: Optional[str] = None,
+    ) -> str:
         """发送消息到 Claude 并获取回复"""
         try:
             # 转换消息格式
             api_messages = []
-            last_user_text = ""
             for msg in messages:
                 content_parts = []
                 for content in msg.content:
                     if content.type == "text":
                         content_parts.append({"type": "text", "text": content.data})
-                        if msg.role == "user":
-                            last_user_text = content.data
                     elif content.type == "image" and isinstance(content.data, dict):
                         # 图片内容：{"data": base64, "media_type": "image/png"}
                         content_parts.append({
@@ -105,20 +102,9 @@ class AnthropicProvider(AIProvider):
             # 构建 system prompt
             system_parts = ["你是一个智能助手，帮助用户回答问题。你必须始终使用中文回答，包括技术术语的解释也要用中文。即使用户用英文提问，你也要用中文回答。"]
 
-            # 如果有文档管理器，获取相关文档（已包含在线文档 + 本地文档）
-            if self.doc_manager and last_user_text:
-                try:
-                    doc_content = self.doc_manager.get_documents_by_query(last_user_text)
-                    if doc_content:
-                        system_parts.append(doc_content)
-                except DocIndexingInProgressError:
-                    # 索引正在更新，直接返回提示，不调用 AI API
-                    logger.info("文档索引正在更新中，返回提示信息")
-                    return "📚 文档索引正在更新中，请稍后（约1-2分钟）再试，或者您可以先问我通用技术问题。"
-                except Exception as e:
-                    logger.warning(f"文档获取失败，降级到无文档模式: {e}")
-
-            if len(system_parts) > 1:
+            # 注入文档内容（由基类传入）
+            if doc_context:
+                system_parts.append(doc_context)
                 system_parts.append(
                     "请基于以上文档内容回答用户的问题。如果文档中没有相关信息，请如实告知。\n"
                     "回答完成后，在末尾附加参考文档链接（除非用户明确要求不附加），格式如下：\n"
