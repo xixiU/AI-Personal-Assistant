@@ -34,6 +34,7 @@ class OpenAIProvider(AIProvider):
             model: 模型名称
             timeout: 请求超时时间（秒）
         """
+        super().__init__()
         self.base_url = base_url.rstrip('/')
         self.api_key = api_key
         self.model = model
@@ -41,11 +42,29 @@ class OpenAIProvider(AIProvider):
 
         logger.info(f"OpenAI Provider 初始化: {base_url}, 模型: {model}")
 
-    def send_message(self, messages: List[Message], session_id: Optional[str] = None) -> str:
+    def _send_with_context(
+        self,
+        messages: List[Message],
+        doc_context: str,
+        session_id: Optional[str] = None,
+    ) -> str:
         """发送消息到 OpenAI 兼容 API"""
         try:
             # 转换消息格式为 OpenAI 格式
             api_messages = []
+
+            # 如果有文档上下文，插入 system 消息
+            if doc_context:
+                system_content = (
+                    f"{doc_context}\n\n"
+                    "请基于以上文档内容回答用户的问题。如果文档中没有相关信息，请如实告知。\n"
+                    "回答完成后，在末尾附加参考文档链接（除非用户明确要求不附加），格式如下：\n"
+                    "---\n"
+                    "📎 参考文档：\n"
+                    "- [文档标题](原文链接)"
+                )
+                api_messages.append({"role": "system", "content": system_content})
+
             for msg in messages:
                 content_text = ""
                 for content in msg.content:

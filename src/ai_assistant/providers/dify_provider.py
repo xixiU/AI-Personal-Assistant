@@ -33,6 +33,7 @@ class DifyProvider(AIProvider):
             user: 用户标识，用于区分不同用户
             timeout: 请求超时时间（秒）
         """
+        super().__init__()
         self.base_url = base_url.rstrip('/')
         self.api_key = api_key
         self.app_type = app_type
@@ -45,12 +46,18 @@ class DifyProvider(AIProvider):
 
         logger.info(f"Dify Provider 初始化: {base_url}, 应用类型: {app_type}")
 
-    def send_message(self, messages: List[Message], session_id: Optional[str] = None) -> str:
+    def _send_with_context(
+        self,
+        messages: List[Message],
+        doc_context: str = "",
+        session_id: Optional[str] = None
+    ) -> str:
         """
         发送消息到 Dify API（线程安全）
 
         Args:
             messages: 消息列表
+            doc_context: 文档上下文（前置拼接到 query，截断 8000 字符）
             session_id: 会话 ID，用于维持多用户对话上下文
         """
         try:
@@ -72,6 +79,11 @@ class DifyProvider(AIProvider):
 
             if not user_message:
                 raise Exception("未找到用户消息")
+
+            # 注入文档上下文（Dify 不支持 system prompt，前置拼接到 query，截断 8000 字符）
+            if doc_context:
+                prefix = f"[参考文档]\n{doc_context[:8000]}\n\n[用户问题]\n"
+                user_message = prefix + user_message
 
             # 根据应用类型选择不同的端点
             if self.app_type == "chat":
