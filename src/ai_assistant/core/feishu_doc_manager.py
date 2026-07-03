@@ -482,7 +482,6 @@ class FeishuDocManager:
             else:  # wiki
                 result = self.mcp_client.wiki_list_nodes(token, recursive=recursive)
             
-            logger.debug(f"MCP 调用成功: method={source_type}_list, token={token[:10]}..., recursive={recursive}")
             return result
             
         except TimeoutError as e:
