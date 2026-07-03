@@ -36,6 +36,7 @@ class Config:
     feishu_docs_cache_dir: str = "./data/feishu_docs"
     feishu_docs_cache_ttl: int = 86400  # 缓存有效期（秒），默认1天
     feishu_docs_sources: List[str] = None  # 知识库/云空间 token 列表
+    feishu_docs_alert_webhook: Optional[str] = None  # 飞书告警 Webhook（可选）
 
     # 本地离线文档配置
     local_docs: List[Dict[str, str]] = None  # [{path, description}]
@@ -128,6 +129,7 @@ class Config:
             config.feishu_docs_cache_dir = docs.get("cache_dir", config.feishu_docs_cache_dir)
             config.feishu_docs_cache_ttl = docs.get("cache_ttl", config.feishu_docs_cache_ttl)
             config.feishu_docs_sources = docs.get("sources", config.feishu_docs_sources)
+            config.feishu_docs_alert_webhook = docs.get("alert_webhook", config.feishu_docs_alert_webhook)
 
         # 解析本地离线文档配置
         if "local_docs" in data:

@@ -36,6 +36,7 @@ class FeishuDocManager:
         gpu_id: int = 0,
         batch_size: int = 32,
         doc_base_url: str = "",
+        alert_webhook: Optional[str] = None,
     ):
         """
         Args:
@@ -49,6 +50,7 @@ class FeishuDocManager:
             gpu_id: 使用哪张 GPU（0 或 1）
             batch_size: Embedding 批处理大小（GPU: 128-256, CPU: 16-32）
             doc_base_url: 飞书文档域名（如 https://xxx.feishu.cn），用于生成文档链接
+            alert_webhook: 飞书告警 Webhook URL（可选）
         """
         self.mcp_client = SimpleMCPClient(mcp_url)
         self.cache_dir = Path(cache_dir)
@@ -61,6 +63,7 @@ class FeishuDocManager:
         self._indexed = False
         self._indexing_in_progress = False  # 是否有线程正在索引
         self._doc_base_url = doc_base_url.rstrip('/') if doc_base_url else ""
+        self._alert_webhook = alert_webhook
         self._sync_interval = 1800  # 定时同步间隔（秒），默认 30 分钟
         self._sync_thread = None
         self._stop_event = threading.Event()
@@ -467,11 +470,30 @@ class FeishuDocManager:
             return []
 
     def _mcp_list_children(self, token: str, source_type: str, recursive: bool = True) -> Any:
-        """根据 source_type 调用对应的 MCP 接口列出子节点"""
-        if source_type == "drive":
-            return self.mcp_client.drive_list_folder(token, recursive=recursive)
-        else:  # wiki
-            return self.mcp_client.wiki_list_nodes(token, recursive=recursive)
+        """
+        根据 source_type 调用对应的 MCP 接口列出子节点
+        
+        Raises:
+            Exception: MCP 调用失败时向上抛出（网络、超时、服务错误）
+        """
+        try:
+            if source_type == "drive":
+                result = self.mcp_client.drive_list_folder(token, recursive=recursive)
+            else:  # wiki
+                result = self.mcp_client.wiki_list_nodes(token, recursive=recursive)
+            
+            logger.debug(f"MCP 调用成功: method={source_type}_list, token={token[:10]}..., recursive={recursive}")
+            return result
+            
+        except TimeoutError as e:
+            logger.error(f"MCP 调用超时: method={source_type}_list, token={token[:20]}..., error={e}")
+            raise
+        except ConnectionError as e:
+            logger.error(f"MCP 连接失败: method={source_type}_list, token={token[:20]}..., error={e}")
+            raise
+        except Exception as e:
+            logger.error(f"MCP 调用失败: method={source_type}_list, token={token[:20]}..., error={type(e).__name__}: {e}")
+            raise
 
     def _mcp_read_document(self, token: str, source_type: str) -> Any:
         """根据 source_type 调用对应的 MCP 接口读取文档"""
@@ -501,10 +523,15 @@ class FeishuDocManager:
 
         # 获取最新元数据比对
         logger.info(f"检查文档更新: source={source_token}, type={source_type}")
-        try:
-            latest_meta = self._fetch_metadata_tree(source_token, source_type=source_type)
-        except Exception as e:
-            logger.warning(f"获取元数据失败，继续使用旧缓存: {e}")
+        latest_meta = self._fetch_metadata_tree(source_token, source_type=source_type)
+
+        # 如果 MCP 调用失败，保留现有缓存，不删除
+        if latest_meta is None:
+            logger.error(
+                f"MCP 调用失败，跳过本次同步: source={source_token}, type={source_type}。"
+                "本地缓存未修改，将在下次同步时重试。"
+            )
+            # 🆕 Task-D6 会在这里调用 _send_alert() 发送飞书告警
             return None
 
         # 构建缓存 token -> doc 映射
@@ -918,13 +945,19 @@ class FeishuDocManager:
         except (json.JSONDecodeError, OSError):
             return False
 
-    def _fetch_metadata_tree(self, token: str, source_type: str = "wiki") -> Dict[str, Optional[str]]:
-        """获取文档元数据（只获取 token 和 edit_time，不读取内容）"""
-        metadata = {}
+    def _fetch_metadata_tree(self, token: str, source_type: str = "wiki") -> Optional[Dict[str, Optional[str]]]:
+        """
+        获取文档元数据（只获取 token 和 edit_time，不读取内容）
+
+        Returns:
+            Dict: 成功获取的元数据 {token: edit_time}，空字典表示确实没有文档
+            None: MCP 调用失败，无法确定状态
+        """
         try:
             children = self._mcp_list_children(token, source_type, recursive=True)
             items = self._parse_children(children)
 
+            metadata = {}
             for item in items:
                 child_token = item.get("obj_token") or item.get("token", "")
                 node_type = item.get("type", "")
@@ -933,10 +966,13 @@ class FeishuDocManager:
                 if child_token and node_type not in ("folder",):
                     metadata[child_token] = edit_time
 
-        except Exception as e:
-            logger.error(f"获取元数据失败: token={token}, error={e}")
+            return metadata  # 成功（可能为空字典）
 
-        return metadata
+        except Exception as e:
+            logger.error(f"MCP 调用失败，无法获取元数据: token={token}, source_type={source_type}, error={e}")
+            self._send_alert(token, source_type, str(e))
+            return None  # ✅ 标记失败
+
 
     def _load_from_cache(self, source_token: str) -> Optional[List[Dict[str, str]]]:
         """从缓存加载文档"""
@@ -1051,3 +1087,38 @@ class FeishuDocManager:
     def set_ai_provider(self, ai_provider):
         """设置 AI provider（用于标题过滤）"""
         self._ai_provider = ai_provider
+
+    def _send_alert(self, source_token: str, source_type: str, error_msg: str):
+        """发送飞书告警（如果配置了 webhook）"""
+        if not self._alert_webhook:
+            return
+
+        from datetime import datetime
+        import requests
+
+        # 飞书卡片消息
+        card = {
+            "msg_type": "interactive",
+            "card": {
+                "header": {
+                    "template": "red",
+                    "title": {"content": "⚠️ 文档同步告警", "tag": "plain_text"}
+                },
+                "elements": [
+                    {"tag": "div", "text": {"content": f"**时间**: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", "tag": "lark_md"}},
+                    {"tag": "div", "text": {"content": f"**来源**: {source_token} ({source_type})", "tag": "lark_md"}},
+                    {"tag": "div", "text": {"content": f"**错误**: {error_msg}", "tag": "lark_md"}},
+                    {"tag": "hr"},
+                    {"tag": "div", "text": {"content": "**影响**: 本次同步已跳过，使用旧缓存。将在下次定时同步时重试。", "tag": "lark_md"}}
+                ]
+            }
+        }
+
+        try:
+            response = requests.post(self._alert_webhook, json=card, timeout=5)
+            if response.status_code == 200:
+                logger.info(f"告警已发送: source={source_token}")
+            else:
+                logger.warning(f"告警发送失败: status={response.status_code}")
+        except Exception as e:
+            logger.warning(f"告警发送异常: {e}")
