@@ -115,13 +115,29 @@ class OpenAIProvider(AIProvider):
 
         except requests.exceptions.Timeout:
             logger.error("AI API 请求超时")
-            raise Exception("AI 服务响应超时")
+            return "⏱️ AI 服务响应超时，请稍后重试"
+        except requests.exceptions.HTTPError as e:
+            status_code = e.response.status_code if e.response else 0
+            response_text = e.response.text if e.response else 'N/A'
+            logger.error(f"AI API HTTP 错误: status={status_code}, response={response_text}")
+
+            # 针对特定错误码返回友好消息
+            if status_code == 401:
+                return "❌ API 认证失败，请检查 API Key 是否正确"
+            elif status_code == 402:
+                return "💳 账户余额不足，请充值后重试"
+            elif status_code == 429:
+                return "⏱️ API 请求过于频繁，请稍后重试"
+            elif status_code >= 500:
+                return "🔧 AI 服务暂时不可用，请稍后重试"
+            else:
+                return f"❌ AI 服务调用失败: HTTP {status_code}"
         except requests.exceptions.RequestException as e:
             logger.error(f"AI API 请求失败: {e}")
-            raise Exception(f"AI 服务调用失败: {str(e)}")
+            return "🔌 AI 服务连接失败，请检查网络或稍后重试"
         except (KeyError, IndexError) as e:
             logger.error(f"解析 AI 响应失败: {e}")
-            raise Exception("AI 响应格式错误")
+            return "❌ AI 响应格式错误，请稍后重试"
 
     def check_health(self) -> bool:
         """检查 API 服务健康状态"""

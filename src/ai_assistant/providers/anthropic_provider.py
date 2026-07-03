@@ -137,15 +137,27 @@ class AnthropicProvider(AIProvider):
 
         except anthropic.APITimeoutError:
             logger.error("Anthropic API 请求超时")
-            raise Exception("AI 服务响应超时")
+            return "⏱️ AI 服务响应超时，请稍后重试"
         except anthropic.APIConnectionError as e:
             logger.error(f"Anthropic API 连接失败: {e}")
-            raise Exception(f"AI 服务连接失败: {str(e)}")
+            return "🔌 AI 服务连接失败，请检查网络或稍后重试"
         except anthropic.APIStatusError as e:
-            logger.error(f"Anthropic API 错误: status={e.status_code}, message={e.message}")
+            status_code = e.status_code
+            logger.error(f"Anthropic API 错误: status={status_code}, message={e.message}")
             logger.error(f"请求详情: base_url={self.client.base_url}, model={self.model}")
             logger.error(f"响应体: {e.response.text if hasattr(e.response, 'text') else 'N/A'}")
-            raise Exception(f"AI 服务调用失败: {e.message}")
+
+            # 针对特定错误码返回友好消息
+            if status_code == 401:
+                return "❌ Anthropic API 认证失败，请检查 API Key 是否正确"
+            elif status_code == 402:
+                return "💳 Anthropic 账户余额不足，请充值后重试"
+            elif status_code == 429:
+                return "⏱️ Anthropic API 请求过于频繁，请稍后重试"
+            elif status_code >= 500:
+                return "🔧 Anthropic 服务暂时不可用，请稍后重试"
+            else:
+                return f"❌ AI 服务调用失败: {e.message}"
 
     def check_health(self) -> bool:
         """检查 Anthropic API 服务健康状态"""
