@@ -11,6 +11,7 @@ class Config:
     trigger_keyword: str = "【ai】"
     trigger_check_mention: bool = True
     trigger_check_private: bool = True
+    trigger_ignore_mention_all: bool = True  # 忽略 @所有人 的消息（默认不回复）
 
     # 上下文策略
     context_mode: str = "short"
@@ -95,6 +96,7 @@ class Config:
             config.trigger_keyword = data["trigger"].get("keyword", config.trigger_keyword)
             config.trigger_check_mention = data["trigger"].get("check_mention", config.trigger_check_mention)
             config.trigger_check_private = data["trigger"].get("check_private", config.trigger_check_private)
+            config.trigger_ignore_mention_all = data["trigger"].get("ignore_mention_all", config.trigger_ignore_mention_all)
 
         # 解析上下文策略
         if "context" in data:

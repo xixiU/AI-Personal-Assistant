@@ -3,6 +3,7 @@ trigger:
   keyword: "【ai】"
   check_mention: true
   check_private: true
+  ignore_mention_all: true  # 忽略 @所有人 的消息（默认不回复）
 
 # 上下文策略
 context:

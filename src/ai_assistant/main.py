@@ -393,6 +393,13 @@ class AIAssistant:
             if not text:
                 return None
 
+            # 检查是否包含 @所有人 并且配置了忽略
+            if self.config.trigger_ignore_mention_all:
+                mentions = message.get("mentions", [])
+                if any(mention.get("key") == "@_all" for mention in mentions):
+                    logger.info("忽略 @所有人 消息（根据配置）")
+                    return None
+
             return {
                 "chat_id": chat_id,
                 "chat_type": message.get("chat_type", "p2p"),
