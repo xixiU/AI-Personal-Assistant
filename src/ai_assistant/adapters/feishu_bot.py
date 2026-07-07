@@ -46,14 +46,14 @@ class FeishuBotAdapter(IMAdapter):
         # 欢迎消息配置
         self.welcome_message = config.get("welcome_message", "")
 
-    def add_reaction(self, message_id: str, emoji_type: str = "THINKING_FACE") -> bool:
+    def add_reaction(self, message_id: str, emoji_type: str = "THINKING") -> bool:
         """
         给消息添加表情回复
 
         Args:
             message_id: 消息 ID
-            emoji_type: 表情类型，默认 THINKING_FACE（🤔）
-                       常用表情：THINKING_FACE, OK_HAND, THUMBSUP, EYES, FIRE
+            emoji_type: 表情类型，默认 THINKING
+                       常用表情：THINKING, OK_HAND, THUMBSUP, EYES, FIRE
 
         Returns:
             是否成功

@@ -113,11 +113,9 @@ class AIAssistant:
                     self.ai_provider.set_git_tools(git_tools, enabled=True)
                     logger.info(f"代码排查已启用: repo={self.config.troubleshoot_repo_path}")
 
-                    # 定期 fetch 更新（后台线程）
-                    import threading
+                    # 定期 fetch 更新（后台线程），使用模块顶部已导入的 threading/time
                     def periodic_fetch():
                         while True:
-                            import time
                             time.sleep(1800)  # 每 30 分钟 fetch 一次
                             try:
                                 git_tools.fetch_updates()
@@ -337,10 +335,10 @@ class AIAssistant:
             if hasattr(adapter, 'add_reaction'):
                 # 检查 adapter 配置中的 thinking_reaction 开关
                 thinking_enabled = True  # 默认开启
-                thinking_emoji = "THINKING_FACE"  # 默认 🤔
+                thinking_emoji = "THINKING"  # 默认 🤔
                 if hasattr(adapter, 'bot_config'):
                     thinking_enabled = adapter.bot_config.get('thinking_reaction', True)
-                    thinking_emoji = adapter.bot_config.get('thinking_emoji', 'THINKING_FACE')
+                    thinking_emoji = adapter.bot_config.get('thinking_emoji', 'THINKING')
 
                 if thinking_enabled:
                     try:

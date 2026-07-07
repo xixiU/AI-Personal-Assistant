@@ -93,8 +93,25 @@ class Config:
         if not path.exists():
             raise FileNotFoundError(f"Config file not found: {config_path}")
 
-        with open(path, 'r', encoding='utf-8') as f:
-            data = yaml.safe_load(f)
+        # 优先 UTF-8，失败则尝试 GBK（兼容 Windows 记事本等以 GBK 保存的配置）
+        data = None
+        for encoding in ("utf-8", "utf-8-sig", "gbk"):
+            try:
+                with open(path, 'r', encoding=encoding) as f:
+                    data = yaml.safe_load(f)
+                if encoding != "utf-8":
+                    import warnings
+                    warnings.warn(
+                        f"配置文件 {config_path} 使用 {encoding} 编码，建议转为 UTF-8"
+                    )
+                break
+            except UnicodeDecodeError:
+                continue
+
+        if data is None:
+            raise ValueError(
+                f"无法解码配置文件 {config_path}，请确认文件编码为 UTF-8 或 GBK"
+            )
 
         config = cls()
 
