@@ -333,12 +333,18 @@ class AIAssistant:
 
             logger.info(f"Processing message for session: {session_id}, text:{text}, has_image:{image_data is not None}")
 
-            # 添加"思考中"表情回复（飞书体验优化）
-            if self.config.system_thinking_reaction and hasattr(adapter, 'add_reaction'):
-                try:
-                    adapter.add_reaction(message_id, emoji_type="THINKING_FACE")
-                except Exception as e:
-                    logger.warning(f"添加思考表情失败（不影响主流程）: {e}")
+            # 添加"思考中"表情回复（飞书体验优化，从 adapter 配置读取）
+            if hasattr(adapter, 'add_reaction'):
+                # 检查 adapter 配置中的 thinking_reaction 开关
+                thinking_enabled = True  # 默认开启
+                if hasattr(adapter, 'bot_config'):
+                    thinking_enabled = adapter.bot_config.get('thinking_reaction', True)
+
+                if thinking_enabled:
+                    try:
+                        adapter.add_reaction(message_id, emoji_type="THINKING_FACE")
+                    except Exception as e:
+                        logger.warning(f"添加思考表情失败（不影响主流程）: {e}")
 
             # 构建用户消息（支持图文）
             content_parts = []

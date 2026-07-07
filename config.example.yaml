@@ -46,7 +46,6 @@ system:
   disable_proxy: true  # 禁用系统代理（避免代理干扰内网/私有化部署访问）
   event_queue_size: 100  # 事件队列最大长度（队列满时新事件将被丢弃）
   max_concurrent_workers: 5  # 最大并发处理数（同时处理多少个用户请求）
-  thinking_reaction: true  # 收到消息后添加"思考中"🤔表情回复（飞书体验优化，默认开启）
 
 # IM适配器
 adapters:
@@ -64,6 +63,7 @@ adapters:
       allowed_chats: []    # 允许的群聊 ID 白名单（为空则允许所有）
       allowed_users: []    # 允许的用户 ID 白名单（为空则允许所有）
       welcome_message: "👋 大家好！我是 AI 助手，很高兴加入这个群聊。\n\n我可以帮助大家回答问题、查询文档等。直接 @ 我或私法发送消息即可。\n\n📖 使用文档：https://example.com/docs/ai-assistant"  # 机器人入群欢迎消息（支持 HTTP 链接） 直接回复群聊消息不艾特需要开启【获取群组中所有消息】事件
+      thinking_reaction: true  # 收到消息后添加"思考中"🤔表情回复（体验优化，默认开启）
 
   - name: "wechat"
     enabled: false

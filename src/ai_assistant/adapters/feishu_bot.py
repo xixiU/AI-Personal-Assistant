@@ -27,6 +27,7 @@ class FeishuBotAdapter(IMAdapter):
         Args:
             config: 配置字典，包含 app_id, app_secret 等
         """
+        self.bot_config = config  # 保存完整配置供其他模块访问
         self.app_id = config.get("app_id", "")
         self.app_secret = config.get("app_secret", "")
         self.verification_token = config.get("verification_token", "")

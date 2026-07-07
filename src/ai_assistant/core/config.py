@@ -52,7 +52,6 @@ class Config:
     system_disable_proxy: bool = True  # 禁用系统代理（避免代理干扰内网访问）
     system_event_queue_size: int = 100  # 事件队列最大长度
     system_max_concurrent_workers: int = 5  # 最大并发处理数
-    system_thinking_reaction: bool = True  # 收到消息后添加"思考中"表情回复（飞书）
 
     # 对话历史
     chat_history_enabled: bool = True  # 默认开启
@@ -157,7 +156,6 @@ class Config:
             config.system_disable_proxy = data["system"].get("disable_proxy", config.system_disable_proxy)
             config.system_event_queue_size = data["system"].get("event_queue_size", config.system_event_queue_size)
             config.system_max_concurrent_workers = data["system"].get("max_concurrent_workers", config.system_max_concurrent_workers)
-            config.system_thinking_reaction = data["system"].get("thinking_reaction", config.system_thinking_reaction)
 
         # 解析向量数据库配置
         if "vector_db" in data:
