@@ -100,6 +100,36 @@ class AIAssistant:
                 timeout=self.config.ai_timeout
             )
 
+        # 初始化 Git 工具（如果启用代码排查）
+        if getattr(self.config, 'troubleshoot_enabled', False):
+            from ai_assistant.tools.git_tools import GitTools
+            try:
+                git_tools = GitTools(
+                    repo_path=self.config.troubleshoot_repo_path,
+                    default_ref=self.config.troubleshoot_default_ref
+                )
+                # 注入到 Provider（目前只有 Anthropic 支持）
+                if hasattr(self.ai_provider, 'set_git_tools'):
+                    self.ai_provider.set_git_tools(git_tools, enabled=True)
+                    logger.info(f"代码排查已启用: repo={self.config.troubleshoot_repo_path}")
+
+                    # 定期 fetch 更新（后台线程）
+                    import threading
+                    def periodic_fetch():
+                        while True:
+                            import time
+                            time.sleep(1800)  # 每 30 分钟 fetch 一次
+                            try:
+                                git_tools.fetch_updates()
+                            except Exception as e:
+                                logger.error(f"Git fetch 失败: {e}")
+
+                    fetch_thread = threading.Thread(target=periodic_fetch, daemon=True, name="git-fetch")
+                    fetch_thread.start()
+            except Exception as e:
+                logger.error(f"初始化 Git 工具失败: {e}")
+                logger.warning("代码排查功能将不可用")
+
         # 初始化飞书文档管理器（如果启用）
         if self.config.feishu_docs_enabled:
             from ai_assistant.core.feishu_doc_manager import FeishuDocManager
@@ -277,6 +307,7 @@ class AIAssistant:
 
             session_id = parsed["chat_id"]
             text = parsed["text"]
+            image_data = parsed.get("image_data")
             message_id = parsed["message_id"]
             user_id = parsed.get("sender_id", "unknown")
 
@@ -284,21 +315,41 @@ class AIAssistant:
             with self._processing_lock:
                 if session_id in self._processing_sessions:
                     logger.info(f"Session {session_id} 已有请求在处理中，消息已加入上下文，跳过本次 AI 调用")
+                    # 构建消息内容
+                    content_parts = []
+                    if image_data:
+                        content_parts.append(Content(type="image", data=image_data))
+                    if text:
+                        content_parts.append(Content(type="text", data=text))
+
                     user_message = Message(
                         role="user",
-                        content=[Content(type="text", data=text)],
+                        content=content_parts if content_parts else [Content(type="text", data="")],
                         timestamp=datetime.now()
                     )
                     self.context_manager.add_message(session_id, user_message)
                     return
                 self._processing_sessions.add(session_id)
 
-            logger.info(f"Processing message for session: {session_id},text:{text}")
+            logger.info(f"Processing message for session: {session_id}, text:{text}, has_image:{image_data is not None}")
 
-            # 构建用户消息
+            # 添加"思考中"表情回复（飞书体验优化）
+            if self.config.system_thinking_reaction and hasattr(adapter, 'add_reaction'):
+                try:
+                    adapter.add_reaction(message_id, emoji_type="THINKING_FACE")
+                except Exception as e:
+                    logger.warning(f"添加思考表情失败（不影响主流程）: {e}")
+
+            # 构建用户消息（支持图文）
+            content_parts = []
+            if image_data:
+                content_parts.append(Content(type="image", data=image_data))
+            if text:
+                content_parts.append(Content(type="text", data=text))
+
             user_message = Message(
                 role="user",
-                content=[Content(type="text", data=text)],
+                content=content_parts if content_parts else [Content(type="text", data="")],
                 timestamp=datetime.now()
             )
 
@@ -352,11 +403,11 @@ class AIAssistant:
 
         Args:
             event_data: 飞书事件数据（v2.0 格式或 v1.0 转换后的格式）
-            adapter: 飞书适配器（用于白名单检查）
+            adapter: 飞书适配器（用于白名单检查和图片下载）
 
         Returns:
-            解析后的消息字典，包含 chat_id, text, message_id, sender_id
-            如果不是有效的文本消息则返回 None
+            解析后的消息字典，包含 chat_id, text, image_data, message_id, sender_id
+            如果不是有效消息则返回 None
         """
         import json as json_mod
 
@@ -382,17 +433,6 @@ class AIAssistant:
                     logger.info(f"❌ User {sender_id} not in whitelist, skipping")
                     return None
 
-            if message_type != "text":
-                logger.info(f"Skipping non-text message type: {message_type}")
-                return None
-
-            content_str = message.get("content", "{}")
-            content_data = json_mod.loads(content_str)
-            text = content_data.get("text", "")
-
-            if not text:
-                return None
-
             # 检查是否包含 @所有人 并且配置了忽略
             if self.config.trigger_ignore_mention_all:
                 mentions = message.get("mentions", [])
@@ -400,13 +440,52 @@ class AIAssistant:
                     logger.info("忽略 @所有人 消息（根据配置）")
                     return None
 
-            return {
-                "chat_id": chat_id,
-                "chat_type": message.get("chat_type", "p2p"),
-                "text": text,
-                "message_id": message_id,
-                "sender_id": sender_id
-            }
+            # 处理文本消息
+            if message_type == "text":
+                content_str = message.get("content", "{}")
+                content_data = json_mod.loads(content_str)
+                text = content_data.get("text", "")
+
+                if not text:
+                    return None
+
+                return {
+                    "chat_id": chat_id,
+                    "chat_type": message.get("chat_type", "p2p"),
+                    "text": text,
+                    "message_id": message_id,
+                    "sender_id": sender_id,
+                    "image_data": None
+                }
+
+            # 处理图片消息
+            elif message_type == "image":
+                content_str = message.get("content", "{}")
+                content_data = json_mod.loads(content_str)
+                image_key = content_data.get("image_key", "")
+
+                if not image_key or not adapter:
+                    logger.warning("图片消息但无 image_key 或 adapter")
+                    return None
+
+                # 下载图片
+                image_data = adapter.download_image(message_id, image_key)
+                if not image_data:
+                    logger.error(f"图片下载失败: image_key={image_key}")
+                    return None
+
+                return {
+                    "chat_id": chat_id,
+                    "chat_type": message.get("chat_type", "p2p"),
+                    "text": "",  # 图片消息无文本
+                    "message_id": message_id,
+                    "sender_id": sender_id,
+                    "image_data": image_data
+                }
+
+            else:
+                logger.info(f"跳过非文本/图片消息: {message_type}")
+                return None
 
         except Exception as e:
             logger.error(f"Failed to parse feishu event: {e}")

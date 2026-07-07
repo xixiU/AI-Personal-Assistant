@@ -46,6 +46,7 @@ system:
   disable_proxy: true  # 禁用系统代理（避免代理干扰内网/私有化部署访问）
   event_queue_size: 100  # 事件队列最大长度（队列满时新事件将被丢弃）
   max_concurrent_workers: 5  # 最大并发处理数（同时处理多少个用户请求）
+  thinking_reaction: true  # 收到消息后添加"思考中"🤔表情回复（飞书体验优化，默认开启）
 
 # IM适配器
 adapters:
@@ -133,3 +134,18 @@ logging:
 chat_history:
   enabled: true                       # 是否开启对话历史保存（默认开启）
   dir: "./data/chat_history"          # 保存目录（按天分文件，JSONL 格式）
+
+# 代码排查配置（需要 Anthropic Provider）
+troubleshoot:
+  enabled: false                      # 是否启用代码排查功能
+  repo_path: "./data/business_repo"   # 业务系统代码仓库路径（需提前 git clone）
+  default_ref: "origin/main"          # 默认分支（用户未指定版本时使用）
+  max_rounds: 6                       # Agentic 最大工具调用轮数
+  tool_timeout: 30                    # 单个工具超时时间（秒）
+  # 使用说明：
+  # 1. 将业务系统代码 clone 到 repo_path 指定的目录
+  # 2. 用户发送日志截图 + 版本号，AI 会自动调用 git 工具排查代码
+  # 3. 支持的工具：list_refs（列出分支/tag）、search_code（搜索代码）、
+  #    read_file（读取文件）、list_dir（列出目录）
+  # 4. 所有操作都是只读的，不会修改工作目录，支持并发查询不同分支
+

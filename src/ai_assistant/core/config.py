@@ -52,6 +52,7 @@ class Config:
     system_disable_proxy: bool = True  # 禁用系统代理（避免代理干扰内网访问）
     system_event_queue_size: int = 100  # 事件队列最大长度
     system_max_concurrent_workers: int = 5  # 最大并发处理数
+    system_thinking_reaction: bool = True  # 收到消息后添加"思考中"表情回复（飞书）
 
     # 对话历史
     chat_history_enabled: bool = True  # 默认开启
@@ -65,6 +66,13 @@ class Config:
     # 日志
     logging_level: str = "INFO"
     logging_file: str = "logs/ai-assistant.log"
+
+    # 代码排查配置
+    troubleshoot_enabled: bool = False  # 是否启用代码排查功能
+    troubleshoot_repo_path: str = "./data/business_repo"  # 业务系统代码仓库路径
+    troubleshoot_default_ref: str = "origin/main"  # 默认分支/tag
+    troubleshoot_max_rounds: int = 6  # Agentic 最大工具调用轮数
+    troubleshoot_tool_timeout: int = 30  # 单个工具超时时间（秒）
 
     # IM 适配器配置
     adapters: List[Dict[str, Any]] = None
@@ -149,6 +157,7 @@ class Config:
             config.system_disable_proxy = data["system"].get("disable_proxy", config.system_disable_proxy)
             config.system_event_queue_size = data["system"].get("event_queue_size", config.system_event_queue_size)
             config.system_max_concurrent_workers = data["system"].get("max_concurrent_workers", config.system_max_concurrent_workers)
+            config.system_thinking_reaction = data["system"].get("thinking_reaction", config.system_thinking_reaction)
 
         # 解析向量数据库配置
         if "vector_db" in data:
@@ -165,6 +174,15 @@ class Config:
         if "chat_history" in data:
             config.chat_history_enabled = data["chat_history"].get("enabled", config.chat_history_enabled)
             config.chat_history_dir = data["chat_history"].get("dir", config.chat_history_dir)
+
+        # 解析代码排查配置
+        if "troubleshoot" in data:
+            ts = data["troubleshoot"]
+            config.troubleshoot_enabled = ts.get("enabled", config.troubleshoot_enabled)
+            config.troubleshoot_repo_path = ts.get("repo_path", config.troubleshoot_repo_path)
+            config.troubleshoot_default_ref = ts.get("default_ref", config.troubleshoot_default_ref)
+            config.troubleshoot_max_rounds = ts.get("max_rounds", config.troubleshoot_max_rounds)
+            config.troubleshoot_tool_timeout = ts.get("tool_timeout", config.troubleshoot_tool_timeout)
 
         # 解析适配器
         if "adapters" in data:

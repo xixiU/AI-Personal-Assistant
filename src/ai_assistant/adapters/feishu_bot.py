@@ -45,6 +45,82 @@ class FeishuBotAdapter(IMAdapter):
         # 欢迎消息配置
         self.welcome_message = config.get("welcome_message", "")
 
+    def add_reaction(self, message_id: str, emoji_type: str = "THINKING_FACE") -> bool:
+        """
+        给消息添加表情回复
+
+        Args:
+            message_id: 消息 ID
+            emoji_type: 表情类型，默认 THINKING_FACE（🤔）
+                       常用表情：THINKING_FACE, OK_HAND, THUMBSUP, EYES, FIRE
+
+        Returns:
+            是否成功
+        """
+        try:
+            token = self.get_tenant_access_token()
+            url = f"{self.base_url}/open-apis/im/v1/messages/{message_id}/reactions"
+            headers = {
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json"
+            }
+            payload = {
+                "reaction_type": {
+                    "emoji_type": emoji_type
+                }
+            }
+
+            logger.debug(f"添加表情回复: message_id={message_id}, emoji={emoji_type}")
+            response = requests.post(url, headers=headers, json=payload, timeout=10)
+            response.raise_for_status()
+
+            result = response.json()
+            if result.get("code") == 0:
+                logger.info(f"表情回复成功: {emoji_type}")
+                return True
+            else:
+                logger.warning(f"表情回复失败: {result.get('msg')}")
+                return False
+        except Exception as e:
+            logger.error(f"添加表情回复失败: {e}")
+            return False
+
+    def download_image(self, message_id: str, image_key: str) -> Optional[Dict[str, str]]:
+        """
+        下载飞书消息中的图片
+
+        Args:
+            message_id: 消息 ID
+            image_key: 图片 key
+
+        Returns:
+            包含 base64 编码图片和 media_type 的字典，失败返回 None
+        """
+        try:
+            token = self.get_tenant_access_token()
+            url = f"{self.base_url}/open-apis/im/v1/messages/{message_id}/resources/{image_key}"
+            headers = {"Authorization": f"Bearer {token}"}
+            params = {"type": "image"}
+
+            logger.debug(f"下载飞书图片: message_id={message_id}, image_key={image_key}")
+            response = requests.get(url, headers=headers, params=params, timeout=30)
+            response.raise_for_status()
+
+            # 获取图片类型
+            content_type = response.headers.get("Content-Type", "image/png")
+
+            # base64 编码
+            image_data = base64.b64encode(response.content).decode("utf-8")
+
+            logger.info(f"图片下载成功: size={len(response.content)} bytes, type={content_type}")
+            return {
+                "data": image_data,
+                "media_type": content_type
+            }
+        except Exception as e:
+            logger.error(f"下载飞书图片失败: {e}")
+            return None
+
     def get_tenant_access_token(self) -> str:
         """
         获取 tenant_access_token

@@ -3,11 +3,14 @@ Anthropic Claude Provider
 
 使用 Anthropic API 调用 Claude 模型，支持集成飞书文档管理器。
 文档内容在调用前注入 system prompt，Claude 基于文档生成回复。
+
+支持 Agentic 模式：Claude 可以主动调用工具（如代码搜索、文件读取）进行多轮排查。
 """
 
 from typing import Any, Dict, List, Optional
 from loguru import logger
 import anthropic
+import json
 
 from ai_assistant.core.ai_provider import (
     AIProvider,
@@ -48,6 +51,22 @@ class AnthropicProvider(AIProvider):
         self.client = anthropic.Anthropic(**client_kwargs)
         logger.info(f"Anthropic Provider 初始化: model={model}, base_url={base_url or '默认'}")
 
+        # Git 工具（由外部注入）
+        self.git_tools = None
+        self.git_tools_enabled = False
+
+    def set_git_tools(self, git_tools, enabled: bool = True):
+        """
+        设置 git 工具（用于代码排查）
+
+        Args:
+            git_tools: GitTools 实例
+            enabled: 是否启用
+        """
+        self.git_tools = git_tools
+        self.git_tools_enabled = enabled
+        logger.info(f"Git 工具已{'启用' if enabled else '禁用'}")
+
     def extract_keywords(self, query_text: str) -> KeywordExtractionResult:
         """
         使用 Claude 从用户查询中提取搜索关键词 + 判断是否通用技术问题
@@ -70,13 +89,265 @@ class AnthropicProvider(AIProvider):
             logger.warning(f"Claude 关键词提取失败，返回降级值: {e}")
             return KeywordExtractionResult(keywords=[], is_generic_tech=False)
 
+    def _should_use_agentic_mode(self, messages: List[Message]) -> bool:
+        """
+        判断是否应该使用 Agentic 模式（工具调用）
+
+        触发条件：
+        1. Git 工具已启用
+        2. 消息中包含图片（很可能是日志截图）
+        3. 或文本中包含排查关键词
+
+        Args:
+            messages: 消息列表
+
+        Returns:
+            是否使用 Agentic 模式
+        """
+        if not self.git_tools_enabled or not self.git_tools:
+            return False
+
+        # 检查是否有图片
+        for msg in messages:
+            for content in msg.content:
+                if content.type == "image":
+                    logger.info("检测到图片消息，启用 Agentic 模式")
+                    return True
+
+        # 检查文本中是否有排查关键词
+        troubleshoot_keywords = ["排查", "报错", "异常", "错误", "bug", "问题", "崩溃", "failed", "error", "exception"]
+        last_user_text = self._extract_last_user_text(messages).lower()
+        if any(kw in last_user_text for kw in troubleshoot_keywords):
+            logger.info("检测到排查关键词，启用 Agentic 模式")
+            return True
+
+        return False
+
     def _send_with_context(
         self,
         messages: List[Message],
         doc_context: str,
         session_id: Optional[str] = None,
     ) -> str:
-        """发送消息到 Claude 并获取回复"""
+        """
+        发送消息到 Claude 并获取回复
+
+        根据消息内容自动选择模式：
+        - 有图片或排查关键词 → Agentic 模式（支持工具调用）
+        - 其他 → 标准 RAG 模式
+        """
+        # 判断是否使用 Agentic 模式
+        if self._should_use_agentic_mode(messages):
+            logger.info("使用 Agentic 模式（工具调用）")
+            return self._send_with_context_agentic(messages, doc_context, session_id)
+
+        # 标准 RAG 模式
+        logger.info("使用标准 RAG 模式")
+        return self._send_with_context_standard(messages, doc_context, session_id)
+
+    def _send_with_context_agentic(
+        self,
+        messages: List[Message],
+        doc_context: str,
+        session_id: Optional[str] = None,
+        max_rounds: int = 6,
+    ) -> str:
+        """
+        Agentic 模式：支持工具调用的多轮对话
+
+        Args:
+            messages: 消息列表
+            doc_context: 文档上下文
+            session_id: 会话 ID
+            max_rounds: 最大工具调用轮数
+
+        Returns:
+            AI 最终回复
+        """
+        from ai_assistant.tools.git_tools import GIT_TOOLS_SCHEMA
+
+        # 转换消息格式
+        api_messages = []
+        for msg in messages:
+            content_parts = []
+            for content in msg.content:
+                if content.type == "text":
+                    content_parts.append({"type": "text", "text": content.data})
+                elif content.type == "image" and isinstance(content.data, dict):
+                    content_parts.append({
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": content.data.get("media_type", "image/png"),
+                            "data": content.data["data"],
+                        }
+                    })
+
+            if content_parts:
+                api_messages.append({"role": msg.role, "content": content_parts})
+
+        # 构建 system prompt（Agentic 排查指引）
+        system_parts = [
+            "你是一个智能代码排查助手，帮助用户分析日志并定位代码问题。",
+            "",
+            "工作流程：",
+            "1. 如果用户只提供了日志截图但未说明版本或问题描述，请先询问补充信息（版本号、问题现象等），不要贸然排查",
+            "2. 确认版本后，用 list_refs 工具查找对应的分支或 tag",
+            "3. 从日志中提取关键信息（异常类名、错误信息、堆栈行号）",
+            "4. 用 search_code 工具在对应版本的代码中搜索异常类或错误信息",
+            "5. 用 read_file 工具读取定位到的文件，查看上下文代码（建议读取抛错位置前后 30 行）",
+            "6. 综合日志和代码，给出根因分析、代码定位（文件:行号）、修复建议",
+            "",
+            "注意事项：",
+            "- 必须始终使用中文回答",
+            "- 代码定位要精确到文件名和行号",
+            "- 如果无法定位问题，诚实告知并给出可能的排查方向",
+            "- 工具调用失败时不要放弃，尝试其他搜索关键词或路径"
+        ]
+
+        # 注入飞书文档（如果有）
+        if doc_context:
+            system_parts.append("")
+            system_parts.append(doc_context)
+
+        system_prompt = "\n".join(system_parts)
+
+        # Agentic 循环
+        round_num = 0
+        while round_num < max_rounds:
+            round_num += 1
+            logger.info(f"Agentic 轮次 {round_num}/{max_rounds}")
+
+            try:
+                response = self.client.messages.create(
+                    model=self.model,
+                    max_tokens=4096,
+                    system=system_prompt,
+                    messages=api_messages,
+                    tools=GIT_TOOLS_SCHEMA,
+                )
+
+                logger.info(
+                    f"Claude 响应: stop_reason={response.stop_reason}, "
+                    f"tokens(input:{response.usage.input_tokens}, output:{response.usage.output_tokens})"
+                )
+
+                # 收集本轮的 assistant 消息内容
+                assistant_content = []
+                tool_uses = []
+
+                for block in response.content:
+                    if block.type == "text":
+                        assistant_content.append({"type": "text", "text": block.text})
+                    elif block.type == "tool_use":
+                        assistant_content.append({
+                            "type": "tool_use",
+                            "id": block.id,
+                            "name": block.name,
+                            "input": block.input
+                        })
+                        tool_uses.append(block)
+
+                # 将 assistant 消息加入对话历史
+                api_messages.append({"role": "assistant", "content": assistant_content})
+
+                # 如果没有工具调用，返回最终文本
+                if response.stop_reason == "end_turn" or not tool_uses:
+                    final_text = ""
+                    for block in response.content:
+                        if hasattr(block, 'text'):
+                            final_text += block.text
+                    logger.info(f"Agentic 完成: 总轮数={round_num}, 最终回复={len(final_text)}字符")
+                    return final_text or "抱歉，未能生成有效回复。"
+
+                # 执行工具调用
+                tool_results = []
+                for tool_use in tool_uses:
+                    tool_name = tool_use.name
+                    tool_input = tool_use.input
+                    logger.info(f"执行工具: {tool_name}({tool_input})")
+
+                    try:
+                        result = self._execute_tool(tool_name, tool_input)
+                        tool_results.append({
+                            "type": "tool_result",
+                            "tool_use_id": tool_use.id,
+                            "content": json.dumps(result, ensure_ascii=False)
+                        })
+                        logger.debug(f"工具 {tool_name} 结果: {result}")
+                    except Exception as e:
+                        logger.error(f"工具 {tool_name} 执行失败: {e}")
+                        tool_results.append({
+                            "type": "tool_result",
+                            "tool_use_id": tool_use.id,
+                            "content": json.dumps({"error": str(e)}, ensure_ascii=False),
+                            "is_error": True
+                        })
+
+                # 将工具结果加入对话历史
+                api_messages.append({"role": "user", "content": tool_results})
+
+            except anthropic.APITimeoutError:
+                logger.error("Anthropic API 请求超时")
+                return "⏱️ AI 服务响应超时，请稍后重试"
+            except anthropic.APIConnectionError as e:
+                logger.error(f"Anthropic API 连接失败: {e}")
+                return "🔌 AI 服务连接失败，请检查网络或稍后重试"
+            except anthropic.APIStatusError as e:
+                logger.error(f"Anthropic API 错误: status={e.status_code}, message={e.message}")
+                return f"❌ AI 服务调用失败: {e.message}"
+            except Exception as e:
+                logger.error(f"Agentic 循环异常: {e}", exc_info=True)
+                return f"❌ 排查过程出错: {str(e)}"
+
+        # 达到最大轮数
+        logger.warning(f"达到最大轮数 {max_rounds}，返回当前结果")
+        return "⚠️ 排查过程较复杂，已达到最大分析轮数。以上是目前的分析结果，如需继续请提供更多信息。"
+
+    def _execute_tool(self, tool_name: str, tool_input: Dict[str, Any]) -> Any:
+        """
+        执行工具调用
+
+        Args:
+            tool_name: 工具名称
+            tool_input: 工具参数
+
+        Returns:
+            工具执行结果
+        """
+        if not self.git_tools:
+            return {"error": "Git 工具未初始化"}
+
+        if tool_name == "list_refs":
+            return self.git_tools.list_refs(tool_input.get("pattern"))
+        elif tool_name == "search_code":
+            return self.git_tools.search_code(
+                query=tool_input["query"],
+                ref=tool_input.get("ref"),
+                path_filter=tool_input.get("path_filter")
+            )
+        elif tool_name == "read_file":
+            return self.git_tools.read_file(
+                path=tool_input["path"],
+                ref=tool_input.get("ref"),
+                start_line=tool_input.get("start_line"),
+                end_line=tool_input.get("end_line")
+            )
+        elif tool_name == "list_dir":
+            return self.git_tools.list_dir(
+                path=tool_input.get("path", ""),
+                ref=tool_input.get("ref")
+            )
+        else:
+            return {"error": f"未知工具: {tool_name}"}
+
+    def _send_with_context_standard(
+        self,
+        messages: List[Message],
+        doc_context: str,
+        session_id: Optional[str] = None,
+    ) -> str:
+        """标准 RAG 模式（原有实现）"""
         try:
             # 转换消息格式
             api_messages = []
@@ -211,65 +482,3 @@ class AnthropicProvider(AIProvider):
         except Exception as e:
             logger.warning(f"Claude 标题过滤失败: {e}")
             return []
-
-    def _load_local_docs(self, query_text: str) -> str:
-        """
-        根据用户查询加载匹配的本地离线文档
-
-        匹配逻辑：检查每个 local_doc 配置的 keywords，
-        如果用户查询中包含任一关键词，则读取该目录下的所有文档。
-        """
-        import os
-        matched_parts = []
-
-        for doc_config in self.local_docs:
-            path = doc_config.get("path", "")
-            description = doc_config.get("description", "")
-            keywords = doc_config.get("keywords", [])
-
-            if not path:
-                continue
-
-            if not os.path.isdir(path):
-                logger.warning(f"本地文档目录不存在: {path}")
-                continue
-
-            # 检查关键词是否匹配（keywords 为空则始终加载）
-            query_lower = query_text.lower()
-            if keywords:
-                matched = any(kw.lower() in query_lower for kw in keywords)
-            else:
-                matched = True  # 无 keywords 配置则始终加载
-
-            if not matched:
-                continue
-
-            # 读取目录下的文档
-            logger.info(f"加载本地文档: {path} ({description})")
-            doc_texts = []
-            total_chars = 0
-            max_chars = 50000  # 单个目录最大字符数限制
-            for root, dirs, files in os.walk(path):
-                for fname in sorted(files):
-                    if not fname.endswith(('.txt', '.md', '.sql', '.json', '.yaml', '.yml', '.csv')):
-                        continue
-                    fpath = os.path.join(root, fname)
-                    try:
-                        with open(fpath, 'r', encoding='utf-8') as f:
-                            content = f.read()
-                        if content.strip():
-                            if total_chars + len(content) > max_chars:
-                                logger.warning(f"本地文档超出大小限制，截断: {path}, 已加载 {total_chars} 字符")
-                                break
-                            rel_path = os.path.relpath(fpath, path)
-                            doc_texts.append(f"### {rel_path}\n{content}")
-                            total_chars += len(content)
-                    except Exception as e:
-                        logger.warning(f"读取本地文档失败: {fpath}, error={e}")
-                if total_chars >= max_chars:
-                    break
-
-            if doc_texts:
-                matched_parts.append(f"以下是本地离线文档（{description}）：\n\n" + "\n\n".join(doc_texts))
-
-        return "\n\n".join(matched_parts) if matched_parts else ""
