@@ -1,6 +1,6 @@
 # 触发规则
 trigger:
-  keyword: "【ai】"
+  keyword: "ai"
   check_mention: true
   check_private: true
   ignore_mention_all: true  # 忽略 @所有人 的消息（默认不回复）
@@ -64,7 +64,7 @@ adapters:
       allowed_users: []    # 允许的用户 ID 白名单（为空则允许所有）
       welcome_message: "👋 大家好！我是 AI 助手，很高兴加入这个群聊。\n\n我可以帮助大家回答问题、查询文档等。直接 @ 我或私法发送消息即可。\n\n📖 使用文档：https://example.com/docs/ai-assistant"  # 机器人入群欢迎消息（支持 HTTP 链接） 直接回复群聊消息不艾特需要开启【获取群组中所有消息】事件
       thinking_reaction: true  # 收到消息后添加"思考中"🤔表情回复（体验优化，默认开启）
-      thinking_emoji: "THINKING_FACE"  # 思考表情类型（默认 🤔），可选：THINKING_FACE/OK_HAND/THUMBSUP/EYES/FIRE
+      thinking_emoji: "THINKING_FACE"  # 思考表情类型（默认 🤔），可选：THINKING_FACE🤔/OK_HAND👌/THUMBSUP👍/EYES👀/FIRE🔥，更多https://open.feishu.cn/document/server-docs/im-v1/message-reaction/emojis-introduce?lang=zh-CN
 
   - name: "wechat"
     enabled: false
