@@ -337,12 +337,14 @@ class AIAssistant:
             if hasattr(adapter, 'add_reaction'):
                 # 检查 adapter 配置中的 thinking_reaction 开关
                 thinking_enabled = True  # 默认开启
+                thinking_emoji = "THINKING_FACE"  # 默认 🤔
                 if hasattr(adapter, 'bot_config'):
                     thinking_enabled = adapter.bot_config.get('thinking_reaction', True)
+                    thinking_emoji = adapter.bot_config.get('thinking_emoji', 'THINKING_FACE')
 
                 if thinking_enabled:
                     try:
-                        adapter.add_reaction(message_id, emoji_type="THINKING_FACE")
+                        adapter.add_reaction(message_id, emoji_type=thinking_emoji)
                     except Exception as e:
                         logger.warning(f"添加思考表情失败（不影响主流程）: {e}")
 
