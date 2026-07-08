@@ -307,6 +307,7 @@ class AIAssistant:
             if not parsed:
                 logger.debug("Event parsing returned None, skipping")
                 return
+            logger.info("parsed message:{}",parsed)
 
             session_id = parsed["chat_id"]
             text = parsed["text"]
@@ -444,13 +445,6 @@ class AIAssistant:
                     logger.info(f"❌ User {sender_id} not in whitelist, skipping")
                     return None
 
-            # 检查是否包含 @所有人 并且配置了忽略
-            if self.config.trigger_ignore_mention_all:
-                mentions = message.get("mentions", [])
-                if any(mention.get("key") == "@_all" for mention in mentions):
-                    logger.info("忽略 @所有人 消息（根据配置）")
-                    return None
-
             # 处理文本消息
             if message_type == "text":
                 content_str = message.get("content", "{}")
@@ -459,6 +453,12 @@ class AIAssistant:
 
                 if not text:
                     return None
+
+                # 检查是否包含 @所有人 并且配置了忽略（检查文本内容）
+                if self.config.trigger_ignore_mention_all:
+                    if "@_all" in text:
+                        logger.info("忽略包含 @_all 的消息（根据配置）")
+                        return None
 
                 return {
                     "chat_id": chat_id,
