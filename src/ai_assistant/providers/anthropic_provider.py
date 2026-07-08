@@ -54,18 +54,21 @@ class AnthropicProvider(AIProvider):
         # Git 工具（由外部注入）
         self.git_tools = None
         self.git_tools_enabled = False
+        self.branch_hint = ""  # 版本号→分支映射提示
 
-    def set_git_tools(self, git_tools, enabled: bool = True):
+    def set_git_tools(self, git_tools, enabled: bool = True, branch_hint: str = ""):
         """
         设置 git 工具（用于代码排查）
 
         Args:
             git_tools: GitTools 实例
             enabled: 是否启用
+            branch_hint: 版本号→分支映射提示（注入 system prompt）
         """
         self.git_tools = git_tools
         self.git_tools_enabled = enabled
-        logger.info(f"Git 工具已{'启用' if enabled else '禁用'}")
+        self.branch_hint = branch_hint
+        logger.info(f"Git 工具已{'启用' if enabled else '禁用'}，branch_hint={'已配置' if branch_hint else '未配置'}")
 
     def extract_keywords(self, query_text: str) -> KeywordExtractionResult:
         """
@@ -204,6 +207,12 @@ class AnthropicProvider(AIProvider):
             "- 如果无法定位问题，诚实告知并给出可能的排查方向",
             "- 工具调用失败时不要放弃，尝试其他搜索关键词或路径"
         ]
+
+        # 注入版本号→分支映射提示
+        if self.branch_hint:
+            system_parts.append("")
+            system_parts.append("版本号与分支映射规则：")
+            system_parts.append(self.branch_hint)
 
         # 注入飞书文档（如果有）
         if doc_context:

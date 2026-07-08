@@ -143,10 +143,17 @@ troubleshoot:
   default_ref: "origin/main"          # 默认分支（用户未指定版本时使用）
   max_rounds: 6                       # Agentic 最大工具调用轮数
   tool_timeout: 30                    # 单个工具超时时间（秒）
+  branch_hint: |                      # 版本号→分支映射提示（注入给 AI，可选）
+    版本号对应分支命名规则：
+    - 大部分场景：dev-<版本号>，如版本 4.3.5 对应分支 dev-4.3.5
+    - 特殊定制版本：可能使用 custom-<客户名>-<版本号> 格式
+    - 优先级：dev- > release- > hotfix- > 其他
+    - 若找到多个匹配分支，请列出让用户选择
   # 使用说明：
   # 1. 将业务系统代码 clone 到 repo_path 指定的目录
   # 2. 用户发送日志截图 + 版本号，AI 会自动调用 git 工具排查代码
   # 3. 支持的工具：list_refs（列出分支/tag）、search_code（搜索代码）、
   #    read_file（读取文件）、list_dir（列出目录）
   # 4. 所有操作都是只读的，不会修改工作目录，支持并发查询不同分支
+
 

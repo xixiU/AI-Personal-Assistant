@@ -110,7 +110,12 @@ class AIAssistant:
                 )
                 # 注入到 Provider（目前只有 Anthropic 支持）
                 if hasattr(self.ai_provider, 'set_git_tools'):
-                    self.ai_provider.set_git_tools(git_tools, enabled=True)
+                    branch_hint = getattr(self.config, 'troubleshoot_branch_hint', '')
+                    self.ai_provider.set_git_tools(
+                        git_tools,
+                        enabled=True,
+                        branch_hint=branch_hint
+                    )
                     logger.info(f"代码排查已启用: repo={self.config.troubleshoot_repo_path}")
 
                     # 定期 fetch 更新（后台线程），使用模块顶部已导入的 threading/time

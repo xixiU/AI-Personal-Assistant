@@ -72,6 +72,7 @@ class Config:
     troubleshoot_default_ref: str = "origin/main"  # 默认分支/tag
     troubleshoot_max_rounds: int = 6  # Agentic 最大工具调用轮数
     troubleshoot_tool_timeout: int = 30  # 单个工具超时时间（秒）
+    troubleshoot_branch_hint: str = ""  # 版本号→分支映射提示（注入给 AI）
 
     # IM 适配器配置
     adapters: List[Dict[str, Any]] = None
@@ -198,6 +199,7 @@ class Config:
             config.troubleshoot_default_ref = ts.get("default_ref", config.troubleshoot_default_ref)
             config.troubleshoot_max_rounds = ts.get("max_rounds", config.troubleshoot_max_rounds)
             config.troubleshoot_tool_timeout = ts.get("tool_timeout", config.troubleshoot_tool_timeout)
+            config.troubleshoot_branch_hint = ts.get("branch_hint", config.troubleshoot_branch_hint)
 
         # 解析适配器
         if "adapters" in data:
