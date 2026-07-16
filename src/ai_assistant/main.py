@@ -100,39 +100,56 @@ class AIAssistant:
                 timeout=self.config.ai_timeout
             )
 
-        # 初始化 Git 工具（如果启用代码排查）
+        # 初始化代码排查工具（如果启用）
         if getattr(self.config, 'troubleshoot_enabled', False):
             self.ai_provider.max_rounds = self.config.troubleshoot_max_rounds
-            from ai_assistant.tools.git_tools import GitTools
-            try:
-                git_tools = GitTools(
-                    repo_path=self.config.troubleshoot_repo_path,
-                    default_ref=self.config.troubleshoot_default_ref
-                )
-                # 注入到 Provider（目前只有 Anthropic 支持）
-                if hasattr(self.ai_provider, 'set_git_tools'):
-                    branch_hint = getattr(self.config, 'troubleshoot_branch_hint', '')
-                    self.ai_provider.set_git_tools(
-                        git_tools,
-                        enabled=True,
-                        branch_hint=branch_hint
+            repositories = getattr(self.config, 'troubleshoot_repositories', None)
+
+            if repositories and len(repositories) >= 1:
+                # 多仓库模式：使用 RepoManager 统一管理
+                from ai_assistant.tools.repo_manager import RepoManager
+                try:
+                    repo_manager = RepoManager(repositories)
+                    if hasattr(self.ai_provider, 'set_repo_manager'):
+                        self.ai_provider.set_repo_manager(repo_manager)
+                        # 注入 branch_hint（兼容旧配置，单仓库时仍可用）
+                        branch_hint = getattr(self.config, 'troubleshoot_branch_hint', '')
+                        if branch_hint:
+                            self.ai_provider.branch_hint = branch_hint
+                        repo_manager.start_background_fetch()
+                        repo_names = [r.name for r in repositories]
+                        logger.info(f"代码排查已启用（多仓库模式）: {repo_names}")
+                    else:
+                        logger.warning("当前 AI Provider 不支持多仓库模式")
+                except Exception as e:
+                    logger.error(f"初始化多仓库管理器失败: {e}")
+                    logger.warning("代码排查功能将不可用")
+            else:
+                # 旧逻辑兜底：直接用单仓库 GitTools
+                from ai_assistant.tools.git_tools import GitTools
+                try:
+                    git_tools = GitTools(
+                        repo_path=self.config.troubleshoot_repo_path,
+                        default_ref=self.config.troubleshoot_default_ref
                     )
-                    logger.info(f"代码排查已启用: repo={self.config.troubleshoot_repo_path}")
+                    if hasattr(self.ai_provider, 'set_git_tools'):
+                        branch_hint = getattr(self.config, 'troubleshoot_branch_hint', '')
+                        self.ai_provider.set_git_tools(git_tools, enabled=True, branch_hint=branch_hint)
+                        logger.info(f"代码排查已启用: repo={self.config.troubleshoot_repo_path}")
 
-                    # 定期 fetch 更新（后台线程），使用模块顶部已导入的 threading/time
-                    def periodic_fetch():
-                        while True:
-                            time.sleep(1800)  # 每 30 分钟 fetch 一次
-                            try:
-                                git_tools.fetch_updates()
-                            except Exception as e:
-                                logger.error(f"Git fetch 失败: {e}")
+                        def periodic_fetch():
+                            while True:
+                                time.sleep(1800)
+                                try:
+                                    git_tools.fetch_updates()
+                                except Exception as e:
+                                    logger.error(f"Git fetch 失败: {e}")
 
-                    fetch_thread = threading.Thread(target=periodic_fetch, daemon=True, name="git-fetch")
-                    fetch_thread.start()
-            except Exception as e:
-                logger.error(f"初始化 Git 工具失败: {e}")
-                logger.warning("代码排查功能将不可用")
+                        fetch_thread = threading.Thread(target=periodic_fetch, daemon=True, name="git-fetch")
+                        fetch_thread.start()
+                except Exception as e:
+                    logger.error(f"初始化 Git 工具失败: {e}")
+                    logger.warning("代码排查功能将不可用")
 
         # 初始化飞书文档管理器（如果启用）
         if self.config.feishu_docs_enabled:

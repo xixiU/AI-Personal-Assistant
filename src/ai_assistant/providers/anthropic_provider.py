@@ -57,6 +57,7 @@ class AnthropicProvider(AIProvider):
         self.git_tools_enabled = False
         self.branch_hint = ""  # 版本号→分支映射提示
         self.max_rounds = 6  # Agentic 最大轮数，由外部注入覆盖
+        self.repo_manager = None  # 多仓库管理器（由外部注入）
 
     def set_git_tools(self, git_tools, enabled: bool = True, branch_hint: str = ""):
         """
@@ -71,6 +72,18 @@ class AnthropicProvider(AIProvider):
         self.git_tools_enabled = enabled
         self.branch_hint = branch_hint
         logger.info(f"Git 工具已{'启用' if enabled else '禁用'}，branch_hint={'已配置' if branch_hint else '未配置'}")
+
+    def set_repo_manager(self, repo_manager):
+        """
+        设置多仓库管理器（用于多仓库代码排查）
+
+        Args:
+            repo_manager: RepoManager 实例
+        """
+        self.repo_manager = repo_manager
+        self.git_tools = repo_manager.current
+        self.git_tools_enabled = True
+        logger.info(f"多仓库管理器已注入: 当前仓库={repo_manager.current_repo_name}")
 
     def extract_keywords(self, query_text: str) -> KeywordExtractionResult:
         """
@@ -293,6 +306,24 @@ class AnthropicProvider(AIProvider):
         """
         from ai_assistant.tools.git_tools import GIT_TOOLS_SCHEMA
 
+        # 构建工具列表（多仓库时追加 switch_repo 工具）
+        tools_schema = list(GIT_TOOLS_SCHEMA)
+        if self.repo_manager and len(self.repo_manager.list_repos()) > 1:
+            tools_schema.append({
+                "name": "switch_repo",
+                "description": "切换当前代码排查的目标仓库。切换后，search_code、read_file、list_dir 等工具将在新仓库中执行。",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "repo_name": {
+                            "type": "string",
+                            "description": "目标仓库名称"
+                        }
+                    },
+                    "required": ["repo_name"]
+                }
+            })
+
         # 转换消息格式
         api_messages = []
         for msg in messages:
@@ -343,6 +374,11 @@ class AnthropicProvider(AIProvider):
             system_parts.append("")
             system_parts.append(doc_context)
 
+        # 注入多仓库描述（帮助 AI 判断该去哪个仓库查）
+        if self.repo_manager and len(self.repo_manager.list_repos()) > 1:
+            system_parts.append("")
+            system_parts.append(self.repo_manager.get_repo_descriptions())
+
         system_prompt = "\n".join(system_parts)
 
         # Agentic 循环
@@ -357,7 +393,7 @@ class AnthropicProvider(AIProvider):
                     max_tokens=4096,
                     system=system_prompt,
                     messages=api_messages,
-                    tools=GIT_TOOLS_SCHEMA,
+                    tools=tools_schema,
                 )
 
                 logger.info(
@@ -402,10 +438,14 @@ class AnthropicProvider(AIProvider):
 
                     try:
                         result = self._execute_tool(tool_name, tool_input)
+                        result_str = json.dumps(result, ensure_ascii=False)
+                        # 多仓库模式下，工具结果前缀加当前仓库名
+                        if self.repo_manager and len(self.repo_manager.list_repos()) > 1:
+                            result_str = f"[当前仓库: {self.repo_manager.current_repo_name}] {result_str}"
                         tool_results.append({
                             "type": "tool_result",
                             "tool_use_id": tool_use.id,
-                            "content": json.dumps(result, ensure_ascii=False)
+                            "content": result_str
                         })
                         logger.debug(f"工具 {tool_name} 结果: {result}")
                     except Exception as e:
@@ -471,6 +511,13 @@ class AnthropicProvider(AIProvider):
                 path=tool_input.get("path", ""),
                 ref=tool_input.get("ref")
             )
+        elif tool_name == "switch_repo":
+            if not self.repo_manager:
+                return {"error": "多仓库管理器未初始化"}
+            result_msg = self.repo_manager.switch_repo(tool_input["repo_name"])
+            # 切换后更新当前 git_tools 引用
+            self.git_tools = self.repo_manager.current
+            return {"message": result_msg}
         else:
             return {"error": f"未知工具: {tool_name}"}
 

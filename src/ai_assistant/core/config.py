@@ -5,6 +5,19 @@ from pathlib import Path
 
 
 @dataclass
+class RepositoryConfig:
+    """单个仓库配置"""
+    name: str                         # 仓库标识名（如 "backend", "frontend"）
+    repo_path: str                    # 仓库本地路径
+    default_ref: str = "origin/main"  # 默认分支/tag
+    description: str = ""             # 仓库描述（注入给 AI 辨别用途）
+    auth_mode: str = "none"           # 认证模式: none / https / ssh
+    auth_username: str = ""           # HTTPS 模式的用户名
+    auth_password: str = ""           # HTTPS 模式的密码/token
+    auth_ssh_key: str = ""            # SSH 模式指定私钥路径（可选）
+
+
+@dataclass
 class Config:
     """配置管理类"""
     # 触发规则
@@ -73,6 +86,7 @@ class Config:
     troubleshoot_max_rounds: int = 6  # Agentic 最大工具调用轮数
     troubleshoot_tool_timeout: int = 30  # 单个工具超时时间（秒）
     troubleshoot_branch_hint: str = ""  # 版本号→分支映射提示（注入给 AI）
+    troubleshoot_repositories: List['RepositoryConfig'] = None  # 多仓库配置列表
 
     # IM 适配器配置
     adapters: List[Dict[str, Any]] = None
@@ -200,6 +214,33 @@ class Config:
             config.troubleshoot_max_rounds = ts.get("max_rounds", config.troubleshoot_max_rounds)
             config.troubleshoot_tool_timeout = ts.get("tool_timeout", config.troubleshoot_tool_timeout)
             config.troubleshoot_branch_hint = ts.get("branch_hint", config.troubleshoot_branch_hint)
+
+            # 解析多仓库配置
+            if "repositories" in ts:
+                # 新格式：显式的 repositories 列表
+                config.troubleshoot_repositories = [
+                    RepositoryConfig(
+                        name=repo.get("name", "default"),
+                        repo_path=repo.get("repo_path", config.troubleshoot_repo_path),
+                        default_ref=repo.get("default_ref", config.troubleshoot_default_ref),
+                        description=repo.get("description", ""),
+                        auth_mode=repo.get("auth_mode", "none"),
+                        auth_username=repo.get("auth_username", ""),
+                        auth_password=repo.get("auth_password", ""),
+                        auth_ssh_key=repo.get("auth_ssh_key", ""),
+                    )
+                    for repo in ts["repositories"]
+                ]
+            else:
+                # 旧格式：用单仓库字段自动构建单元素列表
+                config.troubleshoot_repositories = [
+                    RepositoryConfig(
+                        name="default",
+                        repo_path=config.troubleshoot_repo_path,
+                        default_ref=config.troubleshoot_default_ref,
+                        description="",
+                    )
+                ]
 
         # 解析适配器
         if "adapters" in data:

@@ -139,21 +139,60 @@ chat_history:
 # 代码排查配置（需要 Anthropic Provider）
 troubleshoot:
   enabled: false                      # 是否启用代码排查功能
-  repo_path: "./data/business_repo"   # 业务系统代码仓库路径，强烈建议统一放置在data目录下，docker-compose统一处理文件映射（需提前 git clone）
-  default_ref: "origin/main"          # 默认分支（用户未指定版本时使用）
-  max_rounds: 6                       # Agentic 最大工具调用轮数
+  max_rounds: 10                       # Agentic 最大工具调用轮数
   tool_timeout: 30                    # 单个工具超时时间（秒）
-  branch_hint: |                      # 版本号→分支映射提示（注入给 AI，可选）
-    版本号对应分支命名规则：
-    - 大部分场景：dev-<版本号>，如版本 4.3.5 对应分支 dev-4.3.5
-    - 特殊定制版本：可能使用 custom-<客户名>-<版本号> 格式
-    - 优先级：dev- > release- > hotfix- > 其他
-    - 若找到多个匹配分支，请列出让用户选择
-  # 使用说明：
+
+  # ====== 多仓库配置（推荐） ======
+  # 支持同时配置多个代码仓库，AI 可在排查时切换仓库
+  repositories:
+    - name: "backend"                 # 仓库标识名（用于 AI 切换）
+      repo_path: "./data/backend_repo"  # 仓库本地路径（需提前 git clone）
+      default_ref: "origin/main"      # 默认分支
+      description: "Java 后端服务代码"  # 描述（帮助 AI 判断该去哪个仓库查）
+      auth_mode: "https"              # 认证模式: none(默认) / https / ssh
+      auth_username: "deploy"         # HTTPS 模式用户名
+      auth_password: "your_token"     # HTTPS 模式密码/token（建议使用 access token）
+    # - name: "frontend"
+    #   repo_path: "./data/frontend_repo"
+    #   default_ref: "origin/develop"
+    #   auth_mode: "ssh"
+    #   auth_ssh_key: "/root/.ssh/id_rsa_frontend"  # SSH 指定私钥（可选）
+    #   description: "React 前端代码"
+    # - name: "client"
+    #   repo_path: "./data/client_repo"
+    #   default_ref: "origin/develop"
+    #   # auth_mode 不配置则默认 none，直接 git fetch
+    #   description: "客户端代码"
+
+  # ====== 单仓库配置（旧格式，兼容） ======
+  # 如果只有一个仓库，也可以使用旧格式（会自动转为单元素列表）：
+  # repo_path: "./data/business_repo"
+  # default_ref: "origin/main"
+  # branch_hint: |
+  #   版本号对应分支命名规则：
+  #   - 大部分场景：dev-<版本号>，如版本 4.3.5 对应分支 dev-4.3.5
+
+  # ====== default_ref 说明 ======
+  # default_ref 是"用户未指定版本时 AI 默认查看的分支"，支持两种写法：
+  #
+  # 1. origin/分支名（推荐）：如 origin/dev-4.3.6
+  #    - 读取的是上次 git fetch 缓存到本地的远程分支快照
+  #    - 后台每 30 分钟自动 git fetch --all，会拉取所有远程分支和 tag
+  #    - 所以 origin/dev-4.3.6 和 origin/dev-4.3.5 都会自动更新，不需要手动操作
+  #    - 代码阅读/搜索本身不联网，纯本地操作，fetch 只是更新本地缓存
+  #
+  # 2. 本地分支名：如 dev-4.3.6
+  #    - 读取的是本地 checkout 时的代码，不会随远程更新
+  #    - 适合不需要自动更新、或 fetch 认证有问题时使用
+  #
+  # 注意：AI 通过 list_refs 工具可以看到所有分支，用户说"看 4.3.5 代码"时
+  # AI 会自动切换到对应分支，default_ref 只是"没指定版本时的默认值"
+
+  # ====== 使用说明 ======
   # 1. 将业务系统代码 clone 到 repo_path 指定的目录
   # 2. 用户发送日志截图 + 版本号，AI 会自动调用 git 工具排查代码
-  # 3. 支持的工具：list_refs（列出分支/tag）、search_code（搜索代码）、
-  #    read_file（读取文件）、list_dir（列出目录）
+  # 3. 多仓库时，AI 会根据问题自动选择合适的仓库，也可手动切换
   # 4. 所有操作都是只读的，不会修改工作目录，支持并发查询不同分支
+  # 5. 后台 fetch 失败不影响已有代码的排查，只是无法看到最新提交
 
 
