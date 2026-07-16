@@ -285,6 +285,9 @@ class HybridSearchEngine:
         self.persist_dir = Path(persist_dir)
         self.persist_dir.mkdir(parents=True, exist_ok=True)
 
+        # BM25 索引持久化文件路径
+        self._bm25_index_path = self.persist_dir / "_bm25_index.pkl"
+
         # 配置 ChromaDB 使用更少的线程
         settings = chromadb.Settings(
             anonymized_telemetry=False,
@@ -328,6 +331,13 @@ class HybridSearchEngine:
         import time
 
         start_time = time.time()
+
+        # 尝试加载已有的 BM25 索引
+        bm25_loaded = self._load_bm25_index(docs)
+        if bm25_loaded:
+            logger.info(f"BM25 索引从缓存加载成功，跳过重建")
+        else:
+            logger.info("BM25 索引缓存失效或不存在，将在向量索引完成后重建")
 
         CHUNK_SIZE = 1000  # 向量索引的分块大小（字符）
         CHUNK_OVERLAP = 100  # 分块重叠
@@ -396,21 +406,28 @@ class HybridSearchEngine:
 
         vector_time = time.time() - start_time
 
-        # BM25 索引：全文索引（不分块），标题重复 5 次提高权重
-        logger.info(f"开始 BM25 索引: {len(docs)} 篇文档")
-        self._bm25_docs = docs
-        self._bm25_corpus = []
-        for doc in docs:
-            title = doc.get('title', '')
-            path = doc.get('path', '')
-            content = doc.get('content', '')
-            # 标题重复 5 次，大幅提高标题关键词的匹配权重
-            text = f"{title} {title} {title} {title} {title} {path} {content}"
-            tokens = list(jieba.cut(text))
-            self._bm25_corpus.append(tokens)
+        # BM25 索引：如果未加载成功，则重建
+        if not bm25_loaded:
+            logger.info(f"开始构建 BM25 索引: {len(docs)} 篇文档")
+            self._bm25_docs = docs
+            self._bm25_corpus = []
+            for doc in docs:
+                title = doc.get('title', '')
+                path = doc.get('path', '')
+                content = doc.get('content', '')
+                # 标题重复 5 次，大幅提高标题关键词的匹配权重
+                text = f"{title} {title} {title} {title} {title} {path} {content}"
+                tokens = list(jieba.cut(text))
+                self._bm25_corpus.append(tokens)
 
-        self._bm25 = BM25Okapi(self._bm25_corpus)
-        bm25_time = time.time() - start_time - vector_time
+            self._bm25 = BM25Okapi(self._bm25_corpus)
+            bm25_time = time.time() - start_time - vector_time
+
+            # 持久化 BM25 索引
+            self._save_bm25_index(docs)
+        else:
+            bm25_time = 0  # 从缓存加载，不计入构建时间
+
         total_time = time.time() - start_time
 
         logger.info(
@@ -461,6 +478,92 @@ class HybridSearchEngine:
         # 所有重试失败
         logger.error(f"向量索引彻底失败: 已降级到 batch_size={min_batch_size} 仍然 OOM")
         raise RuntimeError(f"向量索引 OOM，即使降级到 batch_size={min_batch_size} 仍失败")
+
+    def _calculate_docs_hash(self, docs: List[Dict[str, str]]) -> str:
+        """
+        计算文档集合的指纹（用于检测文档变化）
+
+        使用文档 token 列表的 hash 作为指纹
+        """
+        import hashlib
+        # 使用 token 列表排序后的字符串作为指纹
+        tokens = sorted([doc.get("token", "") for doc in docs if doc.get("token")])
+        tokens_str = ",".join(tokens)
+        return hashlib.md5(tokens_str.encode()).hexdigest()
+
+    def _save_bm25_index(self, docs: List[Dict[str, str]]) -> None:
+        """
+        持久化 BM25 索引到磁盘
+
+        Args:
+            docs: 原始文档列表
+        """
+        import pickle
+        import time
+
+        try:
+            start_time = time.time()
+            docs_hash = self._calculate_docs_hash(docs)
+
+            index_data = {
+                "bm25": self._bm25,
+                "bm25_docs": self._bm25_docs,
+                "bm25_corpus": self._bm25_corpus,
+                "docs_hash": docs_hash,
+            }
+
+            with open(self._bm25_index_path, "wb") as f:
+                pickle.dump(index_data, f, protocol=pickle.HIGHEST_PROTOCOL)
+
+            elapsed = time.time() - start_time
+            file_size = self._bm25_index_path.stat().st_size / (1024 * 1024)  # MB
+            logger.info(f"BM25 索引已持久化: {self._bm25_index_path}, 大小={file_size:.2f}MB, 耗时={elapsed:.2f}s")
+        except Exception as e:
+            logger.warning(f"BM25 索引持久化失败: {e}，不影响正常使用")
+
+    def _load_bm25_index(self, docs: List[Dict[str, str]]) -> bool:
+        """
+        从磁盘加载 BM25 索引
+
+        Args:
+            docs: 当前文档列表（用于校验索引有效性）
+
+        Returns:
+            bool: 加载成功返回 True，失败或失效返回 False
+        """
+        import pickle
+        import time
+
+        if not self._bm25_index_path.exists():
+            logger.debug(f"BM25 索引文件不存在: {self._bm25_index_path}")
+            return False
+
+        try:
+            start_time = time.time()
+
+            with open(self._bm25_index_path, "rb") as f:
+                index_data = pickle.load(f)
+
+            # 校验索引有效性（文档集合是否变化）
+            current_hash = self._calculate_docs_hash(docs)
+            cached_hash = index_data.get("docs_hash", "")
+
+            if current_hash != cached_hash:
+                logger.info(f"BM25 索引失效: 文档集合已变化（hash不匹配）")
+                return False
+
+            # 加载索引数据
+            self._bm25 = index_data["bm25"]
+            self._bm25_docs = index_data["bm25_docs"]
+            self._bm25_corpus = index_data["bm25_corpus"]
+
+            elapsed = time.time() - start_time
+            logger.info(f"BM25 索引加载成功: {len(self._bm25_docs)} 篇文档, 耗时={elapsed:.2f}s")
+            return True
+
+        except Exception as e:
+            logger.warning(f"BM25 索引加载失败: {e}，将重建索引")
+            return False
 
     @staticmethod
     def _split_text(text: str, chunk_size: int, overlap: int) -> List[str]:

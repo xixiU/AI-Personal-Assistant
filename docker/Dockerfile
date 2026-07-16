@@ -67,6 +67,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       && apt-get update \
       && apt-get install -y --no-install-recommends \
       python3.12 \
+      git \
       && rm -rf /var/lib/apt/lists/*
 
 # 从构建阶段复制虚拟环境

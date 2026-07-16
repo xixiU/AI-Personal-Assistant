@@ -139,7 +139,7 @@ chat_history:
 # 代码排查配置（需要 Anthropic Provider）
 troubleshoot:
   enabled: false                      # 是否启用代码排查功能
-  repo_path: "./data/business_repo"   # 业务系统代码仓库路径（需提前 git clone）
+  repo_path: "./data/business_repo"   # 业务系统代码仓库路径，强烈建议统一放置在data目录下，docker-compose统一处理文件映射（需提前 git clone）
   default_ref: "origin/main"          # 默认分支（用户未指定版本时使用）
   max_rounds: 6                       # Agentic 最大工具调用轮数
   tool_timeout: 30                    # 单个工具超时时间（秒）

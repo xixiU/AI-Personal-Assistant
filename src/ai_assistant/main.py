@@ -102,6 +102,7 @@ class AIAssistant:
 
         # 初始化 Git 工具（如果启用代码排查）
         if getattr(self.config, 'troubleshoot_enabled', False):
+            self.ai_provider.max_rounds = self.config.troubleshoot_max_rounds
             from ai_assistant.tools.git_tools import GitTools
             try:
                 git_tools = GitTools(
