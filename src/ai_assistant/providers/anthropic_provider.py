@@ -57,6 +57,8 @@ class AnthropicProvider(AIProvider):
         self.git_tools_enabled = False
         self.branch_hint = ""  # 版本号→分支映射提示
         self.max_rounds = 6  # Agentic 最大轮数，由外部注入覆盖
+        self.timeout_mode = "time"  # 超时模式: time / rounds
+        self.max_time = 300  # 总时间限制（秒）
         self.repo_manager = None  # 多仓库管理器（由外部注入）
 
     def set_git_tools(self, git_tools, enabled: bool = True, branch_hint: str = ""):
@@ -279,7 +281,14 @@ class AnthropicProvider(AIProvider):
         # 判断是否使用 Agentic 模式
         if self._should_use_agentic_mode(messages):
             logger.info("使用 Agentic 模式（工具调用）")
-            return self._send_with_context_agentic(messages, doc_context, session_id, max_rounds=self.max_rounds)
+            return self._send_with_context_agentic(
+                messages, 
+                doc_context, 
+                session_id, 
+                max_rounds=self.max_rounds,
+                timeout_mode=self.timeout_mode,
+                max_time=self.max_time
+            )
 
         # 标准 RAG 模式
         logger.info("使用标准 RAG 模式")
@@ -291,6 +300,8 @@ class AnthropicProvider(AIProvider):
         doc_context: str,
         session_id: Optional[str] = None,
         max_rounds: int = 6,
+        timeout_mode: str = "time",
+        max_time: int = 300,
     ) -> str:
         """
         Agentic 模式：支持工具调用的多轮对话
@@ -300,6 +311,8 @@ class AnthropicProvider(AIProvider):
             doc_context: 文档上下文
             session_id: 会话 ID
             max_rounds: 最大工具调用轮数
+            timeout_mode: 超时模式 "time" / "rounds"
+            max_time: 总时间限制（秒），timeout_mode="time" 时生效
 
         Returns:
             AI 最终回复
@@ -382,10 +395,27 @@ class AnthropicProvider(AIProvider):
         system_prompt = "\n".join(system_parts)
 
         # Agentic 循环
+        import time
+        start_time = time.time()
         round_num = 0
-        while round_num < max_rounds:
+        
+        while True:
             round_num += 1
-            logger.info(f"Agentic 轮次 {round_num}/{max_rounds}")
+            
+            # 检查超时条件
+            elapsed = time.time() - start_time
+            if timeout_mode == "time":
+                if elapsed > max_time:
+                    logger.warning(f"达到总时间限制 {max_time}s，已执行 {round_num-1} 轮，耗时 {elapsed:.1f}s")
+                    break
+                logger.info(f"Agentic 轮次 {round_num}/∞, 已耗时 {elapsed:.1f}s/{max_time}s")
+            elif timeout_mode == "rounds":
+                if round_num > max_rounds:
+                    logger.warning(f"达到最大轮数 {max_rounds}，返回当前结果")
+                    break
+                logger.info(f"Agentic 轮次 {round_num}/{max_rounds}")
+            else:
+                logger.info(f"Agentic 轮次 {round_num}")
 
             try:
                 response = self.client.messages.create(
@@ -473,9 +503,11 @@ class AnthropicProvider(AIProvider):
                 logger.error(f"Agentic 循环异常: {e}", exc_info=True)
                 return f"❌ 排查过程出错: {str(e)}"
 
-        # 达到最大轮数
-        logger.warning(f"达到最大轮数 {max_rounds}，返回当前结果")
-        return "⚠️ 排查过程较复杂，已达到最大分析轮数。以上是目前的分析结果，如需继续请提供更多信息。"
+        # 达到超时限制
+        if timeout_mode == "time":
+            return "⚠️ 排查过程较复杂，已达到总时间限制。以上是目前的分析结果，如需继续请提供更多信息。"
+        else:
+            return "⚠️ 排查过程较复杂，已达到最大分析轮数。以上是目前的分析结果，如需继续请提供更多信息。"
 
     def _execute_tool(self, tool_name: str, tool_input: Dict[str, Any]) -> Any:
         """

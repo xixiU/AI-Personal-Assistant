@@ -139,8 +139,17 @@ chat_history:
 # 代码排查配置（需要 Anthropic Provider）
 troubleshoot:
   enabled: false                      # 是否启用代码排查功能
-  max_rounds: 10                       # Agentic 最大工具调用轮数
+  
+  # ====== 超时控制 ======
+  timeout_mode: "time"                # 超时模式: time(总时间限制，推荐) / rounds(轮次限制)
+  max_time: 300                       # 总时间限制（秒），默认 5 分钟（timeout_mode=time 时生效）
+  max_rounds: 10                      # 轮次限制（timeout_mode=rounds 时生效）
   tool_timeout: 30                    # 单个工具超时时间（秒）
+  
+  # 说明：
+  # - time 模式：从第一轮开始计时，超过 max_time 秒终止（推荐，更公平）
+  # - rounds 模式：最多执行 max_rounds 轮（兼容旧配置）
+  # - 单个工具仍受 tool_timeout 限制
 
   # ====== 多仓库配置（推荐） ======
   # 支持同时配置多个代码仓库，AI 可在排查时切换仓库

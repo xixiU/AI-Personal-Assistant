@@ -103,6 +103,8 @@ class AIAssistant:
         # 初始化代码排查工具（如果启用）
         if getattr(self.config, 'troubleshoot_enabled', False):
             self.ai_provider.max_rounds = self.config.troubleshoot_max_rounds
+            self.ai_provider.timeout_mode = getattr(self.config, 'troubleshoot_timeout_mode', 'time')
+            self.ai_provider.max_time = getattr(self.config, 'troubleshoot_max_time', 300)
             repositories = getattr(self.config, 'troubleshoot_repositories', None)
 
             if repositories and len(repositories) >= 1:

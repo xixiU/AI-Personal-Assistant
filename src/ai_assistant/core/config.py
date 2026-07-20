@@ -83,7 +83,9 @@ class Config:
     troubleshoot_enabled: bool = False  # 是否启用代码排查功能
     troubleshoot_repo_path: str = "./data/business_repo"  # 业务系统代码仓库路径
     troubleshoot_default_ref: str = "origin/main"  # 默认分支/tag
-    troubleshoot_max_rounds: int = 6  # Agentic 最大工具调用轮数
+    troubleshoot_timeout_mode: str = "time"  # 超时模式: time(总时间限制) / rounds(轮次限制)
+    troubleshoot_max_time: int = 300  # 总时间限制（秒），默认 5 分钟
+    troubleshoot_max_rounds: int = 6  # Agentic 最大工具调用轮数（timeout_mode=rounds 时生效）
     troubleshoot_tool_timeout: int = 30  # 单个工具超时时间（秒）
     troubleshoot_branch_hint: str = ""  # 版本号→分支映射提示（注入给 AI）
     troubleshoot_repositories: List['RepositoryConfig'] = None  # 多仓库配置列表
@@ -211,6 +213,8 @@ class Config:
             config.troubleshoot_enabled = ts.get("enabled", config.troubleshoot_enabled)
             config.troubleshoot_repo_path = ts.get("repo_path", config.troubleshoot_repo_path)
             config.troubleshoot_default_ref = ts.get("default_ref", config.troubleshoot_default_ref)
+            config.troubleshoot_timeout_mode = ts.get("timeout_mode", config.troubleshoot_timeout_mode)
+            config.troubleshoot_max_time = ts.get("max_time", config.troubleshoot_max_time)
             config.troubleshoot_max_rounds = ts.get("max_rounds", config.troubleshoot_max_rounds)
             config.troubleshoot_tool_timeout = ts.get("tool_timeout", config.troubleshoot_tool_timeout)
             config.troubleshoot_branch_hint = ts.get("branch_hint", config.troubleshoot_branch_hint)
