@@ -59,6 +59,7 @@ class AnthropicProvider(AIProvider):
         self.max_rounds = 6  # Agentic 最大轮数，由外部注入覆盖
         self.timeout_mode = "time"  # 超时模式: time / rounds
         self.max_time = 300  # 总时间限制（秒）
+        self.tool_timeout = 30  # 单个工具超时（秒），并行批量时生效
         self.repo_manager = None  # 多仓库管理器（由外部注入）
 
     def set_git_tools(self, git_tools, enabled: bool = True, branch_hint: str = ""):
@@ -369,11 +370,37 @@ class AnthropicProvider(AIProvider):
             "5. 用 read_file 工具读取定位到的文件，查看上下文代码（建议读取抛错位置前后 30 行）",
             "6. 综合日志和代码，给出根因分析、代码定位（文件:行号）、修复建议",
             "",
+            "工具使用最佳实践（重要）：",
+            "",
+            "【并行调用】",
+            "- 当需要尝试多种搜索策略时，一次返回多个 tool_use 并行执行，显著提升速度",
+            "  示例场景：",
+            "  · 不确定用哪个关键词：同时搜 'servicelog'、'ServiceLog'、'internet_service_log'",
+            "  · 查实体类对应的表：同时搜 'InternetServiceLog' 和 'class InternetServiceLog'",
+            "  · 多个独立文件：同时 read_file 多个无依赖关系的文件",
+            "",
+            "【search_code 策略】",
+            "- 优先使用简单关键词，避免复杂正则（git grep 对正则支持有限）",
+            "  ✅ 正确：search_code('servicelog') 然后过滤 *Controller.java",
+            "  ❌ 错误：search_code('@RequestMapping.*servicelog') # 会失败",
+            "- 查找实体类对应的表：搜 'class <实体名>' 找 pojo 文件，再读文件前 30 行查看 @Table 注解",
+            "",
+            "【read_file 策略】",
+            "- 大文件（>300行）应先用 search_code 定位关键行号，再用 start_line/end_line 读取上下文",
+            "  示例：search_code 找到第 150 行 → read_file(path=..., start_line=120, end_line=180)",
+            "- 小文件（<200行）直接全读",
+            "- 只需要查看注解或类定义时，只读前 50 行：read_file(path=..., end_line=50)",
+            "",
+            "【list_dir 策略】",
+            "- 不确定具体文件名时使用",
+            "- 确定文件名后直接 read_file 或 search_code，不要反复 list_dir",
+            "",
             "注意事项：",
             "- 必须始终使用中文回答",
             "- 代码定位要精确到文件名和行号",
             "- 如果无法定位问题，诚实告知并给出可能的排查方向",
-            "- 工具调用失败时不要放弃，尝试其他搜索关键词或路径"
+            "- 工具调用失败时尝试其他搜索关键词，但避免重复相同的失败策略",
+            "- 优先使用并行工具调用减少总轮数，提升响应速度"
         ]
 
         # 注入版本号→分支映射提示
@@ -511,26 +538,89 @@ class AnthropicProvider(AIProvider):
 
     def _execute_tool(self, tool_name: str, tool_input: Dict[str, Any]) -> Any:
         """
-        执行工具调用
+        执行工具调用，带智能批量优化
 
         Args:
             tool_name: 工具名称
             tool_input: 工具参数
 
         Returns:
-            工具执行结果
+            工具执行结果（可能包含批量扩展的结果）
         """
         if not self.git_tools:
             return {"error": "Git 工具未初始化"}
 
-        if tool_name == "list_refs":
+        # 【应用层智能批量】针对高频场景自动扩展并行任务
+        if tool_name == "search_code":
+            query = tool_input["query"]
+            ref = tool_input.get("ref")
+            path_filter = tool_input.get("path_filter")
+
+            # 检测模式：查找实体类对应的表（Java 后端高频场景）
+            # 启发规则：查询关键词看起来像类名（首字母大写，驼峰）
+            if self._looks_like_entity_search(query, path_filter):
+                logger.info(f"检测到实体类搜索模式，自动扩展并行搜索: {query}")
+                # 并行搜索多种模式
+                import concurrent.futures
+                with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+                    futures = {
+                        "原始": executor.submit(self.git_tools.search_code, query, ref, path_filter),
+                        "类定义": executor.submit(self.git_tools.search_code, f"class {query}", ref, "*.java"),
+                        "表注解": executor.submit(self.git_tools.search_code, f"@Table.*{query}", ref, "*/pojo/*.java")
+                    }
+
+                    # 收集结果
+                    merged_results = []
+                    for label, future in futures.items():
+                        try:
+                            result = future.result(timeout=self.tool_timeout)
+                            if result.get("results"):
+                                # 给每个结果加标签
+                                for r in result["results"]:
+                                    r["_search_type"] = label
+                                merged_results.extend(result["results"])
+                        except Exception as e:
+                            logger.warning(f"并行搜索 {label} 失败: {e}")
+
+                    # 去重（同一文件+行号只保留一个）
+                    seen = set()
+                    unique_results = []
+                    for r in merged_results:
+                        key = (r["file"], r["line"])
+                        if key not in seen:
+                            seen.add(key)
+                            unique_results.append(r)
+
+                    if unique_results:
+                        # 如果找到唯一的 pojo 文件，预读前 30 行（可能包含 @Table 注解）
+                        pojo_files = [r["file"] for r in unique_results if "/pojo/" in r["file"] or r["file"].endswith("/" + query + ".java")]
+                        if len(set(pojo_files)) == 1:
+                            logger.info(f"找到唯一实体类文件 {pojo_files[0]}，预读注解")
+                            try:
+                                file_content = self.git_tools.read_file(pojo_files[0], ref, end_line=30)
+                                return {
+                                    "query": query,
+                                    "ref": ref or self.git_tools.default_ref,
+                                    "results": unique_results,
+                                    "total": len(unique_results),
+                                    "entity_file_preview": file_content  # 附加预读结果
+                                }
+                            except Exception as e:
+                                logger.warning(f"预读实体类文件失败: {e}")
+
+                        return {
+                            "query": query,
+                            "ref": ref or self.git_tools.default_ref,
+                            "results": unique_results,
+                            "total": len(unique_results),
+                            "note": "已自动扩展搜索：原始关键词 + 类定义 + 表注解"
+                        }
+
+            # 常规搜索（无扩展）
+            return self.git_tools.search_code(query=query, ref=ref, path_filter=path_filter)
+
+        elif tool_name == "list_refs":
             return self.git_tools.list_refs(tool_input.get("pattern"))
-        elif tool_name == "search_code":
-            return self.git_tools.search_code(
-                query=tool_input["query"],
-                ref=tool_input.get("ref"),
-                path_filter=tool_input.get("path_filter")
-            )
         elif tool_name == "read_file":
             return self.git_tools.read_file(
                 path=tool_input["path"],
@@ -552,6 +642,34 @@ class AnthropicProvider(AIProvider):
             return {"message": result_msg}
         else:
             return {"error": f"未知工具: {tool_name}"}
+
+    def _looks_like_entity_search(self, query: str, path_filter: str = None) -> bool:
+        """
+        判断是否像在搜索实体类（Java 后端场景）
+
+        启发规则：
+        - 首字母大写，驼峰命名
+        - 长度 > 5 字符（排除单个词）
+        - 没有特殊字符（不是正则表达式）
+        - 路径过滤为空或包含 Java 相关
+        """
+        if not query or len(query) < 5:
+            return False
+
+        # 首字母大写 + 包含大写字母（驼峰）
+        if not query[0].isupper() or not any(c.isupper() for c in query[1:]):
+            return False
+
+        # 不包含正则特殊字符
+        if any(c in query for c in r'.*+?[]{}()^$|\\'):
+            return False
+
+        # 路径过滤检查
+        if path_filter:
+            if not any(ext in path_filter.lower() for ext in ['.java', '*.java', 'java']):
+                return False
+
+        return True
 
     def _send_with_context_standard(
         self,

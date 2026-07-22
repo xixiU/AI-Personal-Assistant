@@ -105,6 +105,7 @@ class AIAssistant:
             self.ai_provider.max_rounds = self.config.troubleshoot_max_rounds
             self.ai_provider.timeout_mode = getattr(self.config, 'troubleshoot_timeout_mode', 'time')
             self.ai_provider.max_time = getattr(self.config, 'troubleshoot_max_time', 300)
+            self.ai_provider.tool_timeout = getattr(self.config, 'troubleshoot_tool_timeout', 30)
             repositories = getattr(self.config, 'troubleshoot_repositories', None)
 
             if repositories and len(repositories) >= 1:
