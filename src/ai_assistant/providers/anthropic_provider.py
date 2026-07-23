@@ -114,15 +114,14 @@ class AnthropicProvider(AIProvider):
         """
         判断是否应该使用 Agentic 模式（工具调用）
 
-        触发条件（需明确指令或关键词）：
-        1. Git 工具已启用
-        2. 显式指令（/code、/排查、/查代码、/search）
-        3. 明确意图词（结合代码、查代码、看代码、排查等）
-        4. 图片消息（可能是日志截图）
-        5. 排查关键词（报错、异常、错误、bug、问题等）
+        触发条件（仅两种，必须明确）：
+        1. Git 工具已启用（前提）
+        2. 显式斜杠指令（/排查、/查代码、/code、/search）
+        3. 图片消息（日志截图）
 
-        注：不再根据技术特征（版本号、模块名、接口路径）自动触发，
-        避免误触发（如"4.3.6 部署注意什么"这类文档查询）。
+        注：不根据任何关键词（报错、异常、版本号等）自动触发，
+        避免误触发普通文档查询（如"fastjson2 报错怎么解决"其实是查文档）。
+        用户需要代码排查时，必须用斜杠指令或发送日志截图。
 
         Args:
             messages: 消息列表
@@ -133,39 +132,24 @@ class AnthropicProvider(AIProvider):
         if not self.git_tools_enabled or not self.git_tools:
             return False
 
-        # 提取最后一条用户消息文本
+        # 1. 显式斜杠指令检测
         last_user_text = self._extract_last_user_text(messages)
-        last_user_text_lower = last_user_text.lower()
-
-        # 1. 显式指令检测（最高优先级）
         if self._has_explicit_command(last_user_text):
             logger.info("触发 Agentic 模式：显式指令")
             return True
 
-        # 2. 明确意图词检测
-        intent_keywords = self._check_code_intent_keywords(last_user_text_lower)
-        if intent_keywords:
-            logger.info(f"触发 Agentic 模式：意图关键词 [{', '.join(intent_keywords)}]")
-            return True
-
-        # 3. 检查是否有图片（可能是日志截图）
+        # 2. 检查是否有图片（日志截图）
         for msg in messages:
             for content in msg.content:
                 if content.type == "image":
                     logger.info("触发 Agentic 模式：检测到图片消息")
                     return True
 
-        # 4. 检查文本中是否有排查关键词
-        troubleshoot_keywords = ["排查", "报错", "异常", "错误", "bug", "问题", "崩溃", "failed", "error", "exception"]
-        if any(kw in last_user_text_lower for kw in troubleshoot_keywords):
-            logger.info("触发 Agentic 模式：排查关键词")
-            return True
-
         return False
 
     def _has_explicit_command(self, text: str) -> bool:
         """
-        检测显式指令
+        检测显式斜杠指令
 
         Args:
             text: 用户消息文本
@@ -176,24 +160,6 @@ class AnthropicProvider(AIProvider):
         explicit_commands = ["/code", "/排查", "/查代码", "/search"]
         text_lower = text.lower()
         return any(cmd in text_lower for cmd in explicit_commands)
-
-    def _check_code_intent_keywords(self, text_lower: str) -> List[str]:
-        """
-        检测明确意图词
-
-        Args:
-            text_lower: 用户消息文本（小写）
-
-        Returns:
-            匹配到的关键词列表
-        """
-        intent_keywords = [
-            "结合代码", "查代码", "看代码", "读代码", "分析代码",
-            "代码在哪", "哪里实现", "定位代码", "找代码",
-            "代码排查", "查看代码", "检查代码"
-        ]
-        matched = [kw for kw in intent_keywords if kw in text_lower]
-        return matched
 
     def _send_with_context(
         self,
