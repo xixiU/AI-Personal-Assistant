@@ -21,7 +21,6 @@
 - `/排查`
 - `/查代码`
 - `/code`
-- `/search`
 
 **示例**：
 ```
@@ -89,7 +88,7 @@ def _should_use_agentic_mode(self, messages):
     return False
 ```
 
-辅助方法：`_has_explicit_command(text)` — 检测 `/排查`、`/查代码`、`/code`、`/search`。
+辅助方法：`_has_explicit_command(text)` — 检测 `/排查`、`/查代码`、`/code`。
 
 ## 演进记录
 

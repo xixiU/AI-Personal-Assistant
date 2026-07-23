@@ -116,7 +116,7 @@ class AnthropicProvider(AIProvider):
 
         触发条件（仅两种，必须明确）：
         1. Git 工具已启用（前提）
-        2. 显式斜杠指令（/排查、/查代码、/code、/search）
+        2. 显式斜杠指令（/排查、/查代码、/code）
         3. 图片消息（日志截图）
 
         注：不根据任何关键词（报错、异常、版本号等）自动触发，
@@ -157,7 +157,7 @@ class AnthropicProvider(AIProvider):
         Returns:
             是否包含显式指令
         """
-        explicit_commands = ["/code", "/排查", "/查代码", "/search"]
+        explicit_commands = ["/code", "/排查", "/查代码"]
         text_lower = text.lower()
         return any(cmd in text_lower for cmd in explicit_commands)
 
