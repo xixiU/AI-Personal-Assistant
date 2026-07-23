@@ -114,14 +114,15 @@ class AnthropicProvider(AIProvider):
         """
         判断是否应该使用 Agentic 模式（工具调用）
 
-        触发条件（按优先级）：
+        触发条件（需明确指令或关键词）：
         1. Git 工具已启用
         2. 显式指令（/code、/排查、/查代码、/search）
-        3. 明确意图词（结合代码、查代码、排查等）
-        4. 技术特征词（模块名、接口路径、版本号）
-        5. 上下文延续（前一轮提到代码意图）
-        6. 图片消息（可能是日志截图）
-        7. 排查关键词（原有逻辑）
+        3. 明确意图词（结合代码、查代码、看代码、排查等）
+        4. 图片消息（可能是日志截图）
+        5. 排查关键词（报错、异常、错误、bug、问题等）
+
+        注：不再根据技术特征（版本号、模块名、接口路径）自动触发，
+        避免误触发（如"4.3.6 部署注意什么"这类文档查询）。
 
         Args:
             messages: 消息列表
@@ -147,25 +148,14 @@ class AnthropicProvider(AIProvider):
             logger.info(f"触发 Agentic 模式：意图关键词 [{', '.join(intent_keywords)}]")
             return True
 
-        # 3. 技术特征词检测
-        tech_features = self._check_tech_features(last_user_text)
-        if tech_features:
-            logger.info(f"触发 Agentic 模式：技术特征 [{', '.join(tech_features)}]")
-            return True
-
-        # 4. 上下文延续检测
-        if self._should_continue_agentic(messages):
-            logger.info("触发 Agentic 模式：上下文延续（前一轮提到代码相关内容）")
-            return True
-
-        # 5. 检查是否有图片（原有逻辑）
+        # 3. 检查是否有图片（可能是日志截图）
         for msg in messages:
             for content in msg.content:
                 if content.type == "image":
                     logger.info("触发 Agentic 模式：检测到图片消息")
                     return True
 
-        # 6. 检查文本中是否有排查关键词（原有逻辑）
+        # 4. 检查文本中是否有排查关键词
         troubleshoot_keywords = ["排查", "报错", "异常", "错误", "bug", "问题", "崩溃", "failed", "error", "exception"]
         if any(kw in last_user_text_lower for kw in troubleshoot_keywords):
             logger.info("触发 Agentic 模式：排查关键词")
@@ -204,67 +194,6 @@ class AnthropicProvider(AIProvider):
         ]
         matched = [kw for kw in intent_keywords if kw in text_lower]
         return matched
-
-    def _check_tech_features(self, text: str) -> List[str]:
-        """
-        检测技术特征词（模块名、接口路径、版本号）
-
-        Args:
-            text: 用户消息文本
-
-        Returns:
-            匹配到的技术特征列表
-        """
-        features = []
-
-        # 检测模块名（以 -service 结尾，确保以字母或数字开头）
-        service_pattern = r'([a-zA-Z0-9][\w-]*-service)'
-        services = re.findall(service_pattern, text, re.IGNORECASE)
-        if services:
-            features.extend([f"模块名:{s}" for s in services[:2]])  # 最多记录2个
-
-        # 检测接口路径（以 / 开头，包含字母数字和常见路径字符）
-        api_pattern = r'/[a-zA-Z0-9/_-]{2,}'
-        apis = re.findall(api_pattern, text)
-        if apis:
-            features.extend([f"接口路径:{a}" for a in apis[:2]])  # 最多记录2个
-
-        # 检测版本号（如 4.3.6、v1.2.3、V4.0，兼容中文环境）
-        # 使用前后均可为非字母数字字符的模式，兼容中文标点
-        version_pattern = r'(?<![a-zA-Z0-9])[vV]?\d+\.\d+(?:\.\d+)?(?![a-zA-Z0-9])'
-        versions = re.findall(version_pattern, text)
-        if versions:
-            features.extend([f"版本号:{v}" for v in versions[:2]])  # 最多记录2个
-
-        return features
-
-    def _should_continue_agentic(self, messages: List[Message]) -> bool:
-        """
-        检测上下文延续：前一轮消息中是否提到代码相关意图
-
-        Args:
-            messages: 消息列表
-
-        Returns:
-            是否应该延续 Agentic 模式
-        """
-        # 检查最近3轮对话中是否有代码相关意图
-        context_keywords = [
-            "结合代码", "查代码", "看代码", "读代码", "分析代码",
-            "代码在哪", "哪里实现", "定位代码", "代码排查"
-        ]
-
-        # 从倒数第二条消息开始检查（跳过当前消息）
-        for i in range(len(messages) - 2, max(-1, len(messages) - 7), -1):
-            if i < 0:
-                break
-            msg = messages[i]
-            if msg.role == "user":
-                msg_text = "".join(c.data for c in msg.content if c.type == "text").lower()
-                if any(kw in msg_text for kw in context_keywords):
-                    return True
-
-        return False
 
     def _send_with_context(
         self,
