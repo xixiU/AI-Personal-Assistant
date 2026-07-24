@@ -162,6 +162,18 @@ class FeishuDocManager:
             self._sync_thread.join(timeout=5)
             logger.info("后台文档同步线程已停止")
 
+    def is_index_ready(self) -> bool:
+        """
+        检查文档索引是否就绪（可用于检索）
+
+        轻量级状态检查，不触发实际检索。用于判断索引更新期间
+        积压的消息是否可以重试。
+
+        Returns:
+            True 表示索引已就绪，False 表示仍在更新中
+        """
+        return self._indexed and not self._indexing_in_progress
+
     @staticmethod
     def _normalize_sources(sources: List[Any]) -> List[Dict[str, str]]:
         """

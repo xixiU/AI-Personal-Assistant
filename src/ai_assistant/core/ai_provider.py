@@ -96,7 +96,7 @@ class AIProvider(ABC):
         模板方法：统一文档检索 + 分发给子类实现
 
         - 若无 doc_manager 或无用户消息，doc_context 为空字符串
-        - 若文档索引正在更新，捕获异常并返回友好提示（不调用底层 API）
+        - 若文档索引正在更新，DocIndexingInProgressError 向上抛出（由调用方处理重试）
         - 否则将 doc_context 传给子类的 _send_with_context 实现
 
         Args:
@@ -106,11 +106,7 @@ class AIProvider(ABC):
         Returns:
             AI 生成的回复文本
         """
-        try:
-            doc_context = self._get_doc_context(messages)
-        except DocIndexingInProgressError:
-            logger.info("文档索引正在更新中，返回提示信息")
-            return "📚 文档索引正在更新中，请稍后（约1-2分钟）再试，或者您可以先问我通用技术问题。"
+        doc_context = self._get_doc_context(messages)
         return self._send_with_context(messages, doc_context, session_id)
 
     def _get_doc_context(self, messages: List[Message]) -> str:
