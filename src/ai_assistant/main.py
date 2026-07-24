@@ -26,6 +26,7 @@ from ai_assistant.core.context_manager import ContextManager
 from ai_assistant.core.reply_executor import ReplyExecutor
 from ai_assistant.core.models import Message, Content
 from ai_assistant.core.trace_context import get_trace_id, with_new_trace_id, set_trace_id
+from ai_assistant.core.ai_provider import DocIndexingInProgressError
 
 
 class AIAssistant:
@@ -204,6 +205,11 @@ class AIAssistant:
         )
         self._processing_sessions = set()  # 正在处理中的 session，防重复提交
         self._processing_lock = threading.Lock()
+
+        # 文档索引更新期间的延迟重试队列
+        # 格式: [(timestamp, event_data), ...]
+        self.pending_retry_queue = []
+        self._last_indexing_check_time = 0  # 上次检查索引状态的时间
 
         # 初始化适配器
         self.adapters = []
@@ -395,7 +401,15 @@ class AIAssistant:
 
             # 调用 AI 生成回复
             ai_start = time_mod.time()
-            reply = self.ai_provider.call(context_messages, session_id=session_id, source="feishu")
+            try:
+                reply = self.ai_provider.call(context_messages, session_id=session_id, source="feishu")
+            except DocIndexingInProgressError:
+                # 文档索引更新中，加入延迟重试队列
+                logger.info(f"文档索引更新中，将消息加入延迟重试队列: session={session_id}")
+                self.pending_retry_queue.append((time_mod.time(), event_data))
+                # 先给用户回复提示
+                reply = "📚 文档索引正在更新中，请稍后（约1-2分钟）再试或等待我稍后回复，或者您可以先问我通用技术问题。"
+
             ai_duration = time_mod.time() - ai_start
 
             # 将 AI 回复添加到上下文
@@ -513,6 +527,50 @@ class AIAssistant:
                     "message_id": message_id,
                     "sender_id": sender_id,
                     "image_data": image_data
+                }
+
+            # 处理富文本消息（文字+图片）
+            elif message_type == "post":
+                content_str = message.get("content", "{}")
+                content_data = json_mod.loads(content_str)
+
+                # 获取 zh_cn 或第一个语言的内容
+                post_content = content_data.get("zh_cn") or content_data.get("en_us") or {}
+                content_blocks = post_content.get("content", [[]])
+
+                # 解析文字和图片
+                text_parts = []
+                image_keys = []
+
+                for block in content_blocks:
+                    for element in block:
+                        tag = element.get("tag", "")
+                        if tag == "text":
+                            text_parts.append(element.get("text", ""))
+                        elif tag == "img":
+                            img_key = element.get("image_key", "")
+                            if img_key:
+                                image_keys.append(img_key)
+
+                # 合并文本
+                text = " ".join(text_parts).strip()
+
+                # 下载第一张图片（如果有）
+                image_data = None
+                if image_keys and adapter:
+                    image_data = adapter.download_image(message_id, image_keys[0])
+                    if not image_data:
+                        logger.warning(f"富文本消息中图片下载失败: image_key={image_keys[0]}")
+
+                logger.info(f"解析富文本消息: text={text[:50]}..., images={len(image_keys)}")
+
+                return {
+                    "chat_id": chat_id,
+                    "chat_type": message.get("chat_type", "p2p"),
+                    "text": text,
+                    "message_id": message_id,
+                    "sender_id": sender_id,
+                    "image_data": image_data  # 可能为 None
                 }
 
             else:
@@ -702,12 +760,65 @@ class AIAssistant:
                                f"active_sessions={len(self.context_manager.sessions)}")
                     last_heartbeat = now
 
+                    # 检查并重试索引更新期间积压的消息
+                    self._check_and_retry_pending_messages(now)
+
                 # 等待下一次轮询
                 time.sleep(poll_interval)
 
             except Exception as e:
                 logger.error(f"Error in main loop: {e}", exc_info=True)
                 time.sleep(poll_interval)
+
+    def _check_and_retry_pending_messages(self, now: float):
+        """
+        检查文档索引状态，如果已完成则重试队列中的消息
+
+        Args:
+            now: 当前时间戳
+        """
+        # 限流：每 30 秒检查一次索引状态（避免频繁检查）
+        if now - self._last_indexing_check_time < 30:
+            return
+
+        self._last_indexing_check_time = now
+
+        # 如果队列为空，跳过
+        if not self.pending_retry_queue:
+            return
+
+        # 检查索引是否完成（尝试调用检索，捕获异常判断）
+        if not self.doc_manager:
+            # 无文档管理器，清空队列
+            logger.warning("无文档管理器，清空延迟重试队列")
+            self.pending_retry_queue.clear()
+            return
+
+        # 轻量级检查索引状态（不触发实际检索）
+        if not self.doc_manager.is_index_ready():
+            logger.info(f"文档索引仍在更新中，延迟重试队列: {len(self.pending_retry_queue)} 条")
+            return
+
+        # 索引已完成，重试队列中的消息
+        logger.info(f"📚 文档索引已完成，开始重试 {len(self.pending_retry_queue)} 条延迟消息")
+
+        retry_count = 0
+        while self.pending_retry_queue:
+            timestamp, event_data = self.pending_retry_queue.pop(0)
+            age = now - timestamp
+            logger.info(f"重试延迟消息（已等待 {age:.0f}s）")
+
+            # 重新入队处理
+            try:
+                self.event_queue.put(event_data, timeout=1)
+                retry_count += 1
+            except queue.Full:
+                logger.warning("事件队列已满，剩余延迟消息暂不重试")
+                self.pending_retry_queue.insert(0, (timestamp, event_data))  # 放回队列
+                break
+
+        if retry_count > 0:
+            logger.info(f"✅ 已重新入队 {retry_count} 条延迟消息")
 
     def _handle_trigger(self, adapter):
         """
@@ -749,7 +860,12 @@ class AIAssistant:
             else:
                 source = "unknown"
 
-            reply = self.ai_provider.call(context_messages, session_id=session_id, source=source)
+            try:
+                reply = self.ai_provider.call(context_messages, session_id=session_id, source=source)
+            except DocIndexingInProgressError:
+                # 文档索引更新中，直接返回提示（Web/微信不支持自动重试）
+                logger.info(f"文档索引更新中: session={session_id}, source={source}")
+                reply = "📚 文档索引正在更新中，请稍后（约1-2分钟）再试或等待我稍后回复，或者您可以先问我通用技术问题。"
 
             # 将 AI 回复添加到上下文
             ai_message = Message(
