@@ -2,6 +2,7 @@
 飞书机器人 API 适配器
 
 基于飞书开放平台 API 实现消息接收和发送
+飞书卡片消息文档:https://open.feishu.cn/document/feishu-cards/card-callback-communication#c98c3220
 """
 import json
 import time
@@ -599,7 +600,7 @@ class FeishuBotAdapter(IMAdapter):
                 elapsed_time = latency_ms / 1000.0 if latency_ms else None
 
                 # 构建原始卡片（恢复到点踩之前的状态）
-                original_card = FeishuMessageBuilder.ai_reply_card(
+                original_card_payload = FeishuMessageBuilder.ai_reply_card(
                     reply_text=history_record.get("answer", ""),
                     message_id="placeholder",
                     elapsed_time=elapsed_time,
@@ -608,6 +609,16 @@ class FeishuBotAdapter(IMAdapter):
                     mode=mode,
                     feedbacks=feedbacks,
                 )
+
+                # 转换为卡片交互响应格式
+                import json
+                card_data = json.loads(original_card_payload["content"])
+                original_card = {
+                    "card": {
+                        "type": "raw",
+                        "data": card_data
+                    }
+                }
 
                 # 返回原始卡片（飞书会用它替换表单卡片）
                 logger.info(f"✅ Canceled dislike feedback for record_id={record_id}")
@@ -652,7 +663,7 @@ class FeishuBotAdapter(IMAdapter):
                 elapsed_time = latency_ms / 1000.0 if latency_ms else None
 
                 # 构建更新后的卡片
-                updated_card = FeishuMessageBuilder.ai_reply_card(
+                updated_card_payload = FeishuMessageBuilder.ai_reply_card(
                     reply_text=history_record.get("answer", ""),
                     message_id="placeholder",
                     elapsed_time=elapsed_time,
@@ -661,6 +672,16 @@ class FeishuBotAdapter(IMAdapter):
                     mode=mode,
                     feedbacks=feedbacks,
                 )
+
+                # 转换为卡片交互响应格式
+                import json
+                card_data = json.loads(updated_card_payload["content"])
+                updated_card = {
+                    "card": {
+                        "type": "raw",
+                        "data": card_data
+                    }
+                }
 
                 # 返回更新后的卡片（飞书会用它替换确认卡片）
                 return updated_card
@@ -770,7 +791,7 @@ class FeishuBotAdapter(IMAdapter):
                 elapsed_time = latency_ms / 1000.0 if latency_ms else None
 
                 # 构建更新后的卡片
-                updated_card = FeishuMessageBuilder.ai_reply_card(
+                updated_card_payload = FeishuMessageBuilder.ai_reply_card(
                     reply_text=history_record.get("answer", ""),
                     message_id="placeholder",
                     elapsed_time=elapsed_time,
@@ -779,6 +800,18 @@ class FeishuBotAdapter(IMAdapter):
                     mode=mode,
                     feedbacks=feedbacks,
                 )
+
+                # 将 payload 转换为卡片交互响应格式
+                # ai_reply_card 返回: {"msg_type": "interactive", "content": json.dumps(card)}
+                # 卡片交互需要: {"card": {"type": "raw", "data": card}}
+                import json
+                card_data = json.loads(updated_card_payload["content"])
+                updated_card = {
+                    "card": {
+                        "type": "raw",
+                        "data": card_data
+                    }
+                }
 
                 # 返回更新后的卡片（飞书会用它替换原卡片）
                 return updated_card
