@@ -3,6 +3,7 @@
 
 基于飞书开放平台 API 实现消息接收和发送
 飞书卡片消息文档:https://open.feishu.cn/document/feishu-cards/card-callback-communication#c98c3220
+消息卡片有1.0格式的，还有2.0格式的
 """
 import json
 import time
@@ -556,7 +557,7 @@ class FeishuBotAdapter(IMAdapter):
             action = event.get("action", {})
             context = event.get("context", {})
             logger.info(f"📝 Card action: event={event}")
-            
+
             # 提取关键信息
             action_value = action.get("value", {})
             feedback_type = action_value.get("feedback_type", "")
@@ -856,60 +857,94 @@ class FeishuBotAdapter(IMAdapter):
         - 提供「确认」和「取消」按钮
         """
         return {
-            "card": {
-                "type": "raw",
-                "data": {
-                    "config": {"wide_screen_mode": True},
-                    "header": {
-                        "template": "orange",
-                        "title": {
-                            "tag": "plain_text",
-                            "content": "📝 请告诉我们哪里不准确"
-                        }
-                    },
-                    "elements": [
-                         {
-                            "tag": "form",
-                            "name": "dislike_feedback_form",
-                            "elements": [
-                                {
-                                    "tag": "input",
-                                    "name": "feedback_text",
-                                    "placeholder": {
-                                        "tag": "plain_text",
-                                        "content": "请描述不准确的地方（选填，直接点提交也可）"
-                                    },
-                                    "max_length": 500
-                                },
-                                {
-                                    "tag": "button",
-                                    "text": {"tag": "plain_text", "content": "✅ 确认"},
-                                    "type": "primary",
-                                    "action_type": "form_submit",
-                                    "name": "submit_dislike_feedback",
-                                    "value": {
-                                        "feedback_type": "dislike",
-                                        "action": "submit_dislike_feedback",
-                                        "record_id": record_id
-                                    }
-                                },
-                                {
-                                    "tag": "button",
-                                    "text": {"tag": "plain_text", "content": "❌ 取消"},
-                                    "type": "default",
-                                    "action_type": "form_submit",
-                                    "name": "cancel_dislike_feedback",
-                                    "value": {
-                                        "action": "cancel_dislike_feedback",
-                                        "record_id": record_id
-                                    }
-                                }
-                            ]
-                        }
-                    ]
+    "card": {
+        "type": "raw",
+        "data": {
+            "schema": "2.0",
+            "config": {
+                "wide_screen_mode": True
+            },
+            "header": {
+                "template": "orange",
+                "title": {
+                    "tag": "plain_text",
+                    "content": "📝 请告诉我们哪里不准确"
                 }
+            },
+            "body": {
+                "direction": "vertical",
+                "elements": [
+                    {
+                        "tag": "form",
+                        "name": "dislike_feedback_form",
+                        "elements": [
+                            {
+                                "tag": "input",
+                                "name": "feedback_text",
+                                "required": False,
+                                "placeholder": {
+                                    "tag": "plain_text",
+                                    "content": "请描述不准确的地方（选填，直接点提交也可）"
+                                },
+                                "max_length": 500
+                            },
+                            {
+                                "tag": "column_set",
+                                "flex_mode": "none",
+                                "horizontal_spacing": "medium",
+                                "columns": [
+                                    {
+                                        "tag": "column",
+                                        "width": "auto",
+                                        "vertical_align": "top",
+                                        "elements": [
+                                            {
+                                                "tag": "button",
+                                                "text": {
+                                                    "tag": "plain_text",
+                                                    "content": "✅ 确认"
+                                                },
+                                                "type": "primary",
+                                                "action_type": "form_submit",
+                                                "name": "submit_dislike_feedback",
+                                                "value": {
+                                                    "feedback_type": "dislike",
+                                                    "action": "submit_dislike_feedback",
+                                                    "record_id": str(record_id)
+                                                }
+                                            }
+                                        ]
+                                    },
+                                    {
+                                        "tag": "column",
+                                        "width": "auto",
+                                        "vertical_align": "top",
+                                        "elements": [
+                                            {
+                                                "tag": "button",
+                                                "text": {
+                                                    "tag": "plain_text",
+                                                    "content": "❌ 取消"
+                                                },
+                                                "type": "default",
+                                                "action_type": "form_submit",
+                                                "name": "cancel_dislike_feedback",
+                                                "value": {
+                                                    "action": "cancel_dislike_feedback",
+                                                    "record_id": str(record_id)
+                                                }
+                                            }
+                                        ]
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                ]
             }
         }
+    }
+}
 
     def _send_ephemeral_message(self, user_id: str, chat_id: str, text: str) -> bool:
         """
