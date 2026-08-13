@@ -570,6 +570,49 @@ class FeishuBotAdapter(IMAdapter):
             from ai_assistant.core.feedback_manager import FeedbackManager
             feedback_mgr = FeedbackManager()
 
+            # ===== 分支 0: 取消点踩表单 =====
+            if action_value.get("action") == "cancel_dislike_feedback":
+                record_id = action_value.get("record_id")
+                if not record_id:
+                    logger.warning("⚠️ cancel_dislike_feedback missing record_id")
+                    return {"toast": {"type": "info", "content": "已取消"}}
+
+                # 查询该 record_id 的对话历史和已有反馈，返回原始卡片
+                from ai_assistant.core.chat_history import ChatHistoryManager
+                from ai_assistant.utils.feishu_message import FeishuMessageBuilder
+
+                chat_history_mgr = ChatHistoryManager()
+                history_record = chat_history_mgr.get_record_by_id(record_id)
+
+                if not history_record:
+                    return {"toast": {"type": "error", "content": "无法找到原始消息"}}
+
+                # 获取所有反馈
+                feedbacks = feedback_mgr.get_feedbacks_by_record_id(record_id)
+
+                # 提取元数据
+                metadata = history_record.get("metadata", {})
+                mode = metadata.get("mode")
+                tool_rounds = metadata.get("tool_rounds")
+                doc_count = metadata.get("doc_count")
+                latency_ms = history_record.get("latency_ms", 0)
+                elapsed_time = latency_ms / 1000.0 if latency_ms else None
+
+                # 构建原始卡片（恢复到点踩之前的状态）
+                original_card = FeishuMessageBuilder.ai_reply_card(
+                    reply_text=history_record.get("answer", ""),
+                    message_id="placeholder",
+                    elapsed_time=elapsed_time,
+                    tool_rounds=tool_rounds,
+                    doc_count=doc_count,
+                    mode=mode,
+                    feedbacks=feedbacks,
+                )
+
+                # 返回原始卡片（飞书会用它替换表单卡片）
+                logger.info(f"✅ Canceled dislike feedback for record_id={record_id}")
+                return original_card
+
             # ===== 分支 1: 点踩表单提交 =====
             # record_id 由表单按钮 value 携带回来，不依赖 message_cache（更稳）
             if action_value.get("action") == "submit_dislike_feedback":
@@ -591,7 +634,41 @@ class FeishuBotAdapter(IMAdapter):
                 )
                 logger.info(f"✅ Dislike feedback with text saved: {feedback_id}, "
                             f"text_len={len(feedback_text)}")
-                return {"toast": {"type": "success", "content": "👎 感谢您的详细反馈！"}}
+
+                # 查询该 record_id 的对话历史和所有反馈，返回更新后的完整卡片
+                from ai_assistant.core.chat_history import ChatHistoryManager
+                from ai_assistant.utils.feishu_message import FeishuMessageBuilder
+
+                chat_history_mgr = ChatHistoryManager()
+                history_record = chat_history_mgr.get_record_by_id(record_id)
+
+                if not history_record:
+                    return {"toast": {"type": "error", "content": "无法找到原始消息"}}
+
+                # 获取所有反馈
+                feedbacks = feedback_mgr.get_feedbacks_by_record_id(record_id)
+
+                # 提取元数据
+                metadata = history_record.get("metadata", {})
+                mode = metadata.get("mode")
+                tool_rounds = metadata.get("tool_rounds")
+                doc_count = metadata.get("doc_count")
+                latency_ms = history_record.get("latency_ms", 0)
+                elapsed_time = latency_ms / 1000.0 if latency_ms else None
+
+                # 构建更新后的卡片
+                updated_card = FeishuMessageBuilder.ai_reply_card(
+                    reply_text=history_record.get("answer", ""),
+                    message_id="placeholder",
+                    elapsed_time=elapsed_time,
+                    tool_rounds=tool_rounds,
+                    doc_count=doc_count,
+                    mode=mode,
+                    feedbacks=feedbacks,
+                )
+
+                # 返回更新后的卡片（飞书会用它替换原表单卡片）
+                return updated_card
 
             # ===== 分支 2/3: 首次点赞 / 点踩 =====
             if not feedback_type or not message_id:
@@ -608,8 +685,9 @@ class FeishuBotAdapter(IMAdapter):
 
             logger.info(f"✅ Found record_id={record_id} for message_id={message_id}")
 
+            # ===== 分支 2: 点赞 =====
             if feedback_type == "like":
-                # 点赞：保存反馈 + 返回 toast 确认
+                # 点赞：保存反馈 + 返回更新后的完整卡片（带反馈信息）
                 feedback_id = feedback_mgr.save_feedback(
                     record_id=record_id,
                     session_id=chat_id,
@@ -617,8 +695,43 @@ class FeishuBotAdapter(IMAdapter):
                     feedback_type="like"
                 )
                 logger.info(f"✅ Like feedback saved: {feedback_id}")
-                return {"toast": {"type": "success", "content": "👍 感谢您的反馈！"}}
 
+                # 查询该 record_id 的对话历史和所有反馈
+                from ai_assistant.core.chat_history import ChatHistoryManager
+                from ai_assistant.utils.feishu_message import FeishuMessageBuilder
+
+                chat_history_mgr = ChatHistoryManager()
+                history_record = chat_history_mgr.get_record_by_id(record_id)
+
+                if not history_record:
+                    return {"toast": {"type": "error", "content": "无法找到原始消息"}}
+
+                # 获取所有反馈
+                feedbacks = feedback_mgr.get_feedbacks_by_record_id(record_id)
+
+                # 提取元数据
+                metadata = history_record.get("metadata", {})
+                mode = metadata.get("mode")
+                tool_rounds = metadata.get("tool_rounds")
+                doc_count = metadata.get("doc_count")
+                latency_ms = history_record.get("latency_ms", 0)
+                elapsed_time = latency_ms / 1000.0 if latency_ms else None
+
+                # 构建更新后的卡片
+                updated_card = FeishuMessageBuilder.ai_reply_card(
+                    reply_text=history_record.get("answer", ""),
+                    message_id="placeholder",
+                    elapsed_time=elapsed_time,
+                    tool_rounds=tool_rounds,
+                    doc_count=doc_count,
+                    mode=mode,
+                    feedbacks=feedbacks,
+                )
+
+                # 返回更新后的卡片（飞书会用它替换原卡片）
+                return updated_card
+
+            # ===== 分支 3: 点踩 =====
             elif feedback_type == "dislike":
                 # 首次点踩：返回表单卡片，引导用户填写文字反馈
                 # record_id 塞进表单按钮 value，提交时带回来
@@ -672,16 +785,30 @@ class FeishuBotAdapter(IMAdapter):
                                     "max_length": 500
                                 },
                                 {
-                                    "tag": "button",
-                                    "text": {"tag": "plain_text", "content": "提交"},
-                                    "type": "primary",
-                                    "action_type": "form_submit",
-                                    "name": "submit_btn",
-                                    "value": {
-                                        "feedback_type": "dislike",
-                                        "action": "submit_dislike_feedback",
-                                        "record_id": record_id
-                                    }
+                                    "tag": "action",
+                                    "actions": [
+                                        {
+                                            "tag": "button",
+                                            "text": {"tag": "plain_text", "content": "提交"},
+                                            "type": "primary",
+                                            "action_type": "form_submit",
+                                            "name": "submit_btn",
+                                            "value": {
+                                                "feedback_type": "dislike",
+                                                "action": "submit_dislike_feedback",
+                                                "record_id": record_id
+                                            }
+                                        },
+                                        {
+                                            "tag": "button",
+                                            "text": {"tag": "plain_text", "content": "取消"},
+                                            "type": "default",
+                                            "value": {
+                                                "action": "cancel_dislike_feedback",
+                                                "record_id": record_id
+                                            }
+                                        }
+                                    ]
                                 }
                             ]
                         }
