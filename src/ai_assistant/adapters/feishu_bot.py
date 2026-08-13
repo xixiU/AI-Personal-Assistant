@@ -555,13 +555,15 @@ class FeishuBotAdapter(IMAdapter):
             event = event_data.get("event", {})
             action = event.get("action", {})
             context = event.get("context", {})
-
+            logger.info(f"📝 Card action: event={event}")
+            
             # 提取关键信息
             action_value = action.get("value", {})
             feedback_type = action_value.get("feedback_type", "")
 
             # message_id 从事件上下文获取（被点击的消息 ID）
             message_id = context.get("open_message_id", "")
+            # 这里后续可以根据open_id获取用户的昵称
             user_id = event.get("operator", {}).get("open_id", "")
             chat_id = context.get("open_chat_id", "")
 
@@ -740,7 +742,17 @@ class FeishuBotAdapter(IMAdapter):
                     feedbacks=feedbacks,
                 )
 
-                # 返回更新后的卡片（飞书会用它替换原表单卡片）
+                 # 转换为卡片交互响应格式
+                import json
+                card_data = json.loads(updated_card["content"])
+                updated_card = {
+                    "card": {
+                        "type": "raw",
+                        "data": card_data
+                    }
+                }
+
+                # 返回更新后的卡片（飞书会用它替换确认卡片）
                 return updated_card
 
             # ===== 分支 2/3: 首次点赞 / 点踩 =====
@@ -852,27 +864,32 @@ class FeishuBotAdapter(IMAdapter):
                         "template": "orange",
                         "title": {
                             "tag": "plain_text",
-                            "content": "👎 确认反馈为不准确？"
+                            "content": "📝 请告诉我们哪里不准确"
                         }
                     },
                     "elements": [
-                        {
-                            "tag": "div",
-                            "text": {
-                                "tag": "plain_text",
-                                "content": "点击「确认」将记录您的反馈，帮助我们改进回答质量。"
-                            }
-                        },
-                        {
-                            "tag": "action",
-                            "actions": [
+                         {
+                            "tag": "form",
+                            "name": "dislike_feedback_form",
+                            "elements": [
+                                {
+                                    "tag": "input",
+                                    "name": "feedback_text",
+                                    "placeholder": {
+                                        "tag": "plain_text",
+                                        "content": "请描述不准确的地方（选填，直接点提交也可）"
+                                    },
+                                    "max_length": 500
+                                },
                                 {
                                     "tag": "button",
                                     "text": {"tag": "plain_text", "content": "✅ 确认"},
                                     "type": "primary",
+                                    "action_type": "form_submit",
+                                    "name": "submit_dislike_feedback",
                                     "value": {
                                         "feedback_type": "dislike",
-                                        "action": "confirm_dislike_feedback",
+                                        "action": "submit_dislike_feedback",
                                         "record_id": record_id
                                     }
                                 },
@@ -880,6 +897,8 @@ class FeishuBotAdapter(IMAdapter):
                                     "tag": "button",
                                     "text": {"tag": "plain_text", "content": "❌ 取消"},
                                     "type": "default",
+                                    "action_type": "form_submit",
+                                    "name": "cancel_dislike_feedback",
                                     "value": {
                                         "action": "cancel_dislike_feedback",
                                         "record_id": record_id
