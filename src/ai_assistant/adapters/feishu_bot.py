@@ -613,7 +613,59 @@ class FeishuBotAdapter(IMAdapter):
                 logger.info(f"✅ Canceled dislike feedback for record_id={record_id}")
                 return original_card
 
-            # ===== 分支 1: 点踩表单提交 =====
+            # ===== 分支 1: 确认点踩（降级方案，不填写文字） =====
+            if action_value.get("action") == "confirm_dislike_feedback":
+                record_id = action_value.get("record_id")
+                if not record_id:
+                    logger.warning("⚠️ confirm_dislike_feedback missing record_id")
+                    return {"toast": {"type": "error", "content": "暂无法提交反馈，请稍后再试"}}
+
+                # 保存点踩反馈（不带文字）
+                feedback_id = feedback_mgr.save_feedback(
+                    record_id=record_id,
+                    session_id=chat_id,
+                    source="feishu",
+                    feedback_type="dislike",
+                    feedback_text=""  # 降级方案：不收集文字反馈
+                )
+                logger.info(f"✅ Dislike feedback confirmed (no text): {feedback_id}")
+
+                # 查询该 record_id 的对话历史和所有反馈，返回更新后的完整卡片
+                from ai_assistant.core.chat_history import ChatHistoryManager
+                from ai_assistant.utils.feishu_message import FeishuMessageBuilder
+
+                chat_history_mgr = ChatHistoryManager()
+                history_record = chat_history_mgr.get_record_by_id(record_id)
+
+                if not history_record:
+                    return {"toast": {"type": "error", "content": "无法找到原始消息"}}
+
+                # 获取所有反馈
+                feedbacks = feedback_mgr.get_feedbacks_by_record_id(record_id)
+
+                # 提取元数据
+                metadata = history_record.get("metadata", {})
+                mode = metadata.get("mode")
+                tool_rounds = metadata.get("tool_rounds")
+                doc_count = metadata.get("doc_count")
+                latency_ms = history_record.get("latency_ms", 0)
+                elapsed_time = latency_ms / 1000.0 if latency_ms else None
+
+                # 构建更新后的卡片
+                updated_card = FeishuMessageBuilder.ai_reply_card(
+                    reply_text=history_record.get("answer", ""),
+                    message_id="placeholder",
+                    elapsed_time=elapsed_time,
+                    tool_rounds=tool_rounds,
+                    doc_count=doc_count,
+                    mode=mode,
+                    feedbacks=feedbacks,
+                )
+
+                # 返回更新后的卡片（飞书会用它替换确认卡片）
+                return updated_card
+
+            # ===== 分支 2: 点踩表单提交（保留，兼容公有云飞书） =====
             # record_id 由表单按钮 value 携带回来，不依赖 message_cache（更稳）
             if action_value.get("action") == "submit_dislike_feedback":
                 record_id = action_value.get("record_id")
@@ -752,11 +804,11 @@ class FeishuBotAdapter(IMAdapter):
             record_id: 关联的对话历史记录主键，塞进提交按钮 value 携带回来
 
         Returns:
-            飞书卡片交互响应体（含 input 输入框的 form 卡片）
+            飞书卡片交互响应体（降级方案：不使用 form，改用普通按钮）
 
-        注意：私有化飞书（如 open.xfchat.iflytek.com）若不支持 form/input 组件，
-        飞书会忽略该响应或渲染异常，此时用户仍可看到已记录的点踩（提交前 record_id
-        尚未落库）。降级策略见 dislike 分支——不影响点踩本身的采集流程。
+        注意：私有化飞书可能不支持 form/input 组件，改用简单的按钮方案：
+        - 点踩后直接保存（不填写文字）
+        - 提供「确认」和「取消」按钮
         """
         return {
             "card": {
@@ -767,48 +819,38 @@ class FeishuBotAdapter(IMAdapter):
                         "template": "orange",
                         "title": {
                             "tag": "plain_text",
-                            "content": "📝 请告诉我们哪里不准确"
+                            "content": "👎 确认反馈为不准确？"
                         }
                     },
                     "elements": [
                         {
-                            "tag": "form",
-                            "name": "dislike_feedback_form",
-                            "elements": [
+                            "tag": "div",
+                            "text": {
+                                "tag": "plain_text",
+                                "content": "点击「确认」将记录您的反馈，帮助我们改进回答质量。"
+                            }
+                        },
+                        {
+                            "tag": "action",
+                            "actions": [
                                 {
-                                    "tag": "input",
-                                    "name": "feedback_text",
-                                    "placeholder": {
-                                        "tag": "plain_text",
-                                        "content": "请描述问题（选填，直接点提交也可）"
-                                    },
-                                    "max_length": 500
+                                    "tag": "button",
+                                    "text": {"tag": "plain_text", "content": "✅ 确认"},
+                                    "type": "primary",
+                                    "value": {
+                                        "feedback_type": "dislike",
+                                        "action": "confirm_dislike_feedback",
+                                        "record_id": record_id
+                                    }
                                 },
                                 {
-                                    "tag": "action",
-                                    "actions": [
-                                        {
-                                            "tag": "button",
-                                            "text": {"tag": "plain_text", "content": "提交"},
-                                            "type": "primary",
-                                            "action_type": "form_submit",
-                                            "name": "submit_btn",
-                                            "value": {
-                                                "feedback_type": "dislike",
-                                                "action": "submit_dislike_feedback",
-                                                "record_id": record_id
-                                            }
-                                        },
-                                        {
-                                            "tag": "button",
-                                            "text": {"tag": "plain_text", "content": "取消"},
-                                            "type": "default",
-                                            "value": {
-                                                "action": "cancel_dislike_feedback",
-                                                "record_id": record_id
-                                            }
-                                        }
-                                    ]
+                                    "tag": "button",
+                                    "text": {"tag": "plain_text", "content": "❌ 取消"},
+                                    "type": "default",
+                                    "value": {
+                                        "action": "cancel_dislike_feedback",
+                                        "record_id": record_id
+                                    }
                                 }
                             ]
                         }
