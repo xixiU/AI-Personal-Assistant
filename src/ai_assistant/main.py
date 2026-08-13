@@ -407,8 +407,9 @@ class AIAssistant:
             # 调用 AI 生成回复
             ai_start = time_mod.time()
             record_id = None
+            metadata = {}
             try:
-                reply, record_id = self.ai_provider.call(context_messages, session_id=session_id, source="feishu")
+                reply, record_id, metadata = self.ai_provider.call(context_messages, session_id=session_id, source="feishu")
             except DocIndexingInProgressError:
                 # 文档索引更新中，加入延迟重试队列
                 logger.info(f"文档索引更新中，将消息加入延迟重试队列: session={session_id}")
@@ -428,7 +429,7 @@ class AIAssistant:
 
             # 通过适配器发送回复（使用 message_id 回复具体消息）
             send_start = time_mod.time()
-            self._send_feishu_reply(adapter, message_id, session_id, reply, record_id)
+            self._send_feishu_reply(adapter, message_id, session_id, reply, record_id, ai_duration, metadata)
             send_duration = time_mod.time() - send_start
 
             # 计算资源使用
@@ -587,7 +588,16 @@ class AIAssistant:
             logger.error(f"Failed to parse feishu event: {e}")
             return None
 
-    def _send_feishu_reply(self, adapter, message_id: str, chat_id: str, reply_text: str, record_id: Optional[str] = None):
+    def _send_feishu_reply(
+        self,
+        adapter,
+        message_id: str,
+        chat_id: str,
+        reply_text: str,
+        record_id: Optional[str] = None,
+        elapsed_time: Optional[float] = None,
+        metadata: Optional[dict] = None,
+    ):
         """
         通过飞书适配器发送回复（使用消息卡片样式，支持 Markdown，带反馈按钮）
 
@@ -600,13 +610,28 @@ class AIAssistant:
             chat_id: 聊天 ID
             reply_text: 回复文本
             record_id: 本次对话历史记录的唯一标识（用于反馈按钮回填）
+            elapsed_time: 回复耗时（秒）
+            metadata: 附加元数据（mode、tool_rounds、doc_count 等）
         """
         from ai_assistant.utils.feishu_message import FeishuMessageBuilder
 
         try:
             token = adapter.get_tenant_access_token()
+
+            # 从 metadata 提取信息
+            mode = metadata.get("mode") if metadata else None
+            tool_rounds = metadata.get("tool_rounds") if metadata else None
+            doc_count = metadata.get("doc_count") if metadata else None
+
             # 带反馈按钮的卡片（message_id 仅用于触发按钮渲染，实际映射走 record_id）
-            payload = FeishuMessageBuilder.ai_reply_card(reply_text, message_id="placeholder")
+            payload = FeishuMessageBuilder.ai_reply_card(
+                reply_text,
+                message_id="placeholder",
+                elapsed_time=elapsed_time,
+                tool_rounds=tool_rounds,
+                doc_count=doc_count,
+                mode=mode,
+            )
             success, new_message_id = FeishuMessageBuilder.send(adapter.base_url, token, message_id, payload)
 
             # 发送成功且有 record_id 时，缓存 新消息ID → record_id 映射
@@ -877,8 +902,9 @@ class AIAssistant:
                 source = "unknown"
 
             record_id = None
+            metadata = {}
             try:
-                reply, record_id = self.ai_provider.call(context_messages, session_id=session_id, source=source)
+                reply, record_id, metadata = self.ai_provider.call(context_messages, session_id=session_id, source=source)
             except DocIndexingInProgressError:
                 # 文档索引更新中，直接返回提示（Web/微信不支持自动重试）
                 logger.info(f"文档索引更新中: session={session_id}, source={source}")
@@ -898,8 +924,9 @@ class AIAssistant:
                 # （注：飞书为 webhook 驱动，此轮询分支实际不会命中，仅保证一致性）
                 latest = getattr(adapter, "latest_message", None)
                 if latest and latest.get("message_id"):
+                    # 注：轮询模式没有精确的 ai_duration，传 None
                     self._send_feishu_reply(
-                        adapter, latest["message_id"], session_id, reply, record_id
+                        adapter, latest["message_id"], session_id, reply, record_id, None, metadata
                     )
                     adapter.clear_latest_event()
                     logger.info("Reply sent via Feishu Bot API successfully")

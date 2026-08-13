@@ -159,7 +159,7 @@ class AIProvider(ABC):
         messages: List[Message],
         session_id: Optional[str] = None,
         source: str = "unknown",
-    ) -> Tuple[str, Optional[str]]:
+    ) -> Tuple[str, Optional[str], dict]:
         """
         统一入口：记录日志 + 计时 + 调用 send_message + 保存历史
 
@@ -171,8 +171,10 @@ class AIProvider(ABC):
             source: 提问来源（"feishu", "wechat", "web"）
 
         Returns:
-            (reply, record_id) 元组。record_id 为本次对话历史记录的唯一标识；
-            当无 chat_history、query 为空或保存失败时为 None。
+            (reply, record_id, metadata) 元组。
+            - reply: AI 回复文本
+            - record_id: 本次对话历史记录的唯一标识（无 chat_history、query 为空或保存失败时为 None）
+            - metadata: 附加元数据（mode、tool_rounds、doc_count 等）
         """
         provider_name = self.__class__.__name__
         model_name = getattr(self, 'model', 'unknown')
@@ -214,7 +216,7 @@ class AIProvider(ABC):
             except Exception as e:
                 logger.warning(f"保存对话历史失败: {e}")
 
-        return reply, record_id
+        return reply, record_id, metadata
 
     @abstractmethod
     def check_health(self) -> bool:

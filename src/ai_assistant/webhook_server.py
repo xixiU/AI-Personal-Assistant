@@ -253,7 +253,7 @@ class WebhookServer:
             context_messages = self.context_manager.get_context(session_id)
 
             # 调用 AI 生成回复（返回回复文本 + chat_history 记录主键）
-            reply, record_id = self.ai_provider.call(context_messages, session_id=session_id, source="web")
+            reply, record_id, metadata = self.ai_provider.call(context_messages, session_id=session_id, source="web")
 
             # 将 AI 回复添加到上下文
             ai_message = Message(
