@@ -8,7 +8,7 @@ import json
 import re
 import requests
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Dict, Any, List
 from loguru import logger
 
 
@@ -223,7 +223,12 @@ class FeishuMessageBuilder:
         reply_text: str,
         title: str = "🤖 AI 助手回复",
         template: str = "blue",
-        message_id: Optional[str] = None
+        message_id: Optional[str] = None,
+        elapsed_time: Optional[float] = None,
+        tool_rounds: Optional[int] = None,
+        doc_count: Optional[int] = None,
+        mode: Optional[str] = None,
+        feedbacks: Optional[List[Dict[str, Any]]] = None,
     ) -> dict:
         """
         快捷方法：构建标准 AI 回复卡片
@@ -233,6 +238,11 @@ class FeishuMessageBuilder:
             title: 卡片标题
             template: 卡片头部颜色
             message_id: 消息 ID，如果提供则自动添加反馈按钮
+            elapsed_time: 回复耗时（秒）
+            tool_rounds: 工具调用轮数（Agentic 模式）
+            doc_count: 阅读文档数量（RAG 模式）
+            mode: 处理模式（"agentic" / "rag" / "standard"）
+            feedbacks: 已有的反馈记录列表（每项包含 feedback_type、feedback_text、timestamp）
 
         Returns:
             可直接用于飞书 API 的 payload dict
@@ -242,13 +252,56 @@ class FeishuMessageBuilder:
 
         builder = cls(title=title, template=template)
         builder.add_markdown(converted_text)
+
+        # 如果有用户反馈，添加反馈展示区域
+        if feedbacks:
+            builder.add_hr()
+            builder.add_text("📝 用户反馈：")
+            for fb in feedbacks:
+                fb_type = fb.get("feedback_type", "unknown")
+                fb_text = fb.get("feedback_text", "")
+                fb_time = fb.get("timestamp", "")
+
+                # 构建反馈条目
+                if fb_type == "like":
+                    fb_icon = "👍"
+                    fb_label = "准确"
+                else:
+                    fb_icon = "👎"
+                    fb_label = "不准确"
+
+                fb_content = f"{fb_icon} {fb_label}"
+                if fb_text:
+                    fb_content += f"：{fb_text}"
+                fb_content += f" ({fb_time})"
+
+                builder.add_text(fb_content)
+
         builder.add_hr()
 
         # 添加反馈按钮（如果提供了 message_id）
         if message_id:
             builder.add_feedback_buttons(message_id)
 
-        builder.add_note(f"⏱️ 生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        # 构建底部信息
+        note_parts = [f"⏱️ 生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"]
+
+        if elapsed_time is not None:
+            note_parts.append(f"⚡ 耗时: {elapsed_time:.1f}秒")
+
+        # 根据 mode 添加模式标识
+        if mode == "agentic":
+            note_parts.append(f"🔍 代码排查模式")
+            if tool_rounds is not None and tool_rounds > 0:
+                note_parts.append(f"🔧 工具调用: {tool_rounds}轮")
+        elif mode == "rag":
+            note_parts.append(f"📚 知识库模式")
+            if doc_count is not None and doc_count > 0:
+                note_parts.append(f"📖 阅读文档: {doc_count}篇")
+        else:
+            note_parts.append(f"💬 普通对话模式")
+
+        builder.add_note(" | ".join(note_parts))
         return builder.build_card()
 
     @staticmethod

@@ -198,3 +198,56 @@ class FeedbackManager:
 
         logger.debug(f"查询日期范围 {start_date} ~ {end_date}: 共 {len(feedbacks)} 条记录")
         return feedbacks
+
+    def get_feedbacks_by_record_id(self, record_id: str) -> List[Dict]:
+        """
+        查询指定 record_id 的所有反馈记录（用于飞书卡片展示）
+
+        Args:
+            record_id: 对话历史记录主键
+
+        Returns:
+            反馈记录列表，每条包含：
+            - feedback_id
+            - record_id
+            - timestamp
+            - feedback_type（"like" / "dislike"）
+            - feedback_text（用户填写的反馈内容）
+        """
+        if not record_id:
+            logger.warning("record_id 为空，返回空列表")
+            return []
+
+        feedbacks = []
+
+        # 遍历最近几天的反馈文件（从今天往前找，最多查 7 天）
+        today = datetime.now()
+        for days_back in range(7):
+            target_date = today - timedelta(days=days_back)
+            date_str = target_date.strftime("%Y-%m-%d")
+            file_path = self.feedback_dir / f"{date_str}.jsonl"
+
+            if not file_path.exists():
+                continue
+
+            # 读取该天的所有反馈记录
+            with self._lock:
+                try:
+                    with open(file_path, "r", encoding="utf-8") as f:
+                        for line in f:
+                            record = json.loads(line.strip())
+                            # 筛选：同 record_id
+                            if record.get("record_id") == record_id:
+                                feedbacks.append(record)
+                except Exception as e:
+                    logger.error(f"读取反馈文件失败: {file_path}, {e}")
+                    continue
+
+        # 按时间戳正序排序（先反馈的在前）
+        feedbacks.sort(key=lambda x: x["timestamp"])
+
+        logger.debug(
+            f"查询 record_id={record_id} 的反馈: 找到 {len(feedbacks)} 条记录"
+        )
+        return feedbacks
+

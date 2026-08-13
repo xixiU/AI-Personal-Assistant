@@ -169,21 +169,25 @@ class AnthropicProvider(AIProvider):
         messages: List[Message],
         doc_context: str,
         session_id: Optional[str] = None,
-    ) -> str:
+    ) -> tuple[str, dict]:
         """
         发送消息到 Claude 并获取回复
 
         根据消息内容自动选择模式：
         - 有图片或排查关键词 → Agentic 模式（支持工具调用）
         - 其他 → 标准 RAG 模式
+
+        Returns:
+            (reply_text, metadata) 元组
+            metadata 包含：tool_rounds（Agentic）或 doc_count（RAG）等
         """
         # 判断是否使用 Agentic 模式
         if self._should_use_agentic_mode(messages):
             logger.info("使用 Agentic 模式（工具调用）")
             return self._send_with_context_agentic(
-                messages, 
-                doc_context, 
-                session_id, 
+                messages,
+                doc_context,
+                session_id,
                 max_rounds=self.max_rounds,
                 timeout_mode=self.timeout_mode,
                 max_time=self.max_time
@@ -201,7 +205,7 @@ class AnthropicProvider(AIProvider):
         max_rounds: int = 6,
         timeout_mode: str = "time",
         max_time: int = 300,
-    ) -> str:
+    ) -> tuple[str, dict]:
         """
         Agentic 模式：支持工具调用的多轮对话
 
@@ -214,7 +218,8 @@ class AnthropicProvider(AIProvider):
             max_time: 总时间限制（秒），timeout_mode="time" 时生效
 
         Returns:
-            AI 最终回复
+            (reply_text, metadata) 元组
+            metadata 包含 tool_rounds（实际工具调用轮数）
         """
         from ai_assistant.tools.git_tools import GIT_TOOLS_SCHEMA
 
@@ -380,14 +385,21 @@ class AnthropicProvider(AIProvider):
                 # 将 assistant 消息加入对话历史
                 api_messages.append({"role": "assistant", "content": assistant_content})
 
-                # 如果没有工具调用，返回最终文本
+                # 如果没有工具调用,返回最终文本
                 if response.stop_reason == "end_turn" or not tool_uses:
                     final_text = ""
                     for block in response.content:
                         if hasattr(block, 'text'):
                             final_text += block.text
                     logger.info(f"Agentic 完成: 总轮数={round_num}, 最终回复={len(final_text)}字符")
-                    return final_text or "抱歉，未能生成有效回复。"
+
+                    # 构建 metadata（Agentic 模式）
+                    metadata = {
+                        "mode": "agentic",
+                        "tool_rounds": round_num,
+                    }
+
+                    return (final_text or "抱歉，未能生成有效回复。"), metadata
 
                 # 执行工具调用
                 tool_results = []
@@ -422,22 +434,20 @@ class AnthropicProvider(AIProvider):
 
             except anthropic.APITimeoutError:
                 logger.error("Anthropic API 请求超时")
-                return "⏱️ AI 服务响应超时，请稍后重试"
+                return "⏱️ AI 服务响应超时，请稍后重试", {"mode": "agentic", "error": "timeout"}
             except anthropic.APIConnectionError as e:
                 logger.error(f"Anthropic API 连接失败: {e}")
-                return "🔌 AI 服务连接失败，请检查网络或稍后重试"
+                return "🔌 AI 服务连接失败，请检查网络或稍后重试", {"mode": "agentic", "error": "connection"}
             except anthropic.APIStatusError as e:
                 logger.error(f"Anthropic API 错误: status={e.status_code}, message={e.message}")
-                return f"❌ AI 服务调用失败: {e.message}"
+                return f"❌ AI 服务调用失败: {e.message}", {"mode": "agentic", "error": "api"}
             except Exception as e:
                 logger.error(f"Agentic 循环异常: {e}", exc_info=True)
-                return f"❌ 排查过程出错: {str(e)}"
+                return f"❌ 排查过程出错: {str(e)}", {"mode": "agentic", "error": "exception"}
 
         # 达到超时限制
-        if timeout_mode == "time":
-            return "⚠️ 排查过程较复杂，已达到总时间限制。以上是目前的分析结果，如需继续请提供更多信息。"
-        else:
-            return "⚠️ 排查过程较复杂，已达到最大分析轮数。以上是目前的分析结果，如需继续请提供更多信息。"
+        timeout_msg = "⚠️ 排查过程较复杂，已达到总时间限制。以上是目前的分析结果，如需继续请提供更多信息。" if timeout_mode == "time" else "⚠️ 排查过程较复杂，已达到最大分析轮数。以上是目前的分析结果，如需继续请提供更多信息。"
+        return timeout_msg, {"mode": "agentic", "tool_rounds": round_num, "timeout": True}
 
     def _execute_tool(self, tool_name: str, tool_input: Dict[str, Any]) -> Any:
         """
@@ -579,8 +589,14 @@ class AnthropicProvider(AIProvider):
         messages: List[Message],
         doc_context: str,
         session_id: Optional[str] = None,
-    ) -> str:
-        """标准 RAG 模式（原有实现）"""
+    ) -> tuple[str, dict]:
+        """
+        标准 RAG 模式（原有实现）
+
+        Returns:
+            (reply_text, metadata) 元组
+            metadata 包含 doc_count（检索到的文档数）等
+        """
         try:
             # 转换消息格式
             api_messages = []
@@ -642,14 +658,21 @@ class AnthropicProvider(AIProvider):
                 f"Claude 回复已接收: {len(reply)} 字符, "
                 f"tokens(input:{response.usage.input_tokens}, output:{response.usage.output_tokens})"
             )
-            return reply
+
+            # 构建 metadata（标准 RAG 模式）
+            metadata = {
+                "mode": "rag",
+                "doc_count": doc_context.count("📄") if doc_context else 0,  # 粗略统计文档数
+            }
+
+            return reply, metadata
 
         except anthropic.APITimeoutError:
             logger.error("Anthropic API 请求超时")
-            return "⏱️ AI 服务响应超时，请稍后重试"
+            return "⏱️ AI 服务响应超时，请稍后重试", {"mode": "rag", "error": "timeout"}
         except anthropic.APIConnectionError as e:
             logger.error(f"Anthropic API 连接失败: {e}")
-            return "🔌 AI 服务连接失败，请检查网络或稍后重试"
+            return "🔌 AI 服务连接失败，请检查网络或稍后重试", {"mode": "rag", "error": "connection"}
         except anthropic.APIStatusError as e:
             status_code = e.status_code
             logger.error(f"Anthropic API 错误: status={status_code}, message={e.message}")
@@ -658,15 +681,15 @@ class AnthropicProvider(AIProvider):
 
             # 针对特定错误码返回友好消息
             if status_code == 401:
-                return "❌ Anthropic API 认证失败，请检查 API Key 是否正确"
+                return "❌ Anthropic API 认证失败，请检查 API Key 是否正确", {"mode": "rag", "error": "auth"}
             elif status_code == 402:
-                return "💳 Anthropic 账户余额不足，请充值后重试"
+                return "💳 Anthropic 账户余额不足，请充值后重试", {"mode": "rag", "error": "quota"}
             elif status_code == 429:
-                return "⏱️ Anthropic API 请求过于频繁，请稍后重试"
+                return "⏱️ Anthropic API 请求过于频繁，请稍后重试", {"mode": "rag", "error": "rate_limit"}
             elif status_code >= 500:
-                return "🔧 Anthropic 服务暂时不可用，请稍后重试"
+                return "🔧 Anthropic 服务暂时不可用，请稍后重试", {"mode": "rag", "error": "server"}
             else:
-                return f"❌ AI 服务调用失败: {e.message}"
+                return f"❌ AI 服务调用失败: {e.message}", {"mode": "rag", "error": "api"}
 
     def check_health(self) -> bool:
         """检查 Anthropic API 服务健康状态"""

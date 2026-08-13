@@ -29,6 +29,7 @@ class ChatHistoryManager:
         answer: str,
         latency_ms: Optional[int] = None,
         source: str = "unknown",
+        metadata: Optional[dict] = None,
     ) -> str:
         """
         保存一条对话记录
@@ -39,6 +40,7 @@ class ChatHistoryManager:
             answer: AI 回复
             latency_ms: 响应耗时（毫秒）
             source: 提问来源（"feishu", "wechat", "web"）
+            metadata: 附加元数据（如 mode、tool_rounds、doc_count 等）
 
         Returns:
             record_id: 本条记录的唯一标识
@@ -53,6 +55,10 @@ class ChatHistoryManager:
             "answer": answer,
             "latency_ms": latency_ms,
         }
+
+        # 添加 metadata（如果有）
+        if metadata:
+            record["metadata"] = metadata
 
         today = datetime.now().strftime("%Y-%m-%d")
         file_path = self.history_dir / f"{today}.jsonl"

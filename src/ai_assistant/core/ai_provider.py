@@ -180,10 +180,17 @@ class AIProvider(ABC):
         logger.info(f"调用 AI: provider={provider_name}, model={model_name}, messages={messages}")
 
         start = time.time()
-        reply = self.send_message(messages, session_id=session_id)
+        result = self.send_message(messages, session_id=session_id)
         duration = time.time() - start
 
-        logger.info(f"AI 回复完成: {len(reply)} 字符, 耗时={duration:.2f}s")
+        # 兼容旧返回值（纯字符串）和新返回值（元组）
+        if isinstance(result, tuple):
+            reply, metadata = result
+        else:
+            reply = result
+            metadata = {}
+
+        logger.info(f"AI 回复完成: {len(reply)} 字符, 耗时={duration:.2f}s, metadata={metadata}")
 
         # 保存对话历史
         record_id: Optional[str] = None
@@ -202,6 +209,7 @@ class AIProvider(ABC):
                         answer=reply,
                         latency_ms=int(duration * 1000),
                         source=source,
+                        metadata=metadata,  # 传递 metadata（包含 mode、tool_rounds 等）
                     )
             except Exception as e:
                 logger.warning(f"保存对话历史失败: {e}")

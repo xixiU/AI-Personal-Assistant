@@ -8,11 +8,12 @@
 - **多 IM 平台支持**：飞书（Bot API + Webhook）、微信（UI 自动化）
 - **智能回复**：基于 Claude/GPT/Dify 等大模型的上下文感知回复
 - **RAG 知识库检索**：混合检索（向量语义 + BM25 关键词）+ AI 标题过滤
-- **Agentic 代码排查**（新）：Claude 自主调用 Git 工具，分析日志截图并定位代码问题
+- **Agentic 代码排查**：Claude 自主调用 Git 工具，分析日志截图并定位代码问题
 - **飞书文档同步**：通过 MCP 协议自动同步飞书知识库和云空间文档
 - **Web 聊天界面**：独立的 Web UI，支持对话历史、图片上传、Markdown 渲染
 - **多模态支持**：支持图片输入（日志截图、流程图等）
 - **对话历史持久化**：用户提问和回复自动保存到本地文件
+- **用户反馈机制**：飞书/Web 端点赞点踩，支持文字反馈，record_id 关联对话历史
 
 ### Agentic 代码排查（新功能）
 
@@ -65,6 +66,25 @@ AI 回复:
 - **模块化设计**：插件化 IM 适配器和 AI Provider
 
 ## 最近更新
+
+### 2026-07-24: 用户反馈机制重构
+
+**核心改动**：
+- **数据架构升级**：`chat_history` 生成 `record_id` 主键，`feedback` 用外键关联，消除 query/answer 冗余存储
+- **飞书点踩优化**：点踩弹出 Modal 表单收集文字反馈（之前只能点赞/点踩无文字）
+- **record_id 传递链路**：`ai_provider.call()` 返回 `(reply, record_id)` 元组，飞书卡片/Web API 统一用 `record_id` 关联
+
+**修复 bug**：
+- **飞书反馈按钮路由错误**：从不生效的轮询路径 `/api/feedback` 迁移到实际 webhook 路径 `/webhook/feishu/card`
+- **卡片交互事件处理错误**：从异步队列改为同步处理，正确返回响应体给飞书（toast/Modal）
+
+**新增功能**：
+- `FeedbackManager` 支持按 `record_id` 查询反馈，支持附加文字描述
+- `ChatHistoryManager` 支持按 `record_id` 批量查询对话历史
+
+相关提交：`842b30e`
+
+---
 
 ### 2026-07-23: Agentic 代码排查性能与触发逻辑优化
 
@@ -501,6 +521,7 @@ AI-Personal-Assistant/
 │   │   ├── hybrid_search.py     # 混合检索引擎：ChromaDB 向量 + BM25 + RRF 融合
 │   │   ├── simple_mcp_client.py # MCP 协议客户端（SSE 通信）
 │   │   ├── chat_history.py      # 对话历史持久化（JSONL 格式按天存储）
+│   │   ├── feedback_manager.py  # 用户反馈管理（点赞点踩 + 文字反馈）
 │   │   └── trace_context.py     # 请求追踪上下文（日志关联）
 │   │
 │   ├── adapters/                # IM 适配器（插件化，各自独立）
@@ -556,6 +577,7 @@ AI-Personal-Assistant/
 | `core/feishu_doc_manager.py` | 飞书文档同步 + RAG 检索编排 | 修改检索逻辑、文档过滤规则 |
 | `core/hybrid_search.py` | 向量+BM25 混合检索 | 调整检索权重、分块策略 |
 | `core/reply_executor.py` | AI 回复生成 | 修改 prompt 模板、上下文注入方式 |
+| `core/feedback_manager.py` | 用户反馈管理 | 调整反馈记录逻辑、查询接口 |
 | `adapters/feishu_bot.py` | 飞书消息收发 | 适配新版本飞书 API |
 | `providers/anthropic_provider.py` | Claude API 调用 | 切换模型、调整参数 |
 | `webhook_server.py` | Web 服务和 API | 添加新 API 接口 |

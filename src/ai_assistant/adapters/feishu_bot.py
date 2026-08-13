@@ -452,12 +452,25 @@ class FeishuBotAdapter(IMAdapter):
             timestamp=datetime.now()
         )
 
-    def send_reply(self, reply_text: str) -> bool:
+    def send_reply(
+        self,
+        reply_text: str,
+        elapsed_time: Optional[float] = None,
+        tool_rounds: Optional[int] = None,
+        doc_count: Optional[int] = None,
+        mode: Optional[str] = None,
+        record_id: Optional[str] = None,
+    ) -> bool:
         """
         回复消息（使用消息卡片样式，保持消息线程）
 
         Args:
             reply_text: 回复文本
+            elapsed_time: 回复耗时（秒），可选
+            tool_rounds: 工具调用轮数（Agentic 模式），可选
+            doc_count: 阅读文档数量（RAG 模式），可选
+            mode: 处理模式（"agentic" / "rag" / "standard"），可选
+            record_id: 对话历史记录 ID，可选（用于查询已有反馈）
 
         Returns:
             是否成功
@@ -468,6 +481,7 @@ class FeishuBotAdapter(IMAdapter):
 
         try:
             from ai_assistant.utils.feishu_message import FeishuMessageBuilder
+            from ai_assistant.core.feedback_manager import FeedbackManager
 
             token = self.get_tenant_access_token()
             message_id = self.latest_message["message_id"]
@@ -477,8 +491,27 @@ class FeishuBotAdapter(IMAdapter):
             logger.info(f"📤 Sending reply to message_id={message_id}, chat_id={chat_id}")
             logger.debug(f"Reply content: {reply_text[:100]}")
 
-            # 构建卡片（带反馈按钮，message_id 仅用于触发按钮渲染）
-            payload = FeishuMessageBuilder.ai_reply_card(reply_text, message_id="placeholder")
+            # 查询已有的反馈记录（如果提供了 record_id）
+            feedbacks = None
+            if record_id:
+                try:
+                    feedback_mgr = FeedbackManager()
+                    feedbacks = feedback_mgr.get_feedbacks_by_record_id(record_id)
+                    if feedbacks:
+                        logger.info(f"📝 Found {len(feedbacks)} existing feedbacks for record_id={record_id}")
+                except Exception as e:
+                    logger.warning(f"Failed to fetch feedbacks: {e}")
+
+            # 构建卡片（带反馈按钮、元数据和已有反馈）
+            payload = FeishuMessageBuilder.ai_reply_card(
+                reply_text,
+                message_id="placeholder",
+                elapsed_time=elapsed_time,
+                tool_rounds=tool_rounds,
+                doc_count=doc_count,
+                mode=mode,
+                feedbacks=feedbacks,
+            )
             success, new_message_id = FeishuMessageBuilder.send(self.base_url, token, message_id, payload)
 
             # 注：record_id 映射由 main.py 的 _send_feishu_reply 统一处理，
