@@ -294,12 +294,13 @@ class FeishuMessageBuilder:
             note_parts.append(f"🔍 代码排查模式")
             if tool_rounds is not None and tool_rounds > 0:
                 note_parts.append(f"🔧 工具调用: {tool_rounds}轮")
-        elif mode == "rag":
+        else:
+            # 统一为知识库模式（包括 rag 和 standard）
             note_parts.append(f"📚 知识库模式")
             if doc_count is not None and doc_count > 0:
                 note_parts.append(f"📖 阅读文档: {doc_count}篇")
-        else:
-            note_parts.append(f"💬 普通对话模式")
+            else:
+                note_parts.append(f"📖 未检索到相关文档")
 
         builder.add_note(" | ".join(note_parts))
         return builder.build_card()
