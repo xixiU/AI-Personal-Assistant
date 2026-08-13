@@ -660,9 +660,17 @@ class AnthropicProvider(AIProvider):
             )
 
             # 构建 metadata（标准 RAG 模式）
+            # 统计文档数：doc_context 中每个 "## " 开头表示一篇文档
+            doc_count = 0
+            if doc_context:
+                doc_count = doc_context.count("\n## ")
+                # 如果第一行就是 ##，需要额外加1
+                if doc_context.startswith("## "):
+                    doc_count += 1
+
             metadata = {
                 "mode": "rag",
-                "doc_count": doc_context.count("📄") if doc_context else 0,  # 粗略统计文档数
+                "doc_count": doc_count,
             }
 
             return reply, metadata
