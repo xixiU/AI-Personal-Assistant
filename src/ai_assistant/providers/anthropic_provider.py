@@ -31,6 +31,7 @@ class AnthropicProvider(AIProvider):
         model: str = "claude-sonnet-4-20250514",
         base_url: str = None,
         timeout: int = 90,
+        feedback_manager=None,
     ):
         """
         Args:
@@ -38,10 +39,12 @@ class AnthropicProvider(AIProvider):
             model: 模型名称
             base_url: API 基础 URL（可选，用于代理或兼容服务）
             timeout: 请求超时时间（秒）
+            feedback_manager: 反馈管理器实例（可选）
         """
         super().__init__()
         self.model = model
         self.timeout = timeout
+        self.feedback_manager = feedback_manager
 
         # 初始化 Anthropic 客户端
         client_kwargs = {"api_key": api_key, "timeout": timeout}
@@ -308,6 +311,11 @@ class AnthropicProvider(AIProvider):
         if doc_context:
             system_parts.append("")
             system_parts.append(doc_context)
+
+        # 注入负反馈提示
+        feedback_prompt = self._build_feedback_prompt(session_id)
+        if feedback_prompt:
+            system_parts.append(feedback_prompt)
 
         # 注入多仓库描述（帮助 AI 判断该去哪个仓库查）
         if self.repo_manager and len(self.repo_manager.list_repos()) > 1:
@@ -609,6 +617,11 @@ class AnthropicProvider(AIProvider):
                     "- [文档标题](原文链接)"
                 )
 
+            # 注入负反馈提示
+            feedback_prompt = self._build_feedback_prompt(session_id)
+            if feedback_prompt:
+                system_parts.append(feedback_prompt)
+
             system_prompt = "\n\n".join(system_parts)
 
             # 调用 Anthropic API
@@ -668,6 +681,55 @@ class AnthropicProvider(AIProvider):
         except Exception as e:
             logger.warning(f"Anthropic 健康检查失败: {e}")
             return False
+
+    def _build_feedback_prompt(self, session_id: Optional[str]) -> str:
+        """
+        构建负反馈提示文本
+
+        Args:
+            session_id: 会话 ID
+
+        Returns:
+            反馈提示文本，如果没有负反馈则返回空字符串
+        """
+        if not self.feedback_manager or not session_id:
+            return ""
+
+        feedbacks = self.feedback_manager.get_session_negative_feedbacks(session_id, limit=3)
+        if not feedbacks:
+            return ""
+
+        # 提取 record_ids，并用 chat_history 反查原始 query/answer
+        record_ids = [fb.get("record_id") for fb in feedbacks if fb.get("record_id")]
+        if not record_ids or not self._chat_history:
+            return ""
+
+        records = self._chat_history.get_records_by_ids(record_ids)
+
+        lines = ["\n\n【用户反馈提示】", "在本次对话中，用户对你的以下回答表示不满意：", ""]
+
+        injected = 0
+        for fb in feedbacks:
+            record = records.get(fb.get("record_id"))
+            if not record:
+                continue  # 找不到历史记录就跳过
+
+            query = record.get("query", "")
+            answer = record.get("answer", "")
+            lines.append(f"问题：「{query[:100]}」")
+            lines.append(f"你的回答：「{answer[:150]}...」")
+            if fb.get("feedback_text"):
+                lines.append(f"用户反馈：「{fb['feedback_text']}」")
+            lines.append("")
+            injected += 1
+
+        if injected == 0:
+            return ""
+
+        lines.append("请在本次回答中注意改进，提供更准确、更具体的信息。")
+
+        logger.info(f"注入 {injected} 条负反馈到 Prompt")
+        return "\n".join(lines)
 
     def filter_docs_by_relevance(self, query: str, candidates: List[Dict[str, Any]], max_docs: int = 3) -> List[int]:
         """用 Claude 判断候选文档标题与 query 的相关性，返回 0-based 下标列表"""

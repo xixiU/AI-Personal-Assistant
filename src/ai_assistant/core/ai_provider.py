@@ -2,7 +2,7 @@ import json
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from loguru import logger
 from ai_assistant.core.models import Message
 
@@ -154,7 +154,12 @@ class AIProvider(ABC):
         """
         pass
 
-    def call(self, messages: List[Message], session_id: Optional[str] = None, source: str = "unknown") -> str:
+    def call(
+        self,
+        messages: List[Message],
+        session_id: Optional[str] = None,
+        source: str = "unknown",
+    ) -> Tuple[str, Optional[str]]:
         """
         统一入口：记录日志 + 计时 + 调用 send_message + 保存历史
 
@@ -164,6 +169,10 @@ class AIProvider(ABC):
             messages: 消息列表
             session_id: 会话 ID
             source: 提问来源（"feishu", "wechat", "web"）
+
+        Returns:
+            (reply, record_id) 元组。record_id 为本次对话历史记录的唯一标识；
+            当无 chat_history、query 为空或保存失败时为 None。
         """
         provider_name = self.__class__.__name__
         model_name = getattr(self, 'model', 'unknown')
@@ -177,6 +186,7 @@ class AIProvider(ABC):
         logger.info(f"AI 回复完成: {len(reply)} 字符, 耗时={duration:.2f}s")
 
         # 保存对话历史
+        record_id: Optional[str] = None
         if self._chat_history:
             try:
                 # 提取最后一条用户消息作为 query
@@ -186,7 +196,7 @@ class AIProvider(ABC):
                         query = " ".join(c.data for c in msg.content if c.type == "text")
                         break
                 if query:
-                    self._chat_history.save(
+                    record_id = self._chat_history.save(
                         session_id=session_id or "unknown",
                         query=query,
                         answer=reply,
@@ -196,7 +206,7 @@ class AIProvider(ABC):
             except Exception as e:
                 logger.warning(f"保存对话历史失败: {e}")
 
-        return reply
+        return reply, record_id
 
     @abstractmethod
     def check_health(self) -> bool:

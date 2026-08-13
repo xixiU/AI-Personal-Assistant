@@ -68,6 +68,10 @@ class AIAssistant:
             session_timeout=self.config.context_session_timeout
         )
 
+        # 初始化反馈管理器
+        from ai_assistant.core.feedback_manager import FeedbackManager
+        self.feedback_manager = FeedbackManager()
+
         # 初始化 AI Provider
         provider_type = self.config.ai_primary_provider
 
@@ -82,6 +86,7 @@ class AIAssistant:
                 model=self.config.ai_primary_model,
                 base_url=self.config.ai_primary_base_url if self.config.ai_primary_base_url else None,
                 timeout=self.config.ai_timeout,
+                feedback_manager=self.feedback_manager,
             )
         elif provider_type == "dify":
             from ai_assistant.providers.dify_provider import DifyProvider
@@ -401,8 +406,9 @@ class AIAssistant:
 
             # 调用 AI 生成回复
             ai_start = time_mod.time()
+            record_id = None
             try:
-                reply = self.ai_provider.call(context_messages, session_id=session_id, source="feishu")
+                reply, record_id = self.ai_provider.call(context_messages, session_id=session_id, source="feishu")
             except DocIndexingInProgressError:
                 # 文档索引更新中，加入延迟重试队列
                 logger.info(f"文档索引更新中，将消息加入延迟重试队列: session={session_id}")
@@ -422,7 +428,7 @@ class AIAssistant:
 
             # 通过适配器发送回复（使用 message_id 回复具体消息）
             send_start = time_mod.time()
-            self._send_feishu_reply(adapter, message_id, session_id, reply)
+            self._send_feishu_reply(adapter, message_id, session_id, reply, record_id)
             send_duration = time_mod.time() - send_start
 
             # 计算资源使用
@@ -581,22 +587,32 @@ class AIAssistant:
             logger.error(f"Failed to parse feishu event: {e}")
             return None
 
-    def _send_feishu_reply(self, adapter, message_id: str, chat_id: str, reply_text: str):
+    def _send_feishu_reply(self, adapter, message_id: str, chat_id: str, reply_text: str, record_id: Optional[str] = None):
         """
-        通过飞书适配器发送回复（使用消息卡片样式，支持 Markdown）
+        通过飞书适配器发送回复（使用消息卡片样式，支持 Markdown，带反馈按钮）
+
+        这是飞书 webhook 的真实回复路径。发送带反馈按钮的卡片后，将新消息 ID
+        与本次对话历史的 record_id 建立映射，供后续反馈按钮点击时反查。
 
         Args:
             adapter: 飞书适配器实例
             message_id: 要回复的消息 ID
             chat_id: 聊天 ID
             reply_text: 回复文本
+            record_id: 本次对话历史记录的唯一标识（用于反馈按钮回填）
         """
         from ai_assistant.utils.feishu_message import FeishuMessageBuilder
 
         try:
             token = adapter.get_tenant_access_token()
-            payload = FeishuMessageBuilder.ai_reply_card(reply_text)
-            FeishuMessageBuilder.send(adapter.base_url, token, message_id, payload)
+            # 带反馈按钮的卡片（message_id 仅用于触发按钮渲染，实际映射走 record_id）
+            payload = FeishuMessageBuilder.ai_reply_card(reply_text, message_id="placeholder")
+            success, new_message_id = FeishuMessageBuilder.send(adapter.base_url, token, message_id, payload)
+
+            # 发送成功且有 record_id 时，缓存 新消息ID → record_id 映射
+            if success and new_message_id and record_id:
+                if hasattr(adapter, "cache_message_record"):
+                    adapter.cache_message_record(new_message_id, record_id)
         except Exception as e:
             logger.error(f"Error sending feishu reply: {e}")
 
@@ -860,8 +876,9 @@ class AIAssistant:
             else:
                 source = "unknown"
 
+            record_id = None
             try:
-                reply = self.ai_provider.call(context_messages, session_id=session_id, source=source)
+                reply, record_id = self.ai_provider.call(context_messages, session_id=session_id, source=source)
             except DocIndexingInProgressError:
                 # 文档索引更新中，直接返回提示（Web/微信不支持自动重试）
                 logger.info(f"文档索引更新中: session={session_id}, source={source}")
@@ -877,10 +894,17 @@ class AIAssistant:
 
             # 执行回复（adapter_class_name 已在上面获取）
             if adapter_class_name == "FeishuBotAdapter":
-                if adapter.send_reply(reply):
+                # 统一走 _send_feishu_reply，带反馈按钮 + record_id 映射
+                # （注：飞书为 webhook 驱动，此轮询分支实际不会命中，仅保证一致性）
+                latest = getattr(adapter, "latest_message", None)
+                if latest and latest.get("message_id"):
+                    self._send_feishu_reply(
+                        adapter, latest["message_id"], session_id, reply, record_id
+                    )
+                    adapter.clear_latest_event()
                     logger.info("Reply sent via Feishu Bot API successfully")
                 else:
-                    logger.error("Failed to send reply via Feishu Bot API")
+                    logger.error("Failed to send reply via Feishu Bot API: no latest_message")
             elif adapter_class_name == "WeChatAdapter":
                 if adapter.send_message(reply):
                     logger.info("Reply sent to WeChat successfully")

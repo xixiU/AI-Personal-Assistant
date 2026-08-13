@@ -448,6 +448,29 @@
             30% { transform: translateY(-8px); }
         }
 
+        /* 消息反馈按钮 */
+        .message-feedback {
+            display: flex;
+            gap: 8px;
+            margin-top: 12px;
+            justify-content: flex-end;
+        }
+
+        .feedback-btn {
+            padding: 4px 12px;
+            font-size: 13px;
+            border: 1px solid #e2e8f0;
+            border-radius: 6px;
+            background: transparent;
+            color: #64748b;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .feedback-btn:hover { background: #f1f5f9; color: #334155; }
+        .feedback-btn.active { background: #e2e8f0; color: #94a3b8; cursor: not-allowed; }
+        .feedback-status { font-size: 12px; color: #94a3b8; line-height: 28px; }
+
         /* 响应式 */
         @media (max-width: 768px) {
             .sidebar { display: none; }
@@ -632,13 +655,13 @@
                 welcomeArea.style.display = 'none';
                 isFirstMessage = false;
                 conv.messages.forEach(msg => {
-                    appendMessageDOM(msg.role, msg.content, msg.imageUrl);
+                    appendMessageDOM(msg.role, msg.content, msg.imageUrl, msg.recordId);
                 });
             }
             chatMessages.scrollTop = chatMessages.scrollHeight;
         }
 
-        function appendMessageDOM(role, content, imageUrl) {
+        function appendMessageDOM(role, content, imageUrl, recordId) {
             const msg = document.createElement('div');
             msg.className = `message ${role}`;
 
@@ -682,17 +705,36 @@
 
             contentEl.innerHTML = html;
             body.appendChild(contentEl);
+
+            // 为 AI 消息添加反馈按钮（需有 record_id 才能关联反馈）
+            if (role === 'assistant' && recordId) {
+                const feedbackDiv = document.createElement('div');
+                feedbackDiv.className = 'message-feedback';
+                feedbackDiv.innerHTML = `
+                    <button class="feedback-btn like" data-record-id="${recordId}">
+                        👍 赞同
+                    </button>
+                    <button class="feedback-btn dislike" data-record-id="${recordId}">
+                        👎 不准确
+                    </button>
+                    <span class="feedback-status"></span>
+                `;
+                body.appendChild(feedbackDiv);
+            }
+
             msg.appendChild(avatar);
             msg.appendChild(body);
             messagesInner.appendChild(msg);
         }
 
-        function addMessage(role, content, imageUrl) {
+        function addMessage(role, content, imageUrl, recordId) {
             if (isFirstMessage) {
                 welcomeArea.style.display = 'none';
                 isFirstMessage = false;
             }
-            appendMessageDOM(role, content, imageUrl);
+
+            // record_id 来自后端 chat_history 记录主键（仅 AI 消息有）
+            appendMessageDOM(role, content, imageUrl, recordId || null);
             chatMessages.scrollTop = chatMessages.scrollHeight;
 
             // 保存到当前对话
@@ -702,7 +744,8 @@
                 conv.messages.push({
                     role,
                     content,
-                    imageUrl: imageUrl ? '[图片]' : null
+                    imageUrl: imageUrl ? '[图片]' : null,
+                    recordId: recordId || null
                 });
                 // 用第一条用户消息作为对话标题
                 if (role === 'user' && conv.title === '新对话') {
@@ -851,7 +894,8 @@
                     throw new Error(err.error || '请求失败');
                 }
                 const data = await resp.json();
-                addMessage('assistant', data.reply);
+                // record_id 由后端返回，用于关联反馈（可能为 null）
+                addMessage('assistant', data.reply, null, data.record_id);
             } catch (err) {
                 hideTyping();
                 showError(err.message);
@@ -869,6 +913,91 @@
                 sendMessage();
             }
         });
+
+        // 反馈按钮事件监听
+        document.addEventListener('click', async (e) => {
+            if (e.target.classList.contains('like')) {
+                const recordId = e.target.dataset.recordId;
+                const btn = e.target;
+                const statusEl = btn.parentElement.querySelector('.feedback-status');
+
+                btn.classList.add('active');
+                btn.disabled = true;
+                statusEl.textContent = '提交中...';
+
+                const success = await submitFeedback(recordId, 'like', '');
+                if (success) {
+                    statusEl.textContent = '感谢反馈！';
+                    // 禁用另一个按钮
+                    const dislikeBtn = btn.parentElement.querySelector('.dislike');
+                    if (dislikeBtn) {
+                        dislikeBtn.disabled = true;
+                        dislikeBtn.classList.add('active');
+                    }
+                } else {
+                    btn.classList.remove('active');
+                    btn.disabled = false;
+                    statusEl.textContent = '';
+                }
+            } else if (e.target.classList.contains('dislike')) {
+                const recordId = e.target.dataset.recordId;
+                const btn = e.target;
+                const statusEl = btn.parentElement.querySelector('.feedback-status');
+
+                const feedbackText = prompt('请描述哪里不准确（可选）：');
+                if (feedbackText !== null) {  // 用户未取消
+                    btn.classList.add('active');
+                    btn.disabled = true;
+                    statusEl.textContent = '提交中...';
+
+                    const success = await submitFeedback(recordId, 'dislike', feedbackText);
+                    if (success) {
+                        statusEl.textContent = '感谢反馈！';
+                        // 禁用另一个按钮
+                        const likeBtn = btn.parentElement.querySelector('.like');
+                        if (likeBtn) {
+                            likeBtn.disabled = true;
+                            likeBtn.classList.add('active');
+                        }
+                    } else {
+                        btn.classList.remove('active');
+                        btn.disabled = false;
+                        statusEl.textContent = '';
+                    }
+                }
+            }
+        });
+
+        // 提交反馈到后端
+        async function submitFeedback(recordId, type, text) {
+            try {
+                if (!recordId) {
+                    showError('该消息暂不支持反馈');
+                    return false;
+                }
+
+                const resp = await fetch('/api/feedback', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        session_id: currentConvId,
+                        record_id: recordId,
+                        feedback_type: type,
+                        feedback_text: text
+                    })
+                });
+
+                if (!resp.ok) {
+                    const err = await resp.json();
+                    throw new Error(err.error || '反馈提交失败');
+                }
+
+                return true;
+            } catch (err) {
+                showError(err.message);
+                return false;
+            }
+        }
 
         chatInput.focus();
     </script>

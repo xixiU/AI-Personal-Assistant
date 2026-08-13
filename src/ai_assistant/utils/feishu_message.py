@@ -58,6 +58,35 @@ class FeishuMessageBuilder:
         })
         return self
 
+    def add_feedback_buttons(self, message_id: str = None) -> "FeishuMessageBuilder":
+        """
+        添加反馈按钮（赞同/不准确）
+
+        Args:
+            message_id: 消息 ID（已废弃，保留参数向后兼容）
+
+        Returns:
+            self，支持链式调用
+        """
+        self._elements.append({
+            "tag": "action",
+            "actions": [
+                {
+                    "tag": "button",
+                    "text": {"tag": "plain_text", "content": "👍 赞同"},
+                    "type": "default",
+                    "value": {"feedback_type": "like"}
+                },
+                {
+                    "tag": "button",
+                    "text": {"tag": "plain_text", "content": "👎 不准确"},
+                    "type": "default",
+                    "value": {"feedback_type": "dislike"}
+                }
+            ]
+        })
+        return self
+
     def build_card(self) -> dict:
         """构建消息卡片 payload"""
         card = {
@@ -189,7 +218,13 @@ class FeishuMessageBuilder:
         return result
 
     @classmethod
-    def ai_reply_card(cls, reply_text: str, title: str = "🤖 AI 助手回复", template: str = "blue") -> dict:
+    def ai_reply_card(
+        cls,
+        reply_text: str,
+        title: str = "🤖 AI 助手回复",
+        template: str = "blue",
+        message_id: Optional[str] = None
+    ) -> dict:
         """
         快捷方法：构建标准 AI 回复卡片
 
@@ -197,6 +232,7 @@ class FeishuMessageBuilder:
             reply_text: AI 回复内容（支持 Markdown）
             title: 卡片标题
             template: 卡片头部颜色
+            message_id: 消息 ID，如果提供则自动添加反馈按钮
 
         Returns:
             可直接用于飞书 API 的 payload dict
@@ -207,6 +243,11 @@ class FeishuMessageBuilder:
         builder = cls(title=title, template=template)
         builder.add_markdown(converted_text)
         builder.add_hr()
+
+        # 添加反馈按钮（如果提供了 message_id）
+        if message_id:
+            builder.add_feedback_buttons(message_id)
+
         builder.add_note(f"⏱️ 生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         return builder.build_card()
 
@@ -217,7 +258,7 @@ class FeishuMessageBuilder:
         message_id: str,
         payload: dict,
         timeout: int = 10,
-    ) -> bool:
+    ) -> tuple[bool, Optional[str]]:
         """
         发送消息（reply 接口）
 
@@ -229,7 +270,7 @@ class FeishuMessageBuilder:
             timeout: 请求超时
 
         Returns:
-            是否发送成功
+            (是否发送成功, 新消息的 message_id)
         """
         url = f"{base_url}/open-apis/im/v1/messages/{message_id}/reply"
         headers = {
@@ -243,11 +284,12 @@ class FeishuMessageBuilder:
             result = response.json()
 
             if result.get("code") == 0:
-                logger.info(f"Reply sent successfully to message {message_id}")
-                return True
+                new_message_id = result.get("data", {}).get("message_id")
+                logger.info(f"Reply sent successfully to message {message_id}, new_message_id={new_message_id}")
+                return True, new_message_id
             else:
                 logger.error(f"Failed to send reply: code={result.get('code')}, msg={result.get('msg')}")
-                return False
+                return False, None
         except Exception as e:
             logger.error(f"Error sending feishu reply: {e}")
-            return False
+            return False, None

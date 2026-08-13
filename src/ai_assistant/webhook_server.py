@@ -8,6 +8,7 @@ from flask import Flask, request, jsonify, send_from_directory
 from loguru import logger
 from typing import Optional
 import os
+from ai_assistant.core.feedback_manager import FeedbackManager
 
 
 class WebhookServer:
@@ -30,6 +31,9 @@ class WebhookServer:
 
         # 静态文件目录（src/ai_assistant/static/）
         self.static_dir = os.path.join(os.path.dirname(__file__), "static")
+
+        # 初始化 FeedbackManager
+        self.feedback_manager = FeedbackManager()
 
         # 注册路由
         self.app.add_url_rule(
@@ -57,6 +61,20 @@ class WebhookServer:
             "/api/chat",
             "chat",
             self.handle_chat,
+            methods=["POST"]
+        )
+
+        self.app.add_url_rule(
+            "/api/feedback",
+            "feedback",
+            self.handle_feedback,
+            methods=["POST"]
+        )
+
+        self.app.add_url_rule(
+            "/webhook/feishu/card",
+            "feishu_card",
+            self.handle_feishu_card,
             methods=["POST"]
         )
 
@@ -126,12 +144,26 @@ class WebhookServer:
                                 f"event_type={decrypted_data.get('header', {}).get('event_type')}")
                 except Exception as e:
                     logger.error(f"Failed to decrypt webhook for type check: {e}")
+                    # 解密失败也要返回 200 避免飞书重试
+                    return jsonify({}), 200
 
             # URL 验证请求需要立即返回 challenge（不放入队列）
             if decrypted_data.get("type") == "url_verification":
                 challenge = decrypted_data.get("challenge", "")
                 logger.info(f"✅ URL verification: returning challenge={challenge}")
                 return jsonify({"challenge": challenge}), 200
+
+            # 卡片交互事件需要同步处理并返回响应体（不能异步）
+            event_type = decrypted_data.get("header", {}).get("event_type", "")
+            if event_type == "card.action.trigger":
+                logger.info(f"📝 Card action trigger, processing synchronously")
+                if self.feishu_adapter:
+                    response_body = self.feishu_adapter.process_card_action(decrypted_data) or {}
+                    logger.info(f"Card action response: {response_body}")
+                    return jsonify(response_body), 200
+                else:
+                    logger.error("Feishu adapter not set")
+                    return jsonify({}), 200
 
             # 将原始事件数据放入队列，由后台线程异步处理
             if self.event_queue:
@@ -179,7 +211,8 @@ class WebhookServer:
         响应格式：
         {
             "reply": "AI 回复",
-            "session_id": "会话ID"
+            "session_id": "会话ID",
+            "record_id": "对话历史记录主键（用于关联反馈）"
         }
         """
         from ai_assistant.core.models import Message, Content
@@ -219,8 +252,8 @@ class WebhookServer:
             # 获取上下文消息
             context_messages = self.context_manager.get_context(session_id)
 
-            # 调用 AI 生成回复
-            reply = self.ai_provider.call(context_messages, session_id=session_id, source="web")
+            # 调用 AI 生成回复（返回回复文本 + chat_history 记录主键）
+            reply, record_id = self.ai_provider.call(context_messages, session_id=session_id, source="web")
 
             # 将 AI 回复添加到上下文
             ai_message = Message(
@@ -232,12 +265,127 @@ class WebhookServer:
 
             return jsonify({
                 "reply": reply,
-                "session_id": session_id
+                "session_id": session_id,
+                "record_id": record_id
             }), 200
 
         except Exception as e:
             logger.error(f"Error handling chat request: {e}")
             return jsonify({"error": str(e)}), 500
+
+    def handle_feishu_card(self):
+        """
+        处理飞书卡片交互事件（按钮点击）
+
+        处理 card.action.trigger 事件，提取反馈信息并调用 feishu_bot 的处理方法
+        """
+        try:
+            data = request.get_json()
+            if not data:
+                logger.warning("Empty card action data received")
+                return jsonify({}), 200
+
+            logger.info(f"📨 Card action received: {data}")
+
+            # 如果配置了加密，先解密
+            if self.feishu_adapter and self.feishu_adapter.encrypt_key and "encrypt" in data:
+                try:
+                    data = self.feishu_adapter._decrypt(data["encrypt"])
+                    logger.info("Card action decrypted successfully")
+                except Exception as e:
+                    logger.error(f"Failed to decrypt card action: {e}")
+                    return jsonify({}), 200
+
+            # 验证事件类型
+            event_type = data.get("header", {}).get("event_type", "")
+            if event_type != "card.action.trigger":
+                logger.warning(f"Unexpected event type: {event_type}")
+                return jsonify({}), 200
+
+            # 调用 feishu_bot 处理卡片交互，拿到响应体（toast 或表单卡片）
+            if self.feishu_adapter:
+                response_body = self.feishu_adapter.process_card_action(data) or {}
+            else:
+                logger.error("Feishu adapter not set")
+                response_body = {}
+
+            # 返回响应体给飞书（toast 提示 / 表单卡片 / 空 dict）
+            return jsonify(response_body), 200
+
+        except Exception as e:
+            logger.error(f"Error handling card action: {e}", exc_info=True)
+            return jsonify({}), 200
+
+    def handle_feedback(self):
+        """
+        处理 Web 端反馈提交
+
+        请求格式：
+        {
+            "session_id": "xxx",
+            "record_id": "chat_history 记录主键",
+            "feedback_type": "like|dislike",
+            "feedback_text": "用户反馈文字（可选）"
+        }
+
+        响应格式：
+        {
+            "success": true,
+            "feedback_id": "uuid"
+        }
+        """
+        try:
+            data = request.get_json()
+            if not data:
+                return jsonify({"error": "Empty request"}), 400
+
+            # 提取必填字段
+            session_id = data.get("session_id")
+            record_id = data.get("record_id")
+            feedback_type = data.get("feedback_type")
+
+            # 验证必填字段
+            required_fields = {
+                "session_id": session_id,
+                "record_id": record_id,
+                "feedback_type": feedback_type,
+            }
+
+            for field_name, field_value in required_fields.items():
+                if not field_value:
+                    return jsonify({"error": f"Missing required field: {field_name}"}), 400
+
+            # 验证 feedback_type 枚举值
+            if feedback_type not in ["like", "dislike"]:
+                return jsonify({"error": f"Invalid feedback_type: {feedback_type}, must be 'like' or 'dislike'"}), 400
+
+            # 提取可选字段
+            feedback_text = data.get("feedback_text")
+
+            # 调用 FeedbackManager 保存反馈
+            feedback_id = self.feedback_manager.save_feedback(
+                record_id=record_id,
+                session_id=session_id,
+                source="web",
+                feedback_type=feedback_type,
+                feedback_text=feedback_text if feedback_text else None
+            )
+
+            logger.info(f"Web 反馈提交: session={session_id}, type={feedback_type}, feedback_id={feedback_id}")
+
+            return jsonify({
+                "success": True,
+                "feedback_id": feedback_id
+            }), 200
+
+        except ValueError as e:
+            # FeedbackManager 参数验证失败
+            logger.warning(f"反馈参数验证失败: {e}")
+            return jsonify({"error": str(e)}), 400
+        except Exception as e:
+            # 其他异常
+            logger.error(f"处理反馈请求失败: {e}", exc_info=True)
+            return jsonify({"error": "Internal server error"}), 500
 
     def run(self, debug: bool = False):
         """启动服务器（开发模式，使用 Flask 内置服务器）"""

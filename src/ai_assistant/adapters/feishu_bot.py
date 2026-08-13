@@ -8,6 +8,7 @@ import time
 import base64
 import hashlib
 import hmac
+import threading
 import requests
 from typing import List, Optional, Dict, Any
 from datetime import datetime
@@ -45,6 +46,30 @@ class FeishuBotAdapter(IMAdapter):
 
         # 欢迎消息配置
         self.welcome_message = config.get("welcome_message", "")
+
+        # Context Manager 引用（由外部设置）
+        self.context_manager = None
+
+        # 消息映射缓存（飞书 message_id -> chat_history record_id）
+        # 供反馈按钮点击时反查对应的对话历史记录主键
+        self.message_cache: Dict[str, str] = {}
+        self._cache_lock = threading.Lock()
+
+    def cache_message_record(self, message_id: str, record_id: str):
+        """
+        缓存飞书消息 ID 到 record_id 的映射
+
+        由 main.py 在发送回复卡片成功后调用，建立
+        新消息 message_id → 对话历史 record_id 的映射，
+        供 process_card_action 在用户点击反馈按钮时反查。
+
+        Args:
+            message_id: 飞书回复消息的 message_id
+            record_id: 对话历史记录的唯一标识
+        """
+        with self._cache_lock:
+            self.message_cache[message_id] = record_id
+            logger.debug(f"Cached mapping: message_id={message_id} → record_id={record_id}")
 
     def add_reaction(self, message_id: str, emoji_type: str = "THINKING") -> bool:
         """
@@ -447,13 +472,17 @@ class FeishuBotAdapter(IMAdapter):
             token = self.get_tenant_access_token()
             message_id = self.latest_message["message_id"]
             chat_id = self.latest_message.get("chat_id", "")
+            user_query = self.latest_message.get("text", "")
 
             logger.info(f"📤 Sending reply to message_id={message_id}, chat_id={chat_id}")
             logger.debug(f"Reply content: {reply_text[:100]}")
 
-            payload = FeishuMessageBuilder.ai_reply_card(reply_text)
-            success = FeishuMessageBuilder.send(self.base_url, token, message_id, payload)
+            # 构建卡片（带反馈按钮，message_id 仅用于触发按钮渲染）
+            payload = FeishuMessageBuilder.ai_reply_card(reply_text, message_id="placeholder")
+            success, new_message_id = FeishuMessageBuilder.send(self.base_url, token, message_id, payload)
 
+            # 注：record_id 映射由 main.py 的 _send_feishu_reply 统一处理，
+            # 此处不再缓存 record_id（此方法为轮询兼容路径，飞书 webhook 不走）
             if success:
                 self.latest_event = None
                 self.latest_message = None
@@ -467,6 +496,207 @@ class FeishuBotAdapter(IMAdapter):
         """清除最新事件（处理完成后调用）"""
         self.latest_event = None
         self.latest_message = None
+
+    def process_card_action(self, event_data: dict) -> dict:
+        """
+        处理飞书卡片交互事件（按钮点击），返回卡片交互响应体
+
+        Args:
+            event_data: 卡片交互事件数据
+
+        Returns:
+            响应体 dict，由 webhook 返回给飞书。可能是：
+            - toast 提示：{"toast": {"type": "success", "content": "..."}}
+            - 表单卡片：{"card": {"type": "raw", "data": {...}}}
+            - 空 dict {}（无需响应时）
+
+        处理流程：
+        1. 表单提交（action=submit_dislike_feedback）：解析文字 → 存反馈 → 返回 toast
+        2. 点赞：反查 record_id → 存反馈 → 返回 toast
+        3. 首次点踩：反查 record_id → 返回带输入框的表单卡片，引导用户填写文字反馈
+
+        注意：返回 card 会替换掉用户点击的那张卡片（飞书回调更新机制）。
+        """
+        try:
+            event = event_data.get("event", {})
+            action = event.get("action", {})
+            context = event.get("context", {})
+
+            # 提取关键信息
+            action_value = action.get("value", {})
+            feedback_type = action_value.get("feedback_type", "")
+
+            # message_id 从事件上下文获取（被点击的消息 ID）
+            message_id = context.get("open_message_id", "")
+            user_id = event.get("operator", {}).get("open_id", "")
+            chat_id = context.get("open_chat_id", "")
+
+            logger.info(f"📝 Card action: type={feedback_type}, message_id={message_id}, "
+                       f"user={user_id}, chat={chat_id}")
+
+            from ai_assistant.core.feedback_manager import FeedbackManager
+            feedback_mgr = FeedbackManager()
+
+            # ===== 分支 1: 点踩表单提交 =====
+            # record_id 由表单按钮 value 携带回来，不依赖 message_cache（更稳）
+            if action_value.get("action") == "submit_dislike_feedback":
+                record_id = action_value.get("record_id")
+                if not record_id:
+                    logger.warning("⚠️ submit_dislike_feedback missing record_id")
+                    return {"toast": {"type": "error", "content": "暂无法提交反馈，请稍后再试"}}
+
+                # 从表单解析用户填写的文字（飞书 form 提交事件的 form_value，键为 input 的 name）
+                form_value = action.get("form_value", {}) or {}
+                feedback_text = form_value.get("feedback_text", "") or ""
+
+                feedback_id = feedback_mgr.save_feedback(
+                    record_id=record_id,
+                    session_id=chat_id,
+                    source="feishu",
+                    feedback_type="dislike",
+                    feedback_text=feedback_text
+                )
+                logger.info(f"✅ Dislike feedback with text saved: {feedback_id}, "
+                            f"text_len={len(feedback_text)}")
+                return {"toast": {"type": "success", "content": "👎 感谢您的详细反馈！"}}
+
+            # ===== 分支 2/3: 首次点赞 / 点踩 =====
+            if not feedback_type or not message_id:
+                logger.warning("Missing feedback_type or message_id in card action")
+                return {}
+
+            # 用飞书 message_id 反查对话历史 record_id
+            with self._cache_lock:
+                record_id = self.message_cache.get(message_id)
+
+            if not record_id:
+                logger.warning(f"⚠️ record_id not found in cache for message_id={message_id}")
+                return {"toast": {"type": "error", "content": "暂无法提交反馈，请稍后再试"}}
+
+            logger.info(f"✅ Found record_id={record_id} for message_id={message_id}")
+
+            if feedback_type == "like":
+                # 点赞：保存反馈 + 返回 toast 确认
+                feedback_id = feedback_mgr.save_feedback(
+                    record_id=record_id,
+                    session_id=chat_id,
+                    source="feishu",
+                    feedback_type="like"
+                )
+                logger.info(f"✅ Like feedback saved: {feedback_id}")
+                return {"toast": {"type": "success", "content": "👍 感谢您的反馈！"}}
+
+            elif feedback_type == "dislike":
+                # 首次点踩：返回表单卡片，引导用户填写文字反馈
+                # record_id 塞进表单按钮 value，提交时带回来
+                logger.info(f"📝 Returning dislike feedback form for record_id={record_id}")
+                return self._build_dislike_feedback_form(record_id)
+
+            return {}
+
+        except Exception as e:
+            logger.error(f"Error processing card action: {e}", exc_info=True)
+            return {}
+
+    def _build_dislike_feedback_form(self, record_id: str) -> dict:
+        """
+        构建点踩后的文字反馈表单卡片响应体
+
+        Args:
+            record_id: 关联的对话历史记录主键，塞进提交按钮 value 携带回来
+
+        Returns:
+            飞书卡片交互响应体（含 input 输入框的 form 卡片）
+
+        注意：私有化飞书（如 open.xfchat.iflytek.com）若不支持 form/input 组件，
+        飞书会忽略该响应或渲染异常，此时用户仍可看到已记录的点踩（提交前 record_id
+        尚未落库）。降级策略见 dislike 分支——不影响点踩本身的采集流程。
+        """
+        return {
+            "card": {
+                "type": "raw",
+                "data": {
+                    "config": {"wide_screen_mode": True},
+                    "header": {
+                        "template": "orange",
+                        "title": {
+                            "tag": "plain_text",
+                            "content": "📝 请告诉我们哪里不准确"
+                        }
+                    },
+                    "elements": [
+                        {
+                            "tag": "form",
+                            "name": "dislike_feedback_form",
+                            "elements": [
+                                {
+                                    "tag": "input",
+                                    "name": "feedback_text",
+                                    "placeholder": {
+                                        "tag": "plain_text",
+                                        "content": "请描述问题（选填，直接点提交也可）"
+                                    },
+                                    "max_length": 500
+                                },
+                                {
+                                    "tag": "button",
+                                    "text": {"tag": "plain_text", "content": "提交"},
+                                    "type": "primary",
+                                    "action_type": "form_submit",
+                                    "name": "submit_btn",
+                                    "value": {
+                                        "feedback_type": "dislike",
+                                        "action": "submit_dislike_feedback",
+                                        "record_id": record_id
+                                    }
+                                }
+                            ]
+                        }
+                    ]
+                }
+            }
+        }
+
+    def _send_ephemeral_message(self, user_id: str, chat_id: str, text: str) -> bool:
+        """
+        发送临时消息（ephemeral message，仅发送者可见）
+
+        Args:
+            user_id: 用户 open_id
+            chat_id: 会话 ID
+            text: 消息文本
+
+        Returns:
+            是否成功
+        """
+        try:
+            token = self.get_tenant_access_token()
+            url = f"{self.base_url}/open-apis/im/v1/messages"
+            headers = {
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json"
+            }
+            params = {"receive_id_type": "open_id"}
+            payload = {
+                "receive_id": user_id,
+                "msg_type": "text",
+                "content": json.dumps({"text": text})
+            }
+
+            logger.debug(f"Sending ephemeral message to user={user_id}")
+            response = requests.post(url, headers=headers, json=payload, params=params, timeout=10)
+            response.raise_for_status()
+
+            result = response.json()
+            if result.get("code") == 0:
+                logger.info(f"Ephemeral message sent successfully")
+                return True
+            else:
+                logger.warning(f"Failed to send ephemeral message: {result.get('msg')}")
+                return False
+        except Exception as e:
+            logger.error(f"Error sending ephemeral message: {e}")
+            return False
 
     def _send_welcome_message(self, chat_id: str):
         """
