@@ -57,16 +57,22 @@ class GitTools:
                 capture_output=True,
                 text=True,
                 timeout=timeout,
-                check=True,
+                check=False,  # 不自动抛异常，让调用者处理退出码
                 encoding='utf-8',
                 errors='replace'  # 替换无法解码的字符，避免崩溃
             )
+            # 检查退出码，但 grep 的1（没匹配）不算错误
+            if result.returncode != 0:
+                # git grep 返回1表示没匹配，属于正常情况
+                if args[0] == "grep" and result.returncode == 1:
+                    return ""  # 返回空字符串表示没结果
+                # 其他非0退出码才是真正的错误
+                if result.returncode != 0:
+                    logger.error(f"Git 命令失败: {' '.join(args)}, returncode={result.returncode}, stderr={result.stderr}")
+                    raise subprocess.CalledProcessError(result.returncode, ["git"] + args, result.stdout, result.stderr)
             return result.stdout
         except subprocess.TimeoutExpired as e:
             logger.error(f"Git 命令超时: {' '.join(args)}")
-            raise
-        except subprocess.CalledProcessError as e:
-            logger.error(f"Git 命令失败: {' '.join(args)}, stderr={e.stderr}")
             raise
 
     def _validate_ref(self, ref: str) -> bool:
