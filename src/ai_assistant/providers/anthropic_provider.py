@@ -343,7 +343,6 @@ class AnthropicProvider(AIProvider):
 
         # 智能搜索失败检测
         search_fail_count = 0
-        last_5_tools = []
         repo_switch_count = 0
 
         while True:
@@ -489,14 +488,6 @@ class AnthropicProvider(AIProvider):
                                 repo_switch_count += 1
                                 if repo_switch_count >= 3:
                                     logger.warning(f"⚠️ 第{repo_switch_count}次切换仓库，性能损耗较大")
-
-                            # 3. 检测重复工具调用（可能陷入循环）
-                            last_5_tools.append(tool_name)
-                            if len(last_5_tools) > 5:
-                                last_5_tools.pop(0)
-                            if len(last_5_tools) == 5 and len(set(last_5_tools)) == 1:
-                                logger.warning(f"⚠️ 检测到连续5次调用 {tool_name}，可能陷入循环")
-                                last_5_tools.clear()  # 清空避免重复日志
 
                         except Exception as e:
                             logger.error(f"工具 {tool_name} 执行失败: {e}")
