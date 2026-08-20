@@ -434,20 +434,14 @@ class AnthropicProvider(AIProvider):
                         })
                         logger.debug(f"工具 {tool_name} 结果: {result}")
 
-                        # === 智能检测逻辑 ===
+                        # === 智能检测逻辑（仅监控，不注入额外消息避免API错误）===
                         # 1. 检测连续搜索失败
                         if tool_name == "search_code":
                             if isinstance(result, dict) and (not result.get("results") or len(result.get("results", [])) == 0):
                                 search_fail_count += 1
                                 if search_fail_count >= 3:
-                                    logger.warning(f"⚠️ 连续{search_fail_count}次搜索失败，注入策略提示")
-                                    # 注入优化建议
-                                    tool_results.append({
-                                        "type": "tool_result",
-                                        "tool_use_id": tool_use.id + "_hint",
-                                        "content": "💡 提示：连续搜索失败。建议策略：1) 尝试搜索相关的函数名/API路径而非UI文本；2) 使用 list_dir 浏览目录结构；3) 直接 read_file 查看相关文件"
-                                    })
-                                    search_fail_count = 0  # 重置避免重复提示
+                                    logger.warning(f"⚠️ 连续{search_fail_count}次搜索失败，AI可能需要调整策略")
+                                    search_fail_count = 0  # 重置避免重复日志
                             else:
                                 search_fail_count = 0  # 搜索成功，重置计数
 
@@ -463,12 +457,7 @@ class AnthropicProvider(AIProvider):
                             last_5_tools.pop(0)
                         if len(last_5_tools) == 5 and len(set(last_5_tools)) == 1:
                             logger.warning(f"⚠️ 检测到连续5次调用 {tool_name}，可能陷入循环")
-                            tool_results.append({
-                                "type": "tool_result",
-                                "tool_use_id": tool_use.id + "_loop_hint",
-                                "content": f"💡 提示：你最近连续5次使用 {tool_name}，请尝试不同的方法或基于现有信息给出结论"
-                            })
-                            last_5_tools.clear()  # 清空避免重复提示
+                            last_5_tools.clear()  # 清空避免重复日志
 
                     except Exception as e:
                         logger.error(f"工具 {tool_name} 执行失败: {e}")
@@ -490,6 +479,16 @@ class AnthropicProvider(AIProvider):
                 return "🔌 AI 服务连接失败，请检查网络或稍后重试", {"mode": "agentic", "error": "connection"}
             except anthropic.APIStatusError as e:
                 logger.error(f"Anthropic API 错误: status={e.status_code}, message={e.message}")
+
+                # 400错误通常是请求格式问题，可能是tool_result错误，尝试移除最后一轮并继续
+                if e.status_code == 400 and "tool_result" in str(e.message).lower() and round_num > 1:
+                    logger.warning(f"检测到tool_result错误，回退到上一轮并继续（当前轮次: {round_num}）")
+                    # 移除最后一轮的assistant+user消息（tool_use和tool_result）
+                    if len(api_messages) >= 2:
+                        api_messages = api_messages[:-2]
+                        logger.info(f"已回退，当前消息数: {len(api_messages)}")
+                        continue  # 重试当前轮次
+
                 return f"❌ AI 服务调用失败: {e.message}", {"mode": "agentic", "error": "api"}
             except Exception as e:
                 logger.error(f"Agentic 循环异常: {e}", exc_info=True)
