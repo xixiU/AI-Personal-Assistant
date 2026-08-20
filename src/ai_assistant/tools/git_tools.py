@@ -7,6 +7,7 @@ Git 只读代码工具
 
 import subprocess
 import os
+import re
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 from loguru import logger
@@ -56,7 +57,9 @@ class GitTools:
                 capture_output=True,
                 text=True,
                 timeout=timeout,
-                check=True
+                check=True,
+                encoding='utf-8',
+                errors='replace'  # 替换无法解码的字符，避免崩溃
             )
             return result.stdout
         except subprocess.TimeoutExpired as e:
@@ -164,12 +167,25 @@ class GitTools:
             return {"error": f"无效的 ref: {ref}", "results": []}
 
         try:
-            args = ["grep", "-n", "-i", query, ref]  # -n 显示行号，-i 忽略大小写
+            # 检测中文或特殊字符
+            has_chinese = bool(re.search(r'[一-鿿]', query))
+            has_special_chars = bool(re.search(r'[()[\]{}*+?|\\^$.]', query))
+
+            # 使用固定字符串搜索避免正则转义问题
+            if has_chinese or has_special_chars:
+                args = ["grep", "-F", "-n", "-i", query, ref]  # -F: 固定字符串
+            else:
+                args = ["grep", "-n", "-i", query, ref]  # 标准搜索
+
             if path_filter:
                 args.append("--")
                 args.append(path_filter)
 
             output = self._run_git_command(args)
+            if output is None:
+                logger.warning(f"search_code: git命令返回None, query='{query}', ref={ref}")
+                return {"query": query, "ref": ref, "results": [], "total": 0}
+
             lines = output.strip().split("\n") if output.strip() else []
 
             # 解析结果：格式为 "ref:path:line_number:content"
@@ -304,6 +320,43 @@ class GitTools:
             logger.error(f"list_dir 异常: {e}")
             return {"error": str(e)}
 
+    def run_git_command(self, args: List[str]) -> Dict[str, Any]:
+        """
+        执行任意只读 git 命令（白名单控制）
+
+        Args:
+            args: git 命令参数列表（不包括 'git' 本身），如 ['log', '--oneline', '-10']
+
+        Returns:
+            包含 output 和 error 的字典
+        """
+        # 只读命令白名单（排除所有写操作）
+        readonly_commands = {
+            'log', 'show', 'diff', 'blame', 'annotate',
+            'ls-files', 'ls-tree', 'cat-file',
+            'rev-parse', 'rev-list', 'describe',
+            'branch', 'tag', 'reflog',
+            'grep', 'status', 'remote',
+        }
+
+        if not args or args[0] not in readonly_commands:
+            return {"error": f"不允许的命令: {args[0] if args else '(空)'}，仅支持只读命令: {', '.join(sorted(readonly_commands))}"}
+
+        try:
+            output = self._run_git_command(args, timeout=60)
+            logger.info(f"run_git_command: {' '.join(args)}, output_lines={len(output.splitlines())}")
+            return {
+                "command": ' '.join(args),
+                "output": output,
+                "lines": len(output.splitlines())
+            }
+        except subprocess.CalledProcessError as e:
+            logger.error(f"run_git_command 失败: {' '.join(args)}, stderr={e.stderr}")
+            return {"error": f"命令执行失败: {e.stderr}", "command": ' '.join(args)}
+        except Exception as e:
+            logger.error(f"run_git_command 异常: {e}")
+            return {"error": str(e), "command": ' '.join(args)}
+
     def fetch_updates(self) -> bool:
         """
         从远程拉取最新引用（定期调用以保持 ref 最新）
@@ -322,6 +375,21 @@ class GitTools:
 
 # Anthropic tool schema 定义（供 Provider 调用）
 GIT_TOOLS_SCHEMA = [
+    {
+        "name": "run_git_command",
+        "description": "执行只读 git 命令查询代码历史、变更、作者等信息。支持: log(查历史), blame(查作者), diff(查变更), show(查提交), describe(查版本), 等。示例: ['log', '--oneline', '-10', 'pom.xml'] 查最近10次提交; ['blame', '-L', '100,120', 'pom.xml'] 查100-120行作者; ['log', '-p', '--all', '--', 'pom.xml'] 查文件所有历史。",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "args": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "git 命令参数列表（不含'git'本身）。只支持只读命令：log, show, diff, blame, annotate, ls-files, ls-tree, cat-file, rev-parse, rev-list, describe, branch, tag, reflog, grep, status, remote。"
+                }
+            },
+            "required": ["args"]
+        }
+    },
     {
         "name": "list_refs",
         "description": "列出代码仓库的分支和标签，用于确认用户提到的版本号对应哪个分支或 tag。可选过滤模式匹配版本号。",

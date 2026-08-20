@@ -423,7 +423,8 @@ class AIAssistant:
             ai_message = Message(
                 role="assistant",
                 content=[Content(type="text", data=reply)],
-                timestamp=datetime.now()
+                timestamp=datetime.now(),
+                metadata=metadata  # 保存模式信息（如 mode: "agentic"）
             )
             self.context_manager.add_message(session_id, ai_message)
 
@@ -914,7 +915,8 @@ class AIAssistant:
             ai_message = Message(
                 role="assistant",
                 content=[Content(type="text", data=reply)],
-                timestamp=datetime.now()
+                timestamp=datetime.now(),
+                metadata=metadata  # 保存模式信息（如 mode: "agentic"）
             )
             self.context_manager.add_message(session_id, ai_message)
 

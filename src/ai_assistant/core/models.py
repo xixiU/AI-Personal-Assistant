@@ -16,6 +16,7 @@ class Message:
     role: str  # "user" | "assistant"
     content: List[Content]
     timestamp: datetime
+    metadata: dict = field(default_factory=dict)  # 存储模式信息等元数据（如 mode: "agentic"）
 
 
 @dataclass

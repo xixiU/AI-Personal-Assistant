@@ -62,7 +62,7 @@ class AnthropicProvider(AIProvider):
         self.max_rounds = 6  # Agentic 最大轮数，由外部注入覆盖
         self.timeout_mode = "time"  # 超时模式: time / rounds
         self.max_time = 300  # 总时间限制（秒）
-        self.tool_timeout = 30  # 单个工具超时（秒），并行批量时生效
+        self.tool_timeout = 30  # 单个工具超时（秒），由外部配置注入
         self.repo_manager = None  # 多仓库管理器（由外部注入）
 
     def set_git_tools(self, git_tools, enabled: bool = True, branch_hint: str = ""):
@@ -117,10 +117,11 @@ class AnthropicProvider(AIProvider):
         """
         判断是否应该使用 Agentic 模式（工具调用）
 
-        触发条件（仅两种，必须明确）：
+        触发条件：
         1. Git 工具已启用（前提）
         2. 显式斜杠指令（/排查、/查代码、/code）
         3. 图片消息（日志截图）
+        4. 追问模式：历史对话中有Agentic模式回复（自动继承）
 
         注：不根据任何关键词（报错、异常、版本号等）自动触发，
         避免误触发普通文档查询（如"fastjson2 报错怎么解决"其实是查文档）。
@@ -147,6 +148,12 @@ class AnthropicProvider(AIProvider):
                 if content.type == "image":
                     logger.info("触发 Agentic 模式：检测到图片消息")
                     return True
+
+        # 3. 追问模式：检查历史是否有Agentic模式回复
+        for msg in messages:
+            if msg.role == "assistant" and msg.metadata.get("mode") == "agentic":
+                logger.info("触发 Agentic 模式：历史对话中使用过代码排查模式（自动继承）")
+                return True
 
         return False
 
@@ -333,10 +340,15 @@ class AnthropicProvider(AIProvider):
         import time
         start_time = time.time()
         round_num = 0
-        
+
+        # 智能搜索失败检测
+        search_fail_count = 0
+        last_5_tools = []
+        repo_switch_count = 0
+
         while True:
             round_num += 1
-            
+
             # 检查超时条件
             elapsed = time.time() - start_time
             if timeout_mode == "time":
@@ -401,8 +413,9 @@ class AnthropicProvider(AIProvider):
 
                     return (final_text or "抱歉，未能生成有效回复。"), metadata
 
-                # 执行工具调用
+                # 执行工具调用（串行执行，稳定可靠）
                 tool_results = []
+
                 for tool_use in tool_uses:
                     tool_name = tool_use.name
                     tool_input = tool_use.input
@@ -420,6 +433,43 @@ class AnthropicProvider(AIProvider):
                             "content": result_str
                         })
                         logger.debug(f"工具 {tool_name} 结果: {result}")
+
+                        # === 智能检测逻辑 ===
+                        # 1. 检测连续搜索失败
+                        if tool_name == "search_code":
+                            if isinstance(result, dict) and (not result.get("results") or len(result.get("results", [])) == 0):
+                                search_fail_count += 1
+                                if search_fail_count >= 3:
+                                    logger.warning(f"⚠️ 连续{search_fail_count}次搜索失败，注入策略提示")
+                                    # 注入优化建议
+                                    tool_results.append({
+                                        "type": "tool_result",
+                                        "tool_use_id": tool_use.id + "_hint",
+                                        "content": "💡 提示：连续搜索失败。建议策略：1) 尝试搜索相关的函数名/API路径而非UI文本；2) 使用 list_dir 浏览目录结构；3) 直接 read_file 查看相关文件"
+                                    })
+                                    search_fail_count = 0  # 重置避免重复提示
+                            else:
+                                search_fail_count = 0  # 搜索成功，重置计数
+
+                        # 2. 检测仓库频繁切换
+                        if tool_name == "switch_repo":
+                            repo_switch_count += 1
+                            if repo_switch_count >= 3:
+                                logger.warning(f"⚠️ 第{repo_switch_count}次切换仓库，性能损耗较大")
+
+                        # 3. 检测重复工具调用（可能陷入循环）
+                        last_5_tools.append(tool_name)
+                        if len(last_5_tools) > 5:
+                            last_5_tools.pop(0)
+                        if len(last_5_tools) == 5 and len(set(last_5_tools)) == 1:
+                            logger.warning(f"⚠️ 检测到连续5次调用 {tool_name}，可能陷入循环")
+                            tool_results.append({
+                                "type": "tool_result",
+                                "tool_use_id": tool_use.id + "_loop_hint",
+                                "content": f"💡 提示：你最近连续5次使用 {tool_name}，请尝试不同的方法或基于现有信息给出结论"
+                            })
+                            last_5_tools.clear()  # 清空避免重复提示
+
                     except Exception as e:
                         logger.error(f"工具 {tool_name} 执行失败: {e}")
                         tool_results.append({
@@ -463,75 +513,15 @@ class AnthropicProvider(AIProvider):
         if not self.git_tools:
             return {"error": "Git 工具未初始化"}
 
-        # 【应用层智能批量】针对高频场景自动扩展并行任务
-        if tool_name == "search_code":
+        # 简单直接地执行工具调用
+        if tool_name == "run_git_command":
+            args = tool_input.get("args", [])
+            return self.git_tools.run_git_command(args)
+        elif tool_name == "search_code":
             query = tool_input["query"]
             ref = tool_input.get("ref")
             path_filter = tool_input.get("path_filter")
-
-            # 检测模式：查找实体类对应的表（Java 后端高频场景）
-            # 启发规则：查询关键词看起来像类名（首字母大写，驼峰）
-            if self._looks_like_entity_search(query, path_filter):
-                logger.info(f"检测到实体类搜索模式，自动扩展并行搜索: {query}")
-                # 并行搜索多种模式
-                import concurrent.futures
-                with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
-                    futures = {
-                        "原始": executor.submit(self.git_tools.search_code, query, ref, path_filter),
-                        "类定义": executor.submit(self.git_tools.search_code, f"class {query}", ref, "*.java"),
-                        "表注解": executor.submit(self.git_tools.search_code, f"@Table.*{query}", ref, "*/pojo/*.java")
-                    }
-
-                    # 收集结果
-                    merged_results = []
-                    for label, future in futures.items():
-                        try:
-                            result = future.result(timeout=self.tool_timeout)
-                            if result.get("results"):
-                                # 给每个结果加标签
-                                for r in result["results"]:
-                                    r["_search_type"] = label
-                                merged_results.extend(result["results"])
-                        except Exception as e:
-                            logger.warning(f"并行搜索 {label} 失败: {e}")
-
-                    # 去重（同一文件+行号只保留一个）
-                    seen = set()
-                    unique_results = []
-                    for r in merged_results:
-                        key = (r["file"], r["line"])
-                        if key not in seen:
-                            seen.add(key)
-                            unique_results.append(r)
-
-                    if unique_results:
-                        # 如果找到唯一的 pojo 文件，预读前 30 行（可能包含 @Table 注解）
-                        pojo_files = [r["file"] for r in unique_results if "/pojo/" in r["file"] or r["file"].endswith("/" + query + ".java")]
-                        if len(set(pojo_files)) == 1:
-                            logger.info(f"找到唯一实体类文件 {pojo_files[0]}，预读注解")
-                            try:
-                                file_content = self.git_tools.read_file(pojo_files[0], ref, end_line=30)
-                                return {
-                                    "query": query,
-                                    "ref": ref or self.git_tools.default_ref,
-                                    "results": unique_results,
-                                    "total": len(unique_results),
-                                    "entity_file_preview": file_content  # 附加预读结果
-                                }
-                            except Exception as e:
-                                logger.warning(f"预读实体类文件失败: {e}")
-
-                        return {
-                            "query": query,
-                            "ref": ref or self.git_tools.default_ref,
-                            "results": unique_results,
-                            "total": len(unique_results),
-                            "note": "已自动扩展搜索：原始关键词 + 类定义 + 表注解"
-                        }
-
-            # 常规搜索（无扩展）
             return self.git_tools.search_code(query=query, ref=ref, path_filter=path_filter)
-
         elif tool_name == "list_refs":
             return self.git_tools.list_refs(tool_input.get("pattern"))
         elif tool_name == "read_file":
@@ -555,34 +545,6 @@ class AnthropicProvider(AIProvider):
             return {"message": result_msg}
         else:
             return {"error": f"未知工具: {tool_name}"}
-
-    def _looks_like_entity_search(self, query: str, path_filter: str = None) -> bool:
-        """
-        判断是否像在搜索实体类（Java 后端场景）
-
-        启发规则：
-        - 首字母大写，驼峰命名
-        - 长度 > 5 字符（排除单个词）
-        - 没有特殊字符（不是正则表达式）
-        - 路径过滤为空或包含 Java 相关
-        """
-        if not query or len(query) < 5:
-            return False
-
-        # 首字母大写 + 包含大写字母（驼峰）
-        if not query[0].isupper() or not any(c.isupper() for c in query[1:]):
-            return False
-
-        # 不包含正则特殊字符
-        if any(c in query for c in r'.*+?[]{}()^$|\\'):
-            return False
-
-        # 路径过滤检查
-        if path_filter:
-            if not any(ext in path_filter.lower() for ext in ['.java', '*.java', 'java']):
-                return False
-
-        return True
 
     def _send_with_context_standard(
         self,
@@ -800,3 +762,4 @@ class AnthropicProvider(AIProvider):
         except Exception as e:
             logger.warning(f"Claude 标题过滤失败: {e}")
             return []
+

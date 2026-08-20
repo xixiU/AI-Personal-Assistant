@@ -36,6 +36,10 @@ class RepoManager:
         self._order: List[str] = []
         self._current_name: Optional[str] = None
 
+        # 性能监控
+        self._switch_count = 0
+        self._last_switch_time = None
+
         for repo in repositories:
             try:
                 git_tools = GitTools(repo.repo_path, repo.default_ref)
@@ -65,14 +69,28 @@ class RepoManager:
         Returns:
             确认信息；若仓库不存在则返回错误信息（不抛异常）
         """
+        start_time = time.time()
+
         with self._lock:
             if name not in self._repos:
                 available = ", ".join(self._order) if self._order else "（无）"
                 logger.warning(f"switch_repo 失败: 仓库不存在 name={name}")
                 return f"错误：仓库 '{name}' 不存在。可用仓库: {available}"
 
+            # 性能监控：检测频繁切换
+            self._switch_count += 1
+            if self._last_switch_time and (time.time() - self._last_switch_time) < 30:
+                logger.warning(
+                    f"⚠️  30秒内第{self._switch_count}次切换仓库 ({self._current_name} → {name})，"
+                    f"建议批量收集信息后再切换以提升性能"
+                )
+
+            old_name = self._current_name
             self._current_name = name
-            logger.info(f"已切换活跃仓库: {name}")
+            self._last_switch_time = time.time()
+
+            elapsed = time.time() - start_time
+            logger.info(f"已切换活跃仓库: {name} (耗时: {elapsed:.2f}s)")
             return f"已切换到仓库: {name} ({self._descriptions[name]})"
 
     @property
