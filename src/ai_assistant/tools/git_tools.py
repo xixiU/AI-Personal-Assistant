@@ -66,10 +66,13 @@ class GitTools:
                 # git grep 返回1表示没匹配，属于正常情况
                 if args[0] == "grep" and result.returncode == 1:
                     return ""  # 返回空字符串表示没结果
-                # 其他非0退出码才是真正的错误
-                if result.returncode != 0:
+                # grep 返回 128 多为正则语法无效，调用方会退回字面量重试，
+                # 这里不按 ERROR 记录，避免正常的重试流程看起来像故障
+                if args[0] == "grep" and result.returncode == 128:
+                    logger.debug(f"Git grep 正则无效: {' '.join(args)}, stderr={result.stderr}")
+                else:
                     logger.error(f"Git 命令失败: {' '.join(args)}, returncode={result.returncode}, stderr={result.stderr}")
-                    raise subprocess.CalledProcessError(result.returncode, ["git"] + args, result.stdout, result.stderr)
+                raise subprocess.CalledProcessError(result.returncode, ["git"] + args, result.stdout, result.stderr)
             return result.stdout
         except subprocess.TimeoutExpired as e:
             logger.error(f"Git 命令超时: {' '.join(args)}")
@@ -147,21 +150,74 @@ class GitTools:
             logger.error(f"list_refs 失败: {e}")
             return {"branches": [], "tags": [], "error": str(e)}
 
+    @staticmethod
+    def _normalize_pathspec(path_filter: str) -> List[str]:
+        """
+        git pathspec 是从仓库根目录开始匹配的，裸文件名（如 "RecordList.vue"）
+        只会匹配根目录下的同名文件，深层目录里的文件一个都匹配不到，且退出码为
+        1（等同"没找到"），不会报错——这会让调用方误以为代码里没有该内容。
+
+        因此同时给出原始写法和 `*` 前缀写法，两种都作为 pathspec 传入（git 对多个
+        pathspec 取并集，匹配不到的那个不会报错）。
+
+        Args:
+            path_filter: 调用方给的路径过滤
+
+        Returns:
+            pathspec 列表
+        """
+        spec = path_filter.strip()
+        specs = [spec]
+        if not spec.startswith("*"):
+            specs.append("*" + spec)
+        # 末段不含 "." 时视为目录名，补一个 */dir/* 形式匹配目录下所有文件
+        last_segment = spec.rstrip("/").rsplit("/", 1)[-1]
+        if "." not in last_segment:
+            specs.append("*" + spec.rstrip("/") + "/*")
+        return specs
+
+    def _grep_with_fallback(self, args_prefix: List[str], query: str, ref: str,
+                            pathspecs: List[str]) -> tuple:
+        """
+        先按正则（-E）搜索，若 git 报"坏正则"（退出码 128）再退回字面量（-F）搜索。
+
+        原实现按"是否含特殊字符"猜测，导致 'class.*Service' 这类真正的正则被当作
+        字面量搜索，永远匹配不到内容却只返回"无结果"。
+
+        Returns:
+            (输出文本, 实际使用的模式)
+        """
+        for mode in ("-E", "-F"):
+            args = ["grep", mode] + args_prefix + [query, ref]
+            if pathspecs:
+                args += ["--"] + pathspecs
+            try:
+                return self._run_git_command(args), mode
+            except subprocess.CalledProcessError as e:
+                # 128 = 正则语法错误；此时退回字面量再试一次
+                if e.returncode == 128 and mode == "-E":
+                    logger.info(f"正则搜索失败，退回字面量搜索: query='{query}'")
+                    continue
+                raise
+        return "", "-F"
+
     def search_code(
         self,
         query: str,
         ref: Optional[str] = None,
         path_filter: Optional[str] = None,
-        max_results: int = 50
+        max_results: int = 50,
+        context: int = 0
     ) -> Dict[str, Any]:
         """
         在代码中搜索关键词（git grep）
 
         Args:
-            query: 搜索关键词
+            query: 搜索关键词（支持正则，失败自动退回字面量）
             ref: git 引用（分支/tag），为 None 时使用默认
-            path_filter: 可选的路径过滤（如 "*.py" 只搜 Python 文件）
+            path_filter: 可选的路径过滤（如 "*.py"；裸文件名会自动补全匹配）
             max_results: 最大返回结果数
+            context: 每个匹配额外返回的上下文行数（0 表示只返回匹配行）
 
         Returns:
             搜索结果字典
@@ -173,45 +229,79 @@ class GitTools:
             return {"error": f"无效的 ref: {ref}", "results": []}
 
         try:
-            # 检测中文或特殊字符
-            has_chinese = bool(re.search(r'[一-鿿]', query))
-            has_special_chars = bool(re.search(r'[()[\]{}*+?|\\^$.]', query))
+            args_prefix = ["-n", "-i"]
+            if context > 0:
+                args_prefix += ["-C", str(context)]
 
-            # 使用固定字符串搜索避免正则转义问题
-            if has_chinese or has_special_chars:
-                args = ["grep", "-F", "-n", "-i", query, ref]  # -F: 固定字符串
-            else:
-                args = ["grep", "-n", "-i", query, ref]  # 标准搜索
+            pathspecs = self._normalize_pathspec(path_filter) if path_filter else []
+            output, mode = self._grep_with_fallback(args_prefix, query, ref, pathspecs)
 
-            if path_filter:
-                args.append("--")
-                args.append(path_filter)
-
-            output = self._run_git_command(args)
-            if output is None:
-                logger.warning(f"search_code: git命令返回None, query='{query}', ref={ref}")
+            if not output:
+                logger.info(f"search_code: query='{query}', ref={ref}, no results")
                 return {"query": query, "ref": ref, "results": [], "total": 0}
 
             lines = output.strip().split("\n") if output.strip() else []
 
-            # 解析结果：格式为 "ref:path:line_number:content"
+            # 解析结果。git grep 对匹配行用 ":" 分隔，对上下文行用 "-" 分隔：
+            #   匹配行：  ref:path:line:content
+            #   上下文行：ref:path-line-content
+            # 上下文行里的 path 可能含 "-"，所以借上一处匹配已知的 path 来切分。
             results = []
-            for line in lines[:max_results]:
+            truncated = False
+            pending_context = []  # 出现在匹配行之前的上下文，先缓存再挂到下一个匹配
+            last_file = None
+
+            for line in lines:
+                if not line or line == "--":
+                    continue
+
                 parts = line.split(":", 3)
-                if len(parts) >= 4:
-                    results.append({
-                        "file": parts[1],
+                is_match = len(parts) >= 4 and parts[2].isdigit()
+
+                if is_match:
+                    if len(results) >= max_results:
+                        truncated = True
+                        break
+                    last_file = parts[1]
+                    item = {
+                        "file": last_file,
                         "line": int(parts[2]),
                         "content": parts[3].strip()
-                    })
+                    }
+                    if pending_context:
+                        item["context"] = pending_context
+                        pending_context = []
+                    results.append(item)
+                    continue
 
-            logger.info(f"search_code: query='{query}', ref={ref}, results={len(results)}")
+                if context <= 0:
+                    continue
+
+                # 上下文行：去掉 "ref:" 前缀后形如 "path-行号-内容"
+                body = line.split(":", 1)[1] if ":" in line else ""
+                ctx_match = re.match(r'^(.*?)-(\d+)-(.*)$', body)
+                if not ctx_match:
+                    continue
+
+                ctx_file, ctx_line, ctx_text = ctx_match.groups()
+                entry = f"{ctx_line}: {ctx_text}"
+                # 属于当前匹配的后置上下文，否则是下一个匹配的前置上下文
+                if results and ctx_file == results[-1]["file"] and \
+                        int(ctx_line) > results[-1]["line"]:
+                    results[-1].setdefault("context", []).append(entry)
+                else:
+                    pending_context.append(entry)
+
+            logger.info(
+                f"search_code: query='{query}', ref={ref}, mode={mode}, "
+                f"results={len(results)}"
+            )
             return {
                 "query": query,
                 "ref": ref,
                 "results": results,
                 "total": len(results),
-                "truncated": len(lines) > max_results
+                "truncated": truncated
             }
         except subprocess.CalledProcessError as e:
             # grep 未找到结果时返回 exit code 1
@@ -223,6 +313,61 @@ class GitTools:
         except Exception as e:
             logger.error(f"search_code 异常: {e}")
             return {"error": str(e), "results": []}
+
+    def find_files(
+        self,
+        name_pattern: str,
+        ref: Optional[str] = None,
+        max_results: int = 100
+    ) -> Dict[str, Any]:
+        """
+        按文件名查找文件（git ls-files），返回完整路径。
+
+        用于"只知道文件名、不知道在哪个目录"的场景。拿到完整路径后再配合
+        read_file 或 search_code 的 path_filter 使用，避免反复 list_dir 试探。
+
+        Args:
+            name_pattern: 文件名或片段（如 "RecordList.vue" / "DataCenter"）
+            ref: git 引用，为 None 时使用默认
+            max_results: 最大返回数量
+
+        Returns:
+            匹配的文件路径列表
+        """
+        ref = ref or self.default_ref
+
+        if not self._validate_ref(ref):
+            return {"error": f"无效的 ref: {ref}", "files": []}
+
+        try:
+            pattern = name_pattern.strip()
+            # 两头加 * 以支持"文件名片段"匹配，且能跨目录层级
+            if not pattern.startswith("*"):
+                pattern = "*" + pattern
+            if not pattern.endswith("*") and "." not in pattern.rsplit("/", 1)[-1]:
+                pattern = pattern + "*"
+
+            output = self._run_git_command(
+                ["ls-files", f"--with-tree={ref}", "--", pattern]
+            )
+            files = [line.strip() for line in output.strip().split("\n") if line.strip()]
+
+            logger.info(
+                f"find_files: pattern='{name_pattern}', ref={ref}, files={len(files)}"
+            )
+            return {
+                "name_pattern": name_pattern,
+                "ref": ref,
+                "files": files[:max_results],
+                "total": len(files),
+                "truncated": len(files) > max_results
+            }
+        except subprocess.CalledProcessError as e:
+            logger.error(f"find_files 失败: {e}")
+            return {"error": str(e), "files": []}
+        except Exception as e:
+            logger.error(f"find_files 异常: {e}")
+            return {"error": str(e), "files": []}
 
     def read_file(
         self,
@@ -411,13 +556,13 @@ GIT_TOOLS_SCHEMA = [
     },
     {
         "name": "search_code",
-        "description": "在指定分支/tag 的代码中搜索关键词（如异常类名、错误信息、函数名）。返回匹配的文件、行号和代码片段。",
+        "description": "在指定分支/tag 的代码中搜索关键词（如异常类名、错误信息、函数名）。返回匹配的文件、行号和代码片段。支持正则（若正则语法无效会自动退回字面量搜索）。用 context 参数可同时拿到匹配行周围的代码，省去再调 read_file。",
         "input_schema": {
             "type": "object",
             "properties": {
                 "query": {
                     "type": "string",
-                    "description": "要搜索的关键词（支持正则表达式）"
+                    "description": "要搜索的关键词，支持正则表达式（如 'class.*Service'）"
                 },
                 "ref": {
                     "type": "string",
@@ -425,10 +570,32 @@ GIT_TOOLS_SCHEMA = [
                 },
                 "path_filter": {
                     "type": "string",
-                    "description": "可选的路径过滤（如 '*.java' 只搜 Java 文件）"
+                    "description": "可选的路径过滤。可用通配符（'*.java'）、目录（'src/main/java'）或直接给文件名（'RecordList.vue'，会自动匹配任意目录下的该文件）"
+                },
+                "context": {
+                    "type": "integer",
+                    "description": "每个匹配额外返回的上下文行数（如 5 表示前后各5行）。想看匹配点周围代码时用它，比再调一次 read_file 更快"
                 }
             },
             "required": ["query"]
+        }
+    },
+    {
+        "name": "find_files",
+        "description": "按文件名（或文件名片段）查找文件的完整路径。当你只知道文件名、不知道它在哪个目录时用这个，不要用 list_dir 一层层试探。拿到完整路径后再 read_file 或作为 search_code 的 path_filter。",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name_pattern": {
+                    "type": "string",
+                    "description": "文件名或片段，如 'RecordList.vue'、'DataCenterService'"
+                },
+                "ref": {
+                    "type": "string",
+                    "description": "分支或 tag 名称，不指定则使用默认分支"
+                }
+            },
+            "required": ["name_pattern"]
         }
     },
     {

@@ -235,7 +235,7 @@ class AnthropicProvider(AIProvider):
         if self.repo_manager and len(self.repo_manager.list_repos()) > 1:
             tools_schema.append({
                 "name": "switch_repo",
-                "description": "切换当前代码排查的目标仓库。切换后，search_code、read_file、list_dir 等工具将在新仓库中执行。",
+                "description": "切换当前代码排查的目标仓库。切换后，search_code、find_files、read_file、list_dir、run_git_command 等工具将在新仓库中执行。注意：本工具会改变全局状态，必须单独一轮调用，不要和查询类工具放在同一轮。",
                 "input_schema": {
                     "type": "object",
                     "properties": {
@@ -282,28 +282,44 @@ class AnthropicProvider(AIProvider):
             "",
             "工具使用最佳实践（重要）：",
             "",
-            "【并行调用】",
-            "- 当需要尝试多种搜索策略时，一次返回多个 tool_use 并行执行，显著提升速度",
+            "【并行调用 —— 这是提速的关键，请尽量用】",
+            "- search_code / find_files / read_file / list_dir 都是只读工具，一次返回多个",
+            "  tool_use 会并行执行，耗时约等于最慢的那一个，而不是相加",
+            "- 每一轮都先想清楚\"这一步我需要哪几份信息\"，一次全部发出，不要一个个试",
             "  示例场景：",
             "  · 不确定用哪个关键词：同时搜 'servicelog'、'ServiceLog'、'internet_service_log'",
-            "  · 查实体类对应的表：同时搜 'InternetServiceLog' 和 'class InternetServiceLog'",
+            "  · 前后端一起查：同时搜后端字段名和前端调用名",
             "  · 多个独立文件：同时 read_file 多个无依赖关系的文件",
+            "- 注意：switch_repo 会改变当前仓库，必须单独一轮调用，不要和查询混在一起",
             "",
             "【search_code 策略】",
-            "- 优先使用简单关键词，避免复杂正则（git grep 对正则支持有限）",
-            "  ✅ 正确：search_code('servicelog') 然后过滤 *Controller.java",
-            "  ❌ 错误：search_code('@RequestMapping.*servicelog') # 会失败",
-            "- 查找实体类对应的表：搜 'class <实体名>' 找 pojo 文件，再读文件前 30 行查看 @Table 注解",
+            "- 支持正则；若正则语法无效会自动退回字面量搜索，不必自我审查语法",
+            "- 想看匹配点周围的代码，直接加 context 参数，不要再单独调 read_file",
+            "  ✅ 高效：search_code('judgeUseSimplifyNum', context=10) # 一次拿到匹配+上下文",
+            "  ❌ 低效：search_code(...) 拿到行号 → 再 read_file 读那一段 # 多花一整轮",
+            "- 搜不到时，先换更短、更可能出现在代码里的关键词（函数名/字段名/API 路径），",
+            "  而不是反复搜界面文案。界面文案常被拆分或写在别处，搜不到不代表功能不存在",
+            "",
+            "【find_files 策略（只知道文件名时用它）】",
+            "- 只知道文件名、不知道路径：find_files('RecordList.vue') 直接拿到完整路径",
+            "- 不要用 list_dir 一层层试探目录，那会浪费很多轮次",
+            "",
+            "【path_filter 用法】",
+            "- 可以直接给文件名（'RecordList.vue'），系统会自动匹配任意目录下的该文件",
+            "- 也可用通配符（'*.java'）或目录（'src/main/java'）",
+            "- 重要：带 path_filter 搜不到时，去掉 path_filter 再搜一次全仓库确认，",
+            "  不要仅凭一次带过滤的空结果就断定代码里没有",
             "",
             "【read_file 策略】",
-            "- 大文件（>300行）应先用 search_code 定位关键行号，再用 start_line/end_line 读取上下文",
-            "  示例：search_code 找到第 150 行 → read_file(path=..., start_line=120, end_line=180)",
-            "- 小文件（<200行）直接全读",
-            "- 只需要查看注解或类定义时，只读前 50 行：read_file(path=..., end_line=50)",
+            "- 大文件（>300行）先用 search_code 定位行号，再用 start_line/end_line 读上下文",
+            "- 小文件（<200行）直接全读；只看注解或类定义时只读前 50 行",
             "",
-            "【list_dir 策略】",
-            "- 不确定具体文件名时使用",
-            "- 确定文件名后直接 read_file 或 search_code，不要反复 list_dir",
+            "【查提交历史/作者】",
+            "- 用 run_git_command，例如：",
+            "  · 谁改的、什么时候：['log', '--oneline', '-10', '--', '<文件路径>']",
+            "  · 某几行是谁写的：['blame', '-L', '520,540', '--', '<文件路径>']",
+            "  · 按提交信息找改动：['log', '--all', '--grep=log4j', '--oneline']",
+            "- 不要回复\"我无法查看 git 历史\"，你有这个能力",
             "",
             "注意事项：",
             "- 必须始终使用中文回答",
@@ -415,13 +431,15 @@ class AnthropicProvider(AIProvider):
                 # 执行工具调用（search_code 可并行，其他串行）
                 tool_results = []
 
-                # 检测是否所有工具都是 search_code（可安全并行）
-                all_search = all(tool_use.name == "search_code" for tool_use in tool_uses)
-                can_parallel = all_search and len(tool_uses) >= 2
+                # 纯读工具可安全并行（无共享状态）；switch_repo 会改变当前仓库，必须串行
+                PARALLEL_SAFE = {"search_code", "find_files", "read_file", "list_dir"}
+                all_readonly = all(tool_use.name in PARALLEL_SAFE for tool_use in tool_uses)
+                can_parallel = all_readonly and len(tool_uses) >= 2
 
                 if can_parallel:
-                    # 并行执行多个搜索
-                    logger.info(f"并行执行 {len(tool_uses)} 个 search_code")
+                    # 并行执行多个只读查询
+                    names = ", ".join(t.name for t in tool_uses)
+                    logger.info(f"并行执行 {len(tool_uses)} 个只读工具: {names}")
                     import concurrent.futures
                     with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(tool_uses), 5)) as executor:
                         futures = {}
@@ -443,7 +461,7 @@ class AnthropicProvider(AIProvider):
                                     "tool_use_id": tool_use.id,
                                     "content": result_str
                                 })
-                                logger.info(f"工具 {tool_name} 完成: {result.get('total', 0)} 个结果")
+                                logger.info(f"工具 {tool_name} 完成: {len(result_str)} 字符")
                             except Exception as e:
                                 logger.error(f"并行工具 {tool_name} 失败: {e}")
                                 tool_results.append({
@@ -547,10 +565,17 @@ class AnthropicProvider(AIProvider):
             args = tool_input.get("args", [])
             return self.git_tools.run_git_command(args)
         elif tool_name == "search_code":
-            query = tool_input["query"]
-            ref = tool_input.get("ref")
-            path_filter = tool_input.get("path_filter")
-            return self.git_tools.search_code(query=query, ref=ref, path_filter=path_filter)
+            return self.git_tools.search_code(
+                query=tool_input["query"],
+                ref=tool_input.get("ref"),
+                path_filter=tool_input.get("path_filter"),
+                context=tool_input.get("context", 0)
+            )
+        elif tool_name == "find_files":
+            return self.git_tools.find_files(
+                name_pattern=tool_input["name_pattern"],
+                ref=tool_input.get("ref")
+            )
         elif tool_name == "list_refs":
             return self.git_tools.list_refs(tool_input.get("pattern"))
         elif tool_name == "read_file":
