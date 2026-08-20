@@ -413,60 +413,99 @@ class AnthropicProvider(AIProvider):
 
                     return (final_text or "抱歉，未能生成有效回复。"), metadata
 
-                # 执行工具调用（串行执行，稳定可靠）
+                # 执行工具调用（search_code 可并行，其他串行）
                 tool_results = []
 
-                for tool_use in tool_uses:
-                    tool_name = tool_use.name
-                    tool_input = tool_use.input
-                    logger.info(f"执行工具: {tool_name}({tool_input})")
+                # 检测是否所有工具都是 search_code（可安全并行）
+                all_search = all(tool_use.name == "search_code" for tool_use in tool_uses)
+                can_parallel = all_search and len(tool_uses) >= 2
 
-                    try:
-                        result = self._execute_tool(tool_name, tool_input)
-                        result_str = json.dumps(result, ensure_ascii=False)
-                        # 多仓库模式下，工具结果前缀加当前仓库名
-                        if self.repo_manager and len(self.repo_manager.list_repos()) > 1:
-                            result_str = f"[当前仓库: {self.repo_manager.current_repo_name}] {result_str}"
-                        tool_results.append({
-                            "type": "tool_result",
-                            "tool_use_id": tool_use.id,
-                            "content": result_str
-                        })
-                        logger.debug(f"工具 {tool_name} 结果: {result}")
+                if can_parallel:
+                    # 并行执行多个搜索
+                    logger.info(f"并行执行 {len(tool_uses)} 个 search_code")
+                    import concurrent.futures
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(tool_uses), 5)) as executor:
+                        futures = {}
+                        for tool_use in tool_uses:
+                            future = executor.submit(self._execute_tool, tool_use.name, tool_use.input)
+                            futures[future] = tool_use
 
-                        # === 智能检测逻辑（仅监控，不注入额外消息避免API错误）===
-                        # 1. 检测连续搜索失败
-                        if tool_name == "search_code":
-                            if isinstance(result, dict) and (not result.get("results") or len(result.get("results", [])) == 0):
-                                search_fail_count += 1
-                                if search_fail_count >= 3:
-                                    logger.warning(f"⚠️ 连续{search_fail_count}次搜索失败，AI可能需要调整策略")
-                                    search_fail_count = 0  # 重置避免重复日志
-                            else:
-                                search_fail_count = 0  # 搜索成功，重置计数
+                        for future in concurrent.futures.as_completed(futures):
+                            tool_use = futures[future]
+                            tool_name = tool_use.name
+                            tool_input = tool_use.input
+                            try:
+                                result = future.result(timeout=30)
+                                result_str = json.dumps(result, ensure_ascii=False)
+                                if self.repo_manager and len(self.repo_manager.list_repos()) > 1:
+                                    result_str = f"[当前仓库: {self.repo_manager.current_repo_name}] {result_str}"
+                                tool_results.append({
+                                    "type": "tool_result",
+                                    "tool_use_id": tool_use.id,
+                                    "content": result_str
+                                })
+                                logger.info(f"工具 {tool_name} 完成: {result.get('total', 0)} 个结果")
+                            except Exception as e:
+                                logger.error(f"并行工具 {tool_name} 失败: {e}")
+                                tool_results.append({
+                                    "type": "tool_result",
+                                    "tool_use_id": tool_use.id,
+                                    "content": json.dumps({"error": str(e)}, ensure_ascii=False),
+                                    "is_error": True
+                                })
+                else:
+                    # 串行执行（包含非搜索工具或单个工具）
+                    for tool_use in tool_uses:
+                        tool_name = tool_use.name
+                        tool_input = tool_use.input
+                        logger.info(f"执行工具: {tool_name}({tool_input})")
 
-                        # 2. 检测仓库频繁切换
-                        if tool_name == "switch_repo":
-                            repo_switch_count += 1
-                            if repo_switch_count >= 3:
-                                logger.warning(f"⚠️ 第{repo_switch_count}次切换仓库，性能损耗较大")
+                        try:
+                            result = self._execute_tool(tool_name, tool_input)
+                            result_str = json.dumps(result, ensure_ascii=False)
+                            # 多仓库模式下，工具结果前缀加当前仓库名
+                            if self.repo_manager and len(self.repo_manager.list_repos()) > 1:
+                                result_str = f"[当前仓库: {self.repo_manager.current_repo_name}] {result_str}"
+                            tool_results.append({
+                                "type": "tool_result",
+                                "tool_use_id": tool_use.id,
+                                "content": result_str
+                            })
+                            logger.debug(f"工具 {tool_name} 结果: {result}")
 
-                        # 3. 检测重复工具调用（可能陷入循环）
-                        last_5_tools.append(tool_name)
-                        if len(last_5_tools) > 5:
-                            last_5_tools.pop(0)
-                        if len(last_5_tools) == 5 and len(set(last_5_tools)) == 1:
-                            logger.warning(f"⚠️ 检测到连续5次调用 {tool_name}，可能陷入循环")
-                            last_5_tools.clear()  # 清空避免重复日志
+                            # === 智能检测逻辑（仅监控，不注入额外消息避免API错误）===
+                            # 1. 检测连续搜索失败
+                            if tool_name == "search_code":
+                                if isinstance(result, dict) and (not result.get("results") or len(result.get("results", [])) == 0):
+                                    search_fail_count += 1
+                                    if search_fail_count >= 3:
+                                        logger.warning(f"⚠️ 连续{search_fail_count}次搜索失败，AI可能需要调整策略")
+                                        search_fail_count = 0  # 重置避免重复日志
+                                else:
+                                    search_fail_count = 0  # 搜索成功，重置计数
 
-                    except Exception as e:
-                        logger.error(f"工具 {tool_name} 执行失败: {e}")
-                        tool_results.append({
-                            "type": "tool_result",
-                            "tool_use_id": tool_use.id,
-                            "content": json.dumps({"error": str(e)}, ensure_ascii=False),
-                            "is_error": True
-                        })
+                            # 2. 检测仓库频繁切换
+                            if tool_name == "switch_repo":
+                                repo_switch_count += 1
+                                if repo_switch_count >= 3:
+                                    logger.warning(f"⚠️ 第{repo_switch_count}次切换仓库，性能损耗较大")
+
+                            # 3. 检测重复工具调用（可能陷入循环）
+                            last_5_tools.append(tool_name)
+                            if len(last_5_tools) > 5:
+                                last_5_tools.pop(0)
+                            if len(last_5_tools) == 5 and len(set(last_5_tools)) == 1:
+                                logger.warning(f"⚠️ 检测到连续5次调用 {tool_name}，可能陷入循环")
+                                last_5_tools.clear()  # 清空避免重复日志
+
+                        except Exception as e:
+                            logger.error(f"工具 {tool_name} 执行失败: {e}")
+                            tool_results.append({
+                                "type": "tool_result",
+                                "tool_use_id": tool_use.id,
+                                "content": json.dumps({"error": str(e)}, ensure_ascii=False),
+                                "is_error": True
+                            })
 
                 # 将工具结果加入对话历史
                 api_messages.append({"role": "user", "content": tool_results})
