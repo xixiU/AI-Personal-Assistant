@@ -542,35 +542,42 @@ class AIAssistant:
                 content_str = message.get("content", "{}")
                 content_data = json_mod.loads(content_str)
 
-                # 获取 zh_cn 或第一个语言的内容
-                post_content = content_data.get("zh_cn") or content_data.get("en_us") or {}
-                content_blocks = post_content.get("content", [[]])
+                text, image_keys = self._parse_post_content(content_data)
 
-                # 解析文字和图片
-                text_parts = []
-                image_keys = []
+                # 解析不出任何内容时，跳过 AI 调用（否则会发出空消息，触发 400）
+                if not text and not image_keys:
+                    logger.error(
+                        f"富文本消息解析为空，跳过 AI 调用。"
+                        f"顶层字段={list(content_data.keys())}, content 预览={content_str[:200]}"
+                    )
+                    return None
 
-                for block in content_blocks:
-                    for element in block:
-                        tag = element.get("tag", "")
-                        if tag == "text":
-                            text_parts.append(element.get("text", ""))
-                        elif tag == "img":
-                            img_key = element.get("image_key", "")
-                            if img_key:
-                                image_keys.append(img_key)
-
-                # 合并文本
-                text = " ".join(text_parts).strip()
+                if len(image_keys) > 1:
+                    logger.info(f"富文本消息含 {len(image_keys)} 张图片，当前仅取第一张")
 
                 # 下载第一张图片（如果有）
                 image_data = None
-                if image_keys and adapter:
-                    image_data = adapter.download_image(message_id, image_keys[0])
-                    if not image_data:
-                        logger.warning(f"富文本消息中图片下载失败: image_key={image_keys[0]}")
+                if image_keys:
+                    if not adapter:
+                        logger.error("富文本消息含图片但 adapter 为空，无法下载")
+                    else:
+                        image_data = adapter.download_image(message_id, image_keys[0])
+                        if not image_data:
+                            # 图片是进入代码排查模式的触发条件，下载失败会退化为知识库模式
+                            logger.error(
+                                f"富文本消息中图片下载失败，将退化为纯文本处理"
+                                f"（不会进入代码排查模式）: image_key={image_keys[0]}"
+                            )
 
-                logger.info(f"解析富文本消息: text={text[:50]}..., images={len(image_keys)}")
+                # 图片下载失败且无文本时无内容可发，跳过
+                if not text and not image_data:
+                    logger.error("富文本消息仅含图片且下载失败，跳过 AI 调用")
+                    return None
+
+                logger.info(
+                    f"解析富文本消息: text_len={len(text)}, images={len(image_keys)}, "
+                    f"image_ready={image_data is not None}"
+                )
 
                 return {
                     "chat_id": chat_id,
@@ -582,12 +589,96 @@ class AIAssistant:
                 }
 
             else:
-                logger.info(f"跳过非文本/图片消息: {message_type}")
+                content_preview = str(message.get("content", ""))[:200]
+                logger.info(
+                    f"跳过非文本/图片消息: {message_type}, content 预览={content_preview}"
+                )
                 return None
 
         except Exception as e:
             logger.error(f"Failed to parse feishu event: {e}")
             return None
+
+    @staticmethod
+    def _parse_post_content(content_data: dict) -> tuple:
+        """
+        解析飞书富文本（post）消息内容，提取文字和图片 key
+
+        兼容多种结构差异：
+        - 语言包裹：{"zh_cn": {"content": [...]}}、{"en_us": ...}，或私有化部署下无语言包裹
+        - 文字标签：text / md / a（链接）
+        - 嵌套层级：content 可能是二维数组，也可能出现更深的嵌套
+
+        Args:
+            content_data: message.content 反序列化后的字典
+
+        Returns:
+            (text, image_keys) 元组
+        """
+        import re
+
+        # 定位实际的 content 数组：优先语言包裹，回退到顶层
+        post_content = None
+        for lang_key in ("zh_cn", "en_us"):
+            value = content_data.get(lang_key)
+            if isinstance(value, dict):
+                post_content = value
+                break
+
+        if post_content is None:
+            # 无语言包裹（私有化部署）或直接是 {"content": [...]} 结构
+            if isinstance(content_data.get("content"), list):
+                post_content = content_data
+            else:
+                # 兜底：取第一个包含 content 的字典型字段
+                for value in content_data.values():
+                    if isinstance(value, dict) and isinstance(value.get("content"), list):
+                        post_content = value
+                        break
+
+        if post_content is None:
+            return "", []
+
+        text_parts = []
+        image_keys = []
+
+        # 文字类标签：text 用 text 字段，a（超链接）取显示文字，md 取原始 markdown
+        text_tags = {"text", "md", "a"}
+
+        def walk(node):
+            """递归遍历，兼容任意嵌套深度的 content 结构"""
+            if isinstance(node, list):
+                for item in node:
+                    walk(item)
+                return
+            if not isinstance(node, dict):
+                return
+
+            tag = node.get("tag", "")
+            if tag in text_tags:
+                value = node.get("text", "")
+                if value:
+                    text_parts.append(value)
+            elif tag == "img":
+                img_key = node.get("image_key", "")
+                if img_key:
+                    image_keys.append(img_key)
+
+            # at 标签不取文字（避免把 @机器人 名字混入问题），但继续递归其子节点
+            children = node.get("content")
+            if isinstance(children, list):
+                walk(children)
+
+        walk(post_content.get("content", []))
+
+        # 富文本的换行由 block 切分表达，这里用空格拼接后归一化空白
+        text = " ".join(text_parts)
+        text = re.sub(r"\s+", " ", text).strip()
+
+        # 去掉飞书 @ 占位符（如 @_user_1），避免污染检索关键词
+        text = re.sub(r"@_user_\d+\s*", "", text).strip()
+
+        return text, image_keys
 
     def _send_feishu_reply(
         self,
