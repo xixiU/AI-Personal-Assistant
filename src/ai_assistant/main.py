@@ -211,6 +211,16 @@ class AIAssistant:
         self._processing_sessions = set()  # 正在处理中的 session，防重复提交
         self._processing_lock = threading.Lock()
 
+        # 处理期间被暂存的消息（含文字的真实提问），当前请求结束后补跑
+        # 格式: {session_id: event_data}
+        self._deferred_messages = {}
+
+        # 纯图片消息等待后续文字的合并窗口（秒），0 表示关闭
+        # 用户常"先发截图、再发问题描述"，等一下能合成一次完整提问
+        self._lone_image_wait = getattr(self.config, "context_lone_image_wait", 8.0)
+        # 等待期内收到的纯图片消息标记: {session_id: timestamp}
+        self._pending_lone_images = {}
+
         # 文档索引更新期间的延迟重试队列
         # 格式: [(timestamp, event_data), ...]
         self.pending_retry_queue = []
@@ -347,23 +357,53 @@ class AIAssistant:
             message_id = parsed["message_id"]
             user_id = parsed.get("sender_id", "unknown")
 
-            # 防重复：同一 session 已有请求在处理中，将消息加入上下文但跳过 AI 调用
+            # 新消息到达：清除该 session 的纯图片等待标记，让等待线程立即放行
+            image_already_in_context = False
+            with self._processing_lock:
+                if self._pending_lone_images.pop(session_id, None) is not None:
+                    # 之前那张纯图片已由等待逻辑放入上下文，本次不要重复添加
+                    image_already_in_context = True
+
+            # 纯图片无文字：用户很可能正在分两条发（先图后文），
+            # 立即调 AI 只能反问。这里短暂等待后续文字消息合并处理。
+            if image_data and not text and self._lone_image_wait > 0:
+                if self._defer_lone_image(session_id, image_data, message_id):
+                    return
+                # 等待期内没有后续文字，图片已入上下文，避免下方重复添加
+                image_already_in_context = True
+
+            # 防重复：同一 session 已有请求在处理中，将消息加入上下文
+            # 注意：不能无条件丢弃，否则用户"先发图、AI 处理中再发文字"时，
+            # 这条文字会被吞掉，永远得不到回答。
             with self._processing_lock:
                 if session_id in self._processing_sessions:
-                    logger.info(f"Session {session_id} 已有请求在处理中，消息已加入上下文，跳过本次 AI 调用")
                     # 构建消息内容
                     content_parts = []
-                    if image_data:
+                    if image_data and not image_already_in_context:
                         content_parts.append(Content(type="image", data=image_data))
                     if text:
                         content_parts.append(Content(type="text", data=text))
 
-                    user_message = Message(
-                        role="user",
-                        content=content_parts if content_parts else [Content(type="text", data="")],
-                        timestamp=datetime.now()
-                    )
-                    self.context_manager.add_message(session_id, user_message)
+                    if content_parts:
+                        user_message = Message(
+                            role="user",
+                            content=content_parts,
+                            timestamp=datetime.now()
+                        )
+                        self.context_manager.add_message(session_id, user_message)
+
+                    # 带文字的消息是真实提问，记为待处理，等当前请求结束后补跑，
+                    # 避免用户的问题被静默丢弃
+                    if text:
+                        self._deferred_messages[session_id] = event_data
+                        logger.info(
+                            f"Session {session_id} 处理中，本条含文字已入上下文并登记为待处理，"
+                            f"当前请求结束后补跑"
+                        )
+                    else:
+                        logger.info(
+                            f"Session {session_id} 处理中，本条无文字仅入上下文，跳过 AI 调用"
+                        )
                     return
                 self._processing_sessions.add(session_id)
 
@@ -385,20 +425,21 @@ class AIAssistant:
                         logger.warning(f"添加思考表情失败（不影响主流程）: {e}")
 
             # 构建用户消息（支持图文）
+            # image_already_in_context: 图片已由纯图片等待逻辑入过上下文，不重复添加
             content_parts = []
-            if image_data:
+            if image_data and not image_already_in_context:
                 content_parts.append(Content(type="image", data=image_data))
             if text:
                 content_parts.append(Content(type="text", data=text))
 
-            user_message = Message(
-                role="user",
-                content=content_parts if content_parts else [Content(type="text", data="")],
-                timestamp=datetime.now()
-            )
-
-            # 添加到上下文
-            self.context_manager.add_message(session_id, user_message)
+            # 内容为空时不入上下文（例如纯图片已提前入过），避免产生空消息
+            if content_parts:
+                user_message = Message(
+                    role="user",
+                    content=content_parts,
+                    timestamp=datetime.now()
+                )
+                self.context_manager.add_message(session_id, user_message)
 
             # 获取上下文消息
             context_messages = self.context_manager.get_context(session_id)
@@ -448,9 +489,27 @@ class AIAssistant:
             logger.error(f"Failed to process event: {e}", exc_info=True)
         finally:
             # 释放 session 处理锁
+            deferred_event = None
             if 'session_id' in dir():
                 with self._processing_lock:
                     self._processing_sessions.discard(session_id)
+                    # 取出处理期间被暂存的提问，补跑一次
+                    deferred_event = self._deferred_messages.pop(session_id, None)
+
+            if deferred_event is not None:
+                # 补跑是递归调用，限制链长，避免用户狂发消息时栈过深、worker 被长期占用
+                depth = event_data.get("_deferred_depth", 0)
+                if depth >= 2:
+                    logger.warning(
+                        f"补跑链已达深度 {depth}，丢弃本次暂存提问避免递归过深: session={session_id}"
+                    )
+                else:
+                    deferred_event["_deferred_depth"] = depth + 1
+                    logger.info(f"补跑处理期间暂存的提问 (depth={depth + 1}): session={session_id}")
+                    try:
+                        self._process_event(deferred_event)
+                    except Exception as e:
+                        logger.error(f"补跑暂存提问失败: {e}", exc_info=True)
 
     def _parse_feishu_event(self, event_data: dict, adapter=None) -> Optional[dict]:
         """
@@ -598,6 +657,65 @@ class AIAssistant:
         except Exception as e:
             logger.error(f"Failed to parse feishu event: {e}")
             return None
+
+    def _defer_lone_image(self, session_id: str, image_data: dict, message_id: str) -> bool:
+        """
+        纯图片消息延迟处理：等待用户紧随其后发送的文字描述
+
+        用户经常分两条发送："先发日志截图 → 再发问题描述"。
+        如果收到图片就立即调用 AI，AI 手里没有任何问题描述，只能反问，
+        既慢又答不到点上。这里先把图片存入上下文，等待一个短窗口：
+        - 窗口内收到了文字消息 → 由那条文字消息触发 AI（图片已在上下文里，
+          _should_use_agentic_mode 会因历史图片进入排查模式）
+        - 窗口内没有文字 → 返回 False，按纯图片正常处理（AI 会主动询问）
+
+        Args:
+            session_id: 会话 ID
+            image_data: 已下载的图片数据
+            message_id: 飞书消息 ID
+
+        Returns:
+            True 表示已交给后续文字消息处理，本次应直接返回；
+            False 表示等待超时，调用方应继续按纯图片处理
+        """
+        import time as time_mod
+
+        # 图片先入上下文，这样后续文字消息触发 AI 时能看到它
+        self.context_manager.add_message(
+            session_id,
+            Message(
+                role="user",
+                content=[Content(type="image", data=image_data)],
+                timestamp=datetime.now()
+            )
+        )
+
+        arrive_ts = time_mod.time()
+        with self._processing_lock:
+            self._pending_lone_images[session_id] = arrive_ts
+
+        logger.info(
+            f"收到纯图片消息，图片已入上下文，等待 {self._lone_image_wait}s 看是否有后续文字描述: "
+            f"session={session_id}"
+        )
+
+        # 轮询等待：一旦有新消息进入该 session，标记会被覆盖或清除
+        deadline = arrive_ts + self._lone_image_wait
+        while time_mod.time() < deadline:
+            time_mod.sleep(0.3)
+            with self._processing_lock:
+                current = self._pending_lone_images.get(session_id)
+            # 标记被后续消息清除/更新，说明已有新消息接管
+            if current != arrive_ts:
+                logger.info(f"等待期内收到后续消息，纯图片交由后续消息一并处理: session={session_id}")
+                return True
+
+        # 超时：清除标记，按纯图片继续处理
+        with self._processing_lock:
+            if self._pending_lone_images.get(session_id) == arrive_ts:
+                del self._pending_lone_images[session_id]
+        logger.info(f"等待超时，未收到文字描述，按纯图片处理（AI 将主动询问）: session={session_id}")
+        return False
 
     @staticmethod
     def _parse_post_content(content_data: dict) -> tuple:

@@ -30,6 +30,8 @@ class Config:
     context_mode: str = "short"
     context_max_messages: int = 10
     context_session_timeout: int = 3600
+    # 纯图片消息等待后续文字描述的合并窗口（秒），0 表示关闭等待
+    context_lone_image_wait: float = 8.0
 
     # AI配置
     ai_primary_provider: str = "openai"
@@ -144,6 +146,9 @@ class Config:
             config.context_mode = data["context"].get("mode", config.context_mode)
             config.context_max_messages = data["context"].get("max_messages", config.context_max_messages)
             config.context_session_timeout = data["context"].get("session_timeout", config.context_session_timeout)
+            config.context_lone_image_wait = float(
+                data["context"].get("lone_image_wait", config.context_lone_image_wait)
+            )
 
         # 解析AI配置
         if "ai" in data:
