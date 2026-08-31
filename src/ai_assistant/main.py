@@ -53,6 +53,19 @@ class AIAssistant:
         # 初始化日志
         self._setup_logging()
 
+        # 注册脱敏器已知密钥：从配置中递归收集 API Key、账号密码、飞书
+        # app_secret、Git 认证凭据等真实敏感值，供回复发送前精确遮蔽。
+        from ai_assistant.utils.redactor import register_secrets_from_config
+        register_secrets_from_config(self.config)
+
+        # 配置输入侧提示词攻击防护：由 AI 自主判断越狱/指令覆盖、窃取账号密码密钥等恶意输入，
+        # 命中则在调用大模型前拒绝响应并上报告警（走统一告警通道 alert.webhook）。
+        from ai_assistant.utils.prompt_guard import configure_guard
+        configure_guard(
+            enabled=getattr(self.config, 'security_prompt_guard_enabled', True),
+            alert_webhook=getattr(self.config, 'alert_webhook', None),
+        )
+
         # 记录进程 PID（用于排查进程退出问题）
         logger.info(f"Process PID: {os.getpid()}")
 
@@ -176,7 +189,7 @@ class AIAssistant:
                 gpu_id=getattr(self.config, 'vector_db_gpu_id', 0),
                 batch_size=getattr(self.config, 'vector_db_batch_size', 32),
                 doc_base_url=getattr(self.config, 'feishu_docs_doc_base_url', ''),
-                alert_webhook=getattr(self.config, 'feishu_docs_alert_webhook', None),
+                alert_webhook=getattr(self.config, 'alert_webhook', None),
             )
             # 回填 doc_manager 到 Provider
             self.ai_provider.doc_manager = doc_manager
@@ -824,6 +837,11 @@ class AIAssistant:
             metadata: 附加元数据（mode、tool_rounds、doc_count 等）
         """
         from ai_assistant.utils.feishu_message import FeishuMessageBuilder
+        from ai_assistant.utils.redactor import redact
+
+        # 纵深防御：发送前再脱敏一次。正常路径回复已在 ai_provider.call() 脱敏，
+        # 此处覆盖未来可能绕过 call() 的新增路径（幂等，对已脱敏文本无副作用）。
+        reply_text = redact(reply_text)
 
         try:
             token = adapter.get_tenant_access_token()

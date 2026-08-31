@@ -52,7 +52,13 @@ class Config:
     feishu_docs_cache_dir: str = "./data/feishu_docs"
     feishu_docs_cache_ttl: int = 86400  # 缓存有效期（秒），默认1天
     feishu_docs_sources: List[str] = None  # 知识库/云空间 token 列表
-    feishu_docs_alert_webhook: Optional[str] = None  # 飞书告警 Webhook（可选）
+
+    # 统一告警通道（文档同步失败、提示词攻击拦截等都走这里）
+    # 兼容旧配置 feishu_docs.alert_webhook，加载时会归并到此字段
+    alert_webhook: Optional[str] = None  # 飞书告警 Webhook（可选）
+
+    # 安全防护配置
+    security_prompt_guard_enabled: bool = True  # 输入侧提示词攻击防护开关（AI 自主判断）
 
     # 本地离线文档配置
     local_docs: List[Dict[str, str]] = None  # [{path, description}]
@@ -177,7 +183,20 @@ class Config:
             config.feishu_docs_cache_dir = docs.get("cache_dir", config.feishu_docs_cache_dir)
             config.feishu_docs_cache_ttl = docs.get("cache_ttl", config.feishu_docs_cache_ttl)
             config.feishu_docs_sources = docs.get("sources", config.feishu_docs_sources)
-            config.feishu_docs_alert_webhook = docs.get("alert_webhook", config.feishu_docs_alert_webhook)
+            # 向后兼容：旧配置把 alert_webhook 放在 feishu_docs 下，先读到统一字段
+            if "alert_webhook" in docs:
+                config.alert_webhook = docs.get("alert_webhook", config.alert_webhook)
+
+        # 解析统一告警通道（顶层 alert 段优先，覆盖旧的 feishu_docs.alert_webhook）
+        if "alert" in data:
+            config.alert_webhook = data["alert"].get("webhook", config.alert_webhook)
+
+        # 解析安全防护配置
+        if "security" in data:
+            sec = data["security"]
+            config.security_prompt_guard_enabled = sec.get(
+                "prompt_guard_enabled", config.security_prompt_guard_enabled
+            )
 
         # 解析本地离线文档配置
         if "local_docs" in data:

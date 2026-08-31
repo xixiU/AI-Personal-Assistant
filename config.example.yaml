@@ -91,7 +91,6 @@ feishu_docs:
   doc_base_url: "https://xxx.feishu.cn"  # 飞书文档域名（用于生成文档链接）
   cache_dir: "./data/feishu_docs"        # 本地缓存目录
   cache_ttl: 86400                       # 缓存有效期（秒），1天=86400
-  alert_webhook: ""                      # 飞书告警 Webhook URL（可选），MCP 调用失败时发送告警
   sources:                               # 文档源配置（必须明确 type，避免 MCP auto 模式重试）
     # 知识库示例（type: wiki）
     # - token: "C5RNwyHtWikA4LkBN9trd4u8zFd"
@@ -101,6 +100,18 @@ feishu_docs:
     #   type: "drive"
     # 兼容旧格式：纯字符串默认按 wiki 处理
     # - "C5RNwyHtWikA4LkBN9trd4u8zFd"
+
+# 统一告警通道（可选）
+# 文档同步失败、提示词攻击拦截等告警都发送到此 Webhook
+alert:
+  webhook: ""                            # 飞书告警 Webhook URL（留空则不发送告警）
+                                         # 注：旧配置放在 feishu_docs.alert_webhook 下仍兼容读取
+
+# 安全防护配置
+security:
+  prompt_guard_enabled: true             # 输入侧提示词攻击防护开关
+                                         # 由大模型自主判断越狱/指令覆盖、窃取账号密码密钥等恶意输入
+                                         # 命中则拒绝响应并上报告警（走上面的 alert.webhook）
 
 # 向量数据库配置（用于文档检索）
 vector_db:

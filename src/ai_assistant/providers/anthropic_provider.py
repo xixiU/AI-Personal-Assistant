@@ -16,8 +16,11 @@ import re
 from ai_assistant.core.ai_provider import (
     AIProvider,
     KeywordExtractionResult,
+    PromptSafetyResult,
     _KEYWORD_EXTRACTION_SYSTEM_PROMPT,
     _parse_keyword_extraction_response,
+    _PROMPT_SAFETY_SYSTEM_PROMPT,
+    _parse_prompt_safety_response,
 )
 from ai_assistant.core.models import Message
 
@@ -112,6 +115,30 @@ class AnthropicProvider(AIProvider):
         except Exception as e:
             logger.warning(f"Claude 关键词提取失败，返回降级值: {e}")
             return KeywordExtractionResult(keywords=[], is_generic_tech=False)
+
+    def classify_prompt_safety(self, query_text: str) -> PromptSafetyResult:
+        """
+        使用 Claude 判断用户输入是否为提示词攻击 / 敏感信息窃取。
+        判定失败时 fail-open（返回放行值），避免误伤正常用户。
+        """
+        try:
+            response = self.client.messages.create(
+                model=self.model,
+                max_tokens=150,
+                messages=[{"role": "user", "content": query_text}],
+                system=_PROMPT_SAFETY_SYSTEM_PROMPT,
+            )
+            text = response.content[0].text.strip()
+            result = _parse_prompt_safety_response(text, query_text[:50])
+            if result.is_attack:
+                logger.info(
+                    f"Claude 安全判定: attack={result.is_attack}, type={result.attack_type}, "
+                    f"query='{query_text[:50]}'"
+                )
+            return result
+        except Exception as e:
+            logger.warning(f"Claude 安全判定失败，放行本次请求: {e}")
+            return PromptSafetyResult(is_attack=False, attack_type="none", reason="")
 
     def _should_use_agentic_mode(self, messages: List[Message]) -> bool:
         """

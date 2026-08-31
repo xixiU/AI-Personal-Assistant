@@ -15,8 +15,11 @@ from loguru import logger
 from ai_assistant.core.ai_provider import (
     AIProvider,
     KeywordExtractionResult,
+    PromptSafetyResult,
     _KEYWORD_EXTRACTION_SYSTEM_PROMPT,
     _parse_keyword_extraction_response,
+    _PROMPT_SAFETY_SYSTEM_PROMPT,
+    _parse_prompt_safety_response,
 )
 from ai_assistant.core.models import Message
 
@@ -222,6 +225,48 @@ class OpenAIProvider(AIProvider):
         except Exception as e:
             logger.warning(f"OpenAI 关键词提取失败，返回降级值: {e}")
             return KeywordExtractionResult(keywords=[], is_generic_tech=False)
+
+    def classify_prompt_safety(self, query_text: str) -> PromptSafetyResult:
+        """
+        使用 OpenAI 兼容接口判断输入是否为提示词攻击 / 敏感信息窃取。
+        判定失败时 fail-open（返回放行值），避免误伤正常用户。
+        """
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+
+        messages = [
+            {"role": "system", "content": _PROMPT_SAFETY_SYSTEM_PROMPT},
+            {"role": "user", "content": query_text},
+        ]
+
+        # 先尝试 JSON mode，失败降级为普通调用（依赖解析器容错）
+        for use_json_mode in (True, False):
+            payload = {"model": self.model, "messages": messages, "max_tokens": 150}
+            if use_json_mode:
+                payload["response_format"] = {"type": "json_object"}
+            try:
+                response = requests.post(
+                    f"{self.base_url}/v1/chat/completions",
+                    json=payload,
+                    headers=headers,
+                    timeout=30,
+                )
+                response.raise_for_status()
+                text = response.json()["choices"][0]["message"]["content"]
+                result = _parse_prompt_safety_response(text, query_text[:50])
+                if result.is_attack:
+                    logger.info(
+                        f"OpenAI 安全判定: attack={result.is_attack}, type={result.attack_type}, "
+                        f"query='{query_text[:50]}'"
+                    )
+                return result
+            except Exception as e:
+                if use_json_mode:
+                    logger.debug(f"JSON mode 安全判定失败，降级为普通模式: {e}")
+                    continue
+                logger.warning(f"OpenAI 安全判定失败，放行本次请求: {e}")
+                return PromptSafetyResult(is_attack=False, attack_type="none", reason="")
 
     def filter_docs_by_relevance(self, query: str, candidates: List[Dict[str, Any]], max_docs: int = 3) -> List[int]:
         """用 OpenAI 兼容接口判断候选文档标题与 query 的相关性，返回 0-based 下标列表"""
