@@ -285,10 +285,14 @@ class AIAssistant:
         try:
             from ai_assistant.webhook_server import WebhookServer
 
-            self.webhook_server = WebhookServer(host="0.0.0.0", port=self.config.system_webhook_port)
+            self.webhook_server = WebhookServer(
+                host="0.0.0.0",
+                port=self.config.system_webhook_port,
+                web_frontend_enabled=getattr(self.config, 'system_web_frontend_enabled', False),
+            )
             self.webhook_server.set_feishu_adapter(feishu_adapter)
             self.webhook_server.set_event_queue(self.event_queue)
-            # 注入 AI 组件用于 Web 聊天接口
+            # 注入 AI 组件用于 Web 聊天接口（仅在前端启用时实际生效）
             self.webhook_server.set_ai_components(self.ai_provider, self.context_manager)
 
             # 在后台线程启动服务器（使用生产级服务器）

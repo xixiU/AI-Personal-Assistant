@@ -73,6 +73,10 @@ class Config:
     system_disable_proxy: bool = True  # 禁用系统代理（避免代理干扰内网访问）
     system_event_queue_size: int = 100  # 事件队列最大长度
     system_max_concurrent_workers: int = 5  # 最大并发处理数
+    # 自有前端 Web（首页 / Web 聊天 / Web 反馈接口）开关。
+    # 默认关闭：当前前端无鉴权，任何人都能访问，公网/共享环境下有风险。
+    # 关闭时仍保留飞书 webhook（/webhook/feishu、/webhook/feishu/card）与 /health。
+    system_web_frontend_enabled: bool = False
 
     # 对话历史
     chat_history_enabled: bool = True  # 默认开启
@@ -214,6 +218,7 @@ class Config:
             config.system_disable_proxy = data["system"].get("disable_proxy", config.system_disable_proxy)
             config.system_event_queue_size = data["system"].get("event_queue_size", config.system_event_queue_size)
             config.system_max_concurrent_workers = data["system"].get("max_concurrent_workers", config.system_max_concurrent_workers)
+            config.system_web_frontend_enabled = data["system"].get("web_frontend_enabled", config.system_web_frontend_enabled)
 
         # 解析向量数据库配置
         if "vector_db" in data:

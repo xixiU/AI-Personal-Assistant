@@ -14,17 +14,26 @@ from ai_assistant.core.feedback_manager import FeedbackManager
 class WebhookServer:
     """Webhook 服务器（生产者角色，只负责接收事件并放入队列）"""
 
-    def __init__(self, host: str = "0.0.0.0", port: int = 8080):
+    def __init__(self, host: str = "0.0.0.0", port: int = 8080, web_frontend_enabled: bool = False):
         """
         初始化 Webhook 服务器
 
         Args:
             host: 监听地址
             port: 监听端口
+            web_frontend_enabled: 是否启用自有前端 Web（首页 / Web 聊天 / Web 反馈）。
+                默认关闭，因当前前端无鉴权。关闭时不注册这些路由，使其真正不可访问；
+                飞书 webhook 与健康检查始终可用。
         """
-        self.app = Flask(__name__)
+        # 前端禁用时传 static_folder=None，连 Flask 内置的 /static/<path> 静态路由
+        # 也不挂载，避免 static/ 目录下的 index.html、js/css 等被直接 URL 访问。
+        if web_frontend_enabled:
+            self.app = Flask(__name__)
+        else:
+            self.app = Flask(__name__, static_folder=None)
         self.host = host
         self.port = port
+        self.web_frontend_enabled = web_frontend_enabled
         self.feishu_adapter = None
         self.event_queue: Optional[queue.Queue] = None  # 事件队列（由外部注入）
         self.server = None  # 用于存储 waitress 服务器实例
@@ -35,14 +44,7 @@ class WebhookServer:
         # 初始化 FeedbackManager
         self.feedback_manager = FeedbackManager()
 
-        # 注册路由
-        self.app.add_url_rule(
-            "/",
-            "index",
-            self.serve_index,
-            methods=["GET"]
-        )
-
+        # ===== 始终注册：飞书 webhook 与健康检查（不受前端开关影响）=====
         self.app.add_url_rule(
             "/webhook/feishu",
             "feishu_webhook",
@@ -58,25 +60,37 @@ class WebhookServer:
         )
 
         self.app.add_url_rule(
-            "/api/chat",
-            "chat",
-            self.handle_chat,
-            methods=["POST"]
-        )
-
-        self.app.add_url_rule(
-            "/api/feedback",
-            "feedback",
-            self.handle_feedback,
-            methods=["POST"]
-        )
-
-        self.app.add_url_rule(
             "/webhook/feishu/card",
             "feishu_card",
             self.handle_feishu_card,
             methods=["POST"]
         )
+
+        # ===== 按开关注册：自有前端 Web 路由（无鉴权，默认关闭）=====
+        if self.web_frontend_enabled:
+            self.app.add_url_rule(
+                "/",
+                "index",
+                self.serve_index,
+                methods=["GET"]
+            )
+
+            self.app.add_url_rule(
+                "/api/chat",
+                "chat",
+                self.handle_chat,
+                methods=["POST"]
+            )
+
+            self.app.add_url_rule(
+                "/api/feedback",
+                "feedback",
+                self.handle_feedback,
+                methods=["POST"]
+            )
+            logger.info("自有前端 Web 已启用（首页 / Web 聊天 / Web 反馈接口）")
+        else:
+            logger.info("自有前端 Web 已禁用（无鉴权，默认关闭）；仅飞书 webhook 与 /health 可用")
 
         # 用于存储 AI Provider 和 Context Manager 的引用
         self.ai_provider = None

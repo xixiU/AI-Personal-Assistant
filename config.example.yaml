@@ -51,6 +51,9 @@ system:
   disable_proxy: true  # 禁用系统代理（避免代理干扰内网/私有化部署访问）
   event_queue_size: 100  # 事件队列最大长度（队列满时新事件将被丢弃）
   max_concurrent_workers: 5  # 最大并发处理数（同时处理多少个用户请求）
+  web_frontend_enabled: false  # 是否启用自有前端 Web（首页 / Web 聊天 / Web 反馈接口）
+                               # 默认关闭：当前前端无鉴权，任何人都能访问，公网/共享环境有风险
+                               # 关闭时仍保留飞书 webhook 与 /health，不影响机器人功能
 
 # IM适配器
 adapters:
