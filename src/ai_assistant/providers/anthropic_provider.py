@@ -68,6 +68,18 @@ class AnthropicProvider(AIProvider):
         self.tool_timeout = 30  # 单个工具超时（秒），由外部配置注入
         self.repo_manager = None  # 多仓库管理器（由外部注入）
 
+        # 会话级 Agentic 粘性标记：一旦某 session 进入过工具使用（代码排查）模式，
+        # 就把 session_id 记在这里。后续该 session 的所有追问都自动继承 Agentic 模式，
+        # 不再依赖上下文消息窗口中是否还留有 mode=="agentic" 的历史回复。
+        #
+        # 背景（修复的原始 bug）：原实现靠遍历 messages 找 assistant.metadata.mode=="agentic"
+        # 来判断"追问继承"。但 ContextManager 只保留最近 max_messages 条消息（默认 10），
+        # 多轮追问后，最早那条带 agentic 标记的回复会被挤出窗口，导致第二/第三次追问
+        # 掉回 RAG 模式。改用会话级集合持久记录，彻底摆脱窗口滑动的影响。
+        import threading as _threading
+        self._agentic_sessions: set = set()
+        self._agentic_sessions_lock = _threading.Lock()
+
     def set_git_tools(self, git_tools, enabled: bool = True, branch_hint: str = ""):
         """
         设置 git 工具（用于代码排查）
@@ -140,22 +152,28 @@ class AnthropicProvider(AIProvider):
             logger.warning(f"Claude 安全判定失败，放行本次请求: {e}")
             return PromptSafetyResult(is_attack=False, attack_type="none", reason="")
 
-    def _should_use_agentic_mode(self, messages: List[Message]) -> bool:
+    def _should_use_agentic_mode(self, messages: List[Message], session_id: Optional[str] = None) -> bool:
         """
         判断是否应该使用 Agentic 模式（工具调用）
 
-        触发条件：
+        触发条件（命中任一即进入）：
         1. Git 工具已启用（前提）
-        2. 显式斜杠指令（/排查、/查代码、/code）
-        3. 图片消息（日志截图）
-        4. 追问模式：历史对话中有Agentic模式回复（自动继承）
+        2. 会话级粘性：该 session 曾进入过 Agentic 模式（持久记忆，不受上下文窗口影响）
+        3. 显式斜杠指令（/排查、/查代码、/code）
+        4. 工具意图关键词（"查代码""看源码""排查"等自然语言，用户引用追问也生效）
+        5. 图片消息（日志截图）
+        6. 追问兜底：历史对话消息里仍留有 Agentic 模式回复（自动继承）
 
-        注：不根据任何关键词（报错、异常、版本号等）自动触发，
-        避免误触发普通文档查询（如"fastjson2 报错怎么解决"其实是查文档）。
-        用户需要代码排查时，必须用斜杠指令或发送日志截图。
+        设计说明：
+        - 条件 2 是修复"多轮追问后模式丢失"的核心。只要 session 进过一次工具模式，
+          后续所有追问（包括基于第二/第三次回答的引用追问）都自动保持工具模式。
+        - 条件 4 满足"普通文档检索模式下，追问携带查代码等关键词则自动切工具模式"的诉求；
+          文档检索结果仍会作为上下文注入，辅助 AI 判断。
+        - 关键词采用明确的"工具/代码意图"词，避免误伤纯文档查询（如"fastjson2 报错怎么解决"）。
 
         Args:
             messages: 消息列表
+            session_id: 会话 ID（用于会话级粘性判断）
 
         Returns:
             是否使用 Agentic 模式
@@ -163,26 +181,56 @@ class AnthropicProvider(AIProvider):
         if not self.git_tools_enabled or not self.git_tools:
             return False
 
-        # 1. 显式斜杠指令检测
+        # 1. 会话级粘性：该 session 进过工具模式，则一直保持（不受消息窗口滑动影响）
+        if session_id and self._is_agentic_session(session_id):
+            logger.info(f"触发 Agentic 模式：会话 {session_id} 已进入工具使用模式（会话级粘性继承）")
+            return True
+
         last_user_text = self._extract_last_user_text(messages)
+
+        # 2. 显式斜杠指令检测
         if self._has_explicit_command(last_user_text):
             logger.info("触发 Agentic 模式：显式指令")
             return True
 
-        # 2. 检查是否有图片（日志截图）
+        # 3. 工具意图关键词检测（自然语言，支持引用追问触发）
+        if self._has_tool_intent_keyword(last_user_text):
+            logger.info("触发 Agentic 模式：命中工具意图关键词（如查代码/看源码/排查）")
+            return True
+
+        # 4. 检查是否有图片（日志截图）
         for msg in messages:
             for content in msg.content:
                 if content.type == "image":
                     logger.info("触发 Agentic 模式：检测到图片消息")
                     return True
 
-        # 3. 追问模式：检查历史是否有Agentic模式回复
+        # 5. 追问兜底：检查历史是否有 Agentic 模式回复（窗口内仍能命中时）
         for msg in messages:
             if msg.role == "assistant" and msg.metadata.get("mode") == "agentic":
                 logger.info("触发 Agentic 模式：历史对话中使用过代码排查模式（自动继承）")
                 return True
 
         return False
+
+    def _is_agentic_session(self, session_id: str) -> bool:
+        """判断 session 是否已被标记为 Agentic 粘性会话（线程安全）"""
+        with self._agentic_sessions_lock:
+            return session_id in self._agentic_sessions
+
+    def _mark_agentic_session(self, session_id: Optional[str]) -> None:
+        """
+        将 session 标记为 Agentic 粘性会话（线程安全）。
+
+        由 _send_with_context 在确认走 Agentic 分支后调用，保证后续同 session
+        的追问持续继承工具使用模式。
+        """
+        if not session_id:
+            return
+        with self._agentic_sessions_lock:
+            if session_id not in self._agentic_sessions:
+                self._agentic_sessions.add(session_id)
+                logger.info(f"会话 {session_id} 已标记为工具使用模式（后续追问自动继承）")
 
     def _has_explicit_command(self, text: str) -> bool:
         """
@@ -197,6 +245,35 @@ class AnthropicProvider(AIProvider):
         explicit_commands = ["/code", "/排查", "/查代码"]
         text_lower = text.lower()
         return any(cmd in text_lower for cmd in explicit_commands)
+
+    def _has_tool_intent_keyword(self, text: str) -> bool:
+        """
+        检测自然语言中的"工具/代码意图"关键词。
+
+        用于满足诉求：普通文档检索模式下，用户在（引用）追问中携带"查代码"等关键词时，
+        自动进入工具使用模式；文档检索结果仍会注入上下文辅助判断。
+
+        关键词选取偏保守，均为明确指向"查看/排查代码、源码、实现、调用链"的表达，
+        避免误伤纯文档查询（如"报错怎么解决""某功能怎么用"）。
+
+        Args:
+            text: 用户消息文本
+
+        Returns:
+            是否命中工具意图关键词
+        """
+        if not text:
+            return False
+        text_lower = text.lower()
+        tool_intent_keywords = [
+            "查代码", "查下代码", "查一下代码", "查查代码", "查看代码", "看代码", "看下代码",
+            "看源码", "查源码", "看看源码", "读源码", "读代码",
+            "查实现", "看实现", "实现逻辑", "源码实现", "代码实现",
+            "调用链", "调用关系", "谁调用", "调用了", "在哪里定义", "定义在哪",
+            "排查", "排查一下", "排查下", "定位问题", "定位一下", "定位下", "trace",
+            "查提交", "查commit", "改动历史", "谁改的", "哪次提交",
+        ]
+        return any(kw in text_lower for kw in tool_intent_keywords)
 
     def _send_with_context(
         self,
@@ -216,8 +293,10 @@ class AnthropicProvider(AIProvider):
             metadata 包含：tool_rounds（Agentic）或 doc_count（RAG）等
         """
         # 判断是否使用 Agentic 模式
-        if self._should_use_agentic_mode(messages):
+        if self._should_use_agentic_mode(messages, session_id):
             logger.info("使用 Agentic 模式（工具调用）")
+            # 标记会话为工具使用模式，后续追问自动继承（修复多轮追问模式丢失）
+            self._mark_agentic_session(session_id)
             return self._send_with_context_agentic(
                 messages,
                 doc_context,

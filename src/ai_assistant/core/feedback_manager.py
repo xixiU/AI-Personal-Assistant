@@ -36,6 +36,8 @@ class FeedbackManager:
         source: str,
         feedback_type: str,
         feedback_text: Optional[str] = None,
+        user_name: Optional[str] = None,
+        user_id: Optional[str] = None,
     ) -> str:
         """
         保存用户反馈记录
@@ -46,6 +48,8 @@ class FeedbackManager:
             source: 反馈来源（"feishu" / "web" / "wechat"）
             feedback_type: 反馈类型（"like" / "dislike"）
             feedback_text: 用户填写的反馈内容（可选，点踩时填写）
+            user_name: 反馈人昵称（可选，飞书场景通过通讯录 API 获取）
+            user_id: 反馈人 ID（可选，飞书场景为 open_id）
 
         Returns:
             feedback_id: 反馈记录的唯一标识（UUID）
@@ -72,6 +76,8 @@ class FeedbackManager:
             "source": source,
             "feedback_type": feedback_type,
             "feedback_text": feedback_text or "",
+            "user_name": user_name or "",
+            "user_id": user_id or "",
         }
 
         # 按天保存到 JSONL 文件
@@ -213,6 +219,8 @@ class FeedbackManager:
             - timestamp
             - feedback_type（"like" / "dislike"）
             - feedback_text（用户填写的反馈内容）
+            - user_name（反馈人昵称，飞书场景通过通讯录 API 获取，可能为空）
+            - user_id（反馈人 ID，飞书场景为 open_id，可能为空）
         """
         if not record_id:
             logger.warning("record_id 为空，返回空列表")

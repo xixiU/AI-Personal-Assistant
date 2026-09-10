@@ -261,6 +261,7 @@ class FeishuMessageBuilder:
                 fb_type = fb.get("feedback_type", "unknown")
                 fb_text = fb.get("feedback_text", "")
                 fb_time = fb.get("timestamp", "")
+                fb_user = fb.get("user_name", "")  # 反馈人昵称（飞书通讯录 API 获取，可能为空）
 
                 # 构建反馈条目
                 if fb_type == "like":
@@ -270,12 +271,15 @@ class FeishuMessageBuilder:
                     fb_icon = "👎"
                     fb_label = "不准确"
 
-                fb_content = f"{fb_icon} {fb_label}"
+                # 反馈人昵称前缀：有昵称则展示"昵称 👍 准确"，无昵称降级为"👍 准确"
+                fb_content = f"**{fb_user}** " if fb_user else ""
+                fb_content += f"{fb_icon} {fb_label}"
                 if fb_text:
                     fb_content += f"：{fb_text}"
                 fb_content += f" ({fb_time})"
 
-                builder.add_text(fb_content)
+                # 用 markdown 以支持昵称加粗展示
+                builder.add_markdown(fb_content)
 
         builder.add_hr()
 

@@ -57,6 +57,9 @@ class FeishuBotAdapter(IMAdapter):
         self.message_cache: Dict[str, str] = {}
         self._cache_lock = threading.Lock()
 
+        # 用户昵称缓存（open_id -> name），避免反馈时重复调用飞书通讯录 API
+        self._user_name_cache: Dict[str, str] = {}
+
     def cache_message_record(self, message_id: str, record_id: str):
         """
         缓存飞书消息 ID 到 record_id 的映射
@@ -190,6 +193,61 @@ class FeishuBotAdapter(IMAdapter):
         except Exception as e:
             logger.error(f"Error getting tenant access token: {e}")
             raise
+
+    def get_user_name(self, open_id: str) -> str:
+        """
+        通过飞书通讯录 API 获取用户昵称（用于反馈卡片展示反馈人）
+
+        接口: GET /open-apis/contact/v3/users/{user_id}?user_id_type=open_id
+        所需权限（需在飞书开放平台后台申请并发布）:
+            - 获取用户基本信息  contact:user.base:readonly
+              （或"以应用身份读取通讯录" contact:contact.base:readonly）
+        若未申请权限 / 调用失败，返回空字符串，调用方需做好降级（不展示昵称）。
+
+        结果带内存缓存，避免同一用户重复点击反馈时反复请求飞书 API。
+
+        Args:
+            open_id: 用户 open_id（来自卡片交互事件 operator.open_id）
+
+        Returns:
+            用户昵称，获取失败返回空字符串
+        """
+        if not open_id:
+            return ""
+
+        # 命中缓存直接返回
+        with self._cache_lock:
+            cached = self._user_name_cache.get(open_id)
+        if cached is not None:
+            return cached
+
+        try:
+            token = self.get_tenant_access_token()
+            url = f"{self.base_url}/open-apis/contact/v3/users/{open_id}"
+            headers = {"Authorization": f"Bearer {token}"}
+            params = {"user_id_type": "open_id"}
+            response = requests.get(url, headers=headers, params=params, timeout=10)
+            result = response.json()
+
+            if result.get("code") == 0:
+                user_name = result.get("data", {}).get("user", {}).get("name", "") or ""
+                # 缓存结果（含空串，避免无权限时对同一用户反复请求）
+                with self._cache_lock:
+                    self._user_name_cache[open_id] = user_name
+                logger.info(f"获取用户昵称成功: open_id={open_id[:8]}..., name={user_name}")
+                return user_name
+            else:
+                # 常见：code=99991672 无 contact 权限。记录告警但不阻断反馈主流程。
+                logger.warning(
+                    f"获取用户昵称失败(可能未申请通讯录权限): code={result.get('code')}, "
+                    f"msg={result.get('msg')}。反馈仍会正常保存，仅不展示昵称。"
+                )
+                with self._cache_lock:
+                    self._user_name_cache[open_id] = ""  # 缓存空串，避免重复失败请求
+                return ""
+        except Exception as e:
+            logger.warning(f"调用飞书用户信息 API 异常（不影响反馈保存）: {e}")
+            return ""
 
     def verify_webhook_signature(self, timestamp: str, nonce: str, encrypt: str, signature: str) -> bool:
         """
@@ -564,12 +622,14 @@ class FeishuBotAdapter(IMAdapter):
 
             # message_id 从事件上下文获取（被点击的消息 ID）
             message_id = context.get("open_message_id", "")
-            # 这里后续可以根据open_id获取用户的昵称
             user_id = event.get("operator", {}).get("open_id", "")
             chat_id = context.get("open_chat_id", "")
 
+            # 通过飞书通讯录 API 获取反馈人昵称（无权限/失败时返回空串，不影响反馈保存）
+            user_name = self.get_user_name(user_id)
+
             logger.info(f"📝 Card action: type={feedback_type}, message_id={message_id}, "
-                       f"user={user_id}, chat={chat_id}")
+                       f"user={user_id}, user_name={user_name}, chat={chat_id}")
 
             from ai_assistant.core.feedback_manager import FeedbackManager
             feedback_mgr = FeedbackManager()
@@ -640,7 +700,9 @@ class FeishuBotAdapter(IMAdapter):
                     session_id=chat_id,
                     source="feishu",
                     feedback_type="dislike",
-                    feedback_text=""  # 降级方案：不收集文字反馈
+                    feedback_text="",  # 降级方案：不收集文字反馈
+                    user_name=user_name,
+                    user_id=user_id,
                 )
                 logger.info(f"✅ Dislike feedback confirmed (no text): {feedback_id}")
 
@@ -706,7 +768,9 @@ class FeishuBotAdapter(IMAdapter):
                     session_id=chat_id,
                     source="feishu",
                     feedback_type="dislike",
-                    feedback_text=feedback_text
+                    feedback_text=feedback_text,
+                    user_name=user_name,
+                    user_id=user_id,
                 )
                 logger.info(f"✅ Dislike feedback with text saved: {feedback_id}, "
                             f"text_len={len(feedback_text)}")
@@ -778,7 +842,9 @@ class FeishuBotAdapter(IMAdapter):
                     record_id=record_id,
                     session_id=chat_id,
                     source="feishu",
-                    feedback_type="like"
+                    feedback_type="like",
+                    user_name=user_name,
+                    user_id=user_id,
                 )
                 logger.info(f"✅ Like feedback saved: {feedback_id}")
 
