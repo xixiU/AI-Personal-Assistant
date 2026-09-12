@@ -1,0 +1,187 @@
+# 运维操作配置示例
+# 复制为 config.yaml 中的 operations 段落
+
+operations:
+  # 权限控制
+  authorization:
+    # 运维操作触发权限（白名单）
+    operators:
+      feishu:
+        - open_id: "ou_alice123456"
+          name: "张三"
+        - open_id: "ou_bob789012"
+          name: "李四"
+      # web/wechat 后续扩展
+      # web:
+      #   - user_id: "user_001"
+      #     name: "王五"
+
+    # 危险操作审批人（收确认消息的管理员，支持多人，一人同意即可执行）
+    approvers:
+      feishu:
+        - open_id: "ou_admin001"
+          name: "运维主管王五"
+        - open_id: "ou_admin002"
+          name: "技术总监赵六"
+
+    # 审批超时（秒），超时自动取消
+    approval_timeout: 180  # 3 分钟
+
+  # 机器列表
+  machines:
+    - name: "生产服务器1"
+      alias: ["生产1号", "prod1", "主服务器"]  # 自然语言别名，AI 可识别
+      host: "192.168.1.10"
+      description: "主要部署订单相关服务，4核16G内存，CentOS 7"
+      ssh:
+        method: "key"  # "key" 或 "password"
+        user: "deploy"
+        key_path: "/home/user/.ssh/id_rsa_prod1"  # 密钥路径（绝对路径）
+        # password: "AES_ENCRYPTED_BASE64"  # 如用密码，需先加密（见下方说明）
+        port: 22
+
+      applications:
+        - name: "订单服务 v4.3.6"
+          alias: ["订单", "order", "订单服务"]
+          description: "处理用户下单、支付的核心服务，Java Spring Boot 2.7"
+          path: "/opt/apps/order-service-4.3.6"
+          type: "java"
+
+          # 运维脚本（相对路径，基于 path）
+          scripts:
+            status: "./status.sh"        # 查状态（安全操作）
+            start: "./start.sh"          # 启动（危险操作）
+            stop: "./stop.sh"            # 停止（危险操作）
+            restart: "./restart.sh"      # 重启（危险操作）
+            health: "curl -s localhost:8080/actuator/health"  # 健康检查
+
+          # 日志路径（相对于 path）
+          logs:
+            app: "logs/application.log"
+            error: "logs/error.log"
+            access: "logs/access.log"
+
+          # 元数据（版本检测、进程信息等）
+          metadata:
+            # 版本检测配置（支持多种方式，AI 会自动调用）
+            version_detection:
+              # 方式1：从 jar 包 MANIFEST.MF 提取
+              - type: "jar_manifest"
+                jar_path: "order-service.jar"
+
+              # 方式2：从启动日志提取
+              - type: "log_file"
+                command: "grep 'Application Version:' logs/startup.log | tail -1 | awk '{print $4}'"
+
+              # 方式3：从版本文件读取
+              - type: "version_file"
+                file_path: "version.txt"
+
+              # 方式4：HTTP API 查询
+              - type: "api_endpoint"
+                url: "http://localhost:8080/actuator/info"
+
+            # 进程信息
+            pid_file: "app.pid"  # PID 文件路径
+            health_check_url: "http://localhost:8080/health"
+
+          # 操作风险级别覆盖（可选）
+          risk_overrides:
+            restart: "caution"  # 默认 danger，可降级为 caution（跳过审批）
+
+        - name: "订单服务 v4.2.0"
+          alias: ["旧版订单", "灰度订单"]
+          description: "订单服务旧版本，用于灰度发布和回滚"
+          path: "/opt/apps/order-service-4.2.0"
+          type: "java"
+          scripts:
+            status: "./status.sh"
+            restart: "./restart.sh"
+          logs:
+            app: "logs/application.log"
+          metadata:
+            version_detection:
+              - type: "jar_manifest"
+                jar_path: "order-service.jar"
+            pid_file: "app.pid"
+
+    - name: "生产服务器2"
+      alias: ["生产2号", "prod2", "用户服务器"]
+      host: "192.168.1.11"
+      description: "用户服务专用机，8核32G内存"
+      ssh:
+        method: "password"
+        user: "deploy"
+        password: "YOUR_ENCRYPTED_PASSWORD_HERE"  # 见下方加密说明
+        port: 22
+
+      applications:
+        - name: "用户服务"
+          alias: ["用户", "user"]
+          description: "用户账号、登录、权限管理服务"
+          path: "/opt/apps/user-service"
+          type: "python"
+          scripts:
+            status: "supervisorctl status user-service"
+            restart: "supervisorctl restart user-service"
+            stop: "supervisorctl stop user-service"
+            start: "supervisorctl start user-service"
+          logs:
+            app: "logs/app.log"
+          metadata:
+            version_detection:
+              - type: "version_file"
+                file_path: "VERSION"
+
+    - name: "测试服务器"
+      alias: ["测试", "test"]
+      host: "192.168.1.100"
+      description: "开发和测试环境"
+      ssh:
+        method: "key"
+        user: "dev"
+        key_path: "/home/user/.ssh/id_rsa_test"
+        port: 22
+
+      applications:
+        - name: "测试订单服务"
+          alias: ["测试订单"]
+          path: "/opt/test/order-service"
+          type: "java"
+          scripts:
+            status: "./status.sh"
+            restart: "./restart.sh"
+          logs:
+            app: "logs/application.log"
+
+  # 系统监控命令（预定义，安全操作）
+  system_commands:
+    memory: "free -h"
+    disk: "df -h"
+    cpu: "top -bn1 | head -20"
+    uptime: "uptime"
+    processes: "ps aux --sort=-%mem | head -20"
+    network: "netstat -tunlp"
+
+# ========================================
+# 密码加密说明
+# ========================================
+#
+# 1. 生成加密密钥（只需一次）：
+#    python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+#    输出示例：XyZ123abc...（保存到环境变量 OPERATIONS_ENCRYPT_KEY）
+#
+# 2. 加密密码：
+#    export OPERATIONS_ENCRYPT_KEY="你的密钥"
+#    python -c "from cryptography.fernet import Fernet; import sys; key=sys.argv[1]; cipher=Fernet(key.encode()); print(cipher.encrypt(sys.argv[2].encode()).decode())" "$OPERATIONS_ENCRYPT_KEY" "你的明文密码"
+#    输出的 base64 字符串填入 password 字段
+#
+# 3. 环境变量设置：
+#    # Linux/Mac
+#    export OPERATIONS_ENCRYPT_KEY="你的密钥"
+#
+#    # Windows PowerShell
+#    $env:OPERATIONS_ENCRYPT_KEY="你的密钥"
+#
+#    # 或写入 .env 文件（不要提交到 Git）
+#    echo "OPERATIONS_ENCRYPT_KEY=你的密钥" >> .env

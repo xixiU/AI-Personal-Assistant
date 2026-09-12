@@ -60,6 +60,9 @@ class FeishuBotAdapter(IMAdapter):
         # 用户昵称缓存（open_id -> name），避免反馈时重复调用飞书通讯录 API
         self._user_name_cache: Dict[str, str] = {}
 
+        # 审批提供者（由外部设置，用于运维操作审批）
+        self.approval_provider = None
+
     def cache_message_record(self, message_id: str, record_id: str):
         """
         缓存飞书消息 ID 到 record_id 的映射
@@ -820,7 +823,93 @@ class FeishuBotAdapter(IMAdapter):
                 # 返回更新后的卡片（飞书会用它替换确认卡片）
                 return updated_card
 
-            # ===== 分支 2/3: 首次点赞 / 点踩 =====
+            # ===== 分支 4: 运维操作审批（批准） =====
+            if action_value.get("action") == "approve_operation":
+                request_id = action_value.get("request_id")
+                if not request_id:
+                    logger.warning("⚠️ approve_operation missing request_id")
+                    return {"toast": {"type": "error", "content": "审批请求已失效"}}
+
+                # 检查是否配置了审批提供者
+                if not self.approval_provider:
+                    logger.error("❌ approval_provider not configured")
+                    return {"toast": {"type": "error", "content": "审批功能未配置"}}
+
+                # 获取审批人信息
+                approver_id = event.get("operator", {}).get("open_id", "")
+                approver_name = self.get_user_name(approver_id) or approver_id
+
+                # 记录审批响应
+                from ai_assistant.core.approval_provider import ApprovalResponse
+                response = ApprovalResponse(
+                    approved=True,
+                    approver=approver_name,
+                    reason="已批准"
+                )
+
+                success = self.approval_provider.record_approval(request_id, response)
+                if success:
+                    logger.info(f"✅ 运维操作已批准: request_id={request_id}, "
+                               f"approver={approver_name}")
+                    return {
+                        "toast": {
+                            "type": "success",
+                            "content": "✅ 已批准，操作将立即执行"
+                        }
+                    }
+                else:
+                    logger.warning(f"⚠️ 审批请求不存在或已过期: request_id={request_id}")
+                    return {
+                        "toast": {
+                            "type": "warning",
+                            "content": "审批请求已过期或不存在"
+                        }
+                    }
+
+            # ===== 分支 5: 运维操作审批（拒绝） =====
+            if action_value.get("action") == "reject_operation":
+                request_id = action_value.get("request_id")
+                if not request_id:
+                    logger.warning("⚠️ reject_operation missing request_id")
+                    return {"toast": {"type": "error", "content": "审批请求已失效"}}
+
+                # 检查是否配置了审批提供者
+                if not self.approval_provider:
+                    logger.error("❌ approval_provider not configured")
+                    return {"toast": {"type": "error", "content": "审批功能未配置"}}
+
+                # 获取审批人信息
+                approver_id = event.get("operator", {}).get("open_id", "")
+                approver_name = self.get_user_name(approver_id) or approver_id
+
+                # 记录审批响应
+                from ai_assistant.core.approval_provider import ApprovalResponse
+                response = ApprovalResponse(
+                    approved=False,
+                    approver=approver_name,
+                    reason="管理员拒绝执行"
+                )
+
+                success = self.approval_provider.record_approval(request_id, response)
+                if success:
+                    logger.info(f"❌ 运维操作已拒绝: request_id={request_id}, "
+                               f"approver={approver_name}")
+                    return {
+                        "toast": {
+                            "type": "warning",
+                            "content": "❌ 已拒绝，操作不会执行"
+                        }
+                    }
+                else:
+                    logger.warning(f"⚠️ 审批请求不存在或已过期: request_id={request_id}")
+                    return {
+                        "toast": {
+                            "type": "warning",
+                            "content": "审批请求已过期或不存在"
+                        }
+                    }
+
+            # ===== 分支 6: 首次点赞 / 点踩 =====
             if not feedback_type or not message_id:
                 logger.warning("Missing feedback_type or message_id in card action")
                 return {}
@@ -1151,3 +1240,82 @@ class FeishuBotAdapter(IMAdapter):
         }
 
         return "post", json.dumps(post_content)
+
+    def send_operations_approval(
+        self,
+        operation,
+        operator,
+        approvers: List[Dict[str, str]],
+        timeout: int = 180
+    ) -> Optional[str]:
+        """
+        发送运维操作审批请求
+
+        Args:
+            operation: PendingOperation 对象
+            operator: OperatorIdentity 对象
+            approvers: 审批人列表，每项包含 open_id 和 name
+            timeout: 审批超时时间（秒）
+
+        Returns:
+            审批请求 ID，失败返回 None
+        """
+        try:
+            # 检查是否已配置审批提供者
+            if not self.approval_provider:
+                from ai_assistant.adapters.feishu_approval_provider import FeishuApprovalProvider
+                self.approval_provider = FeishuApprovalProvider(
+                    feishu_bot=self,
+                    approvers=approvers,
+                    timeout=timeout
+                )
+                logger.info("✅ 审批提供者已初始化")
+
+            # 构建审批请求
+            from ai_assistant.core.approval_provider import ApprovalRequest
+            request = ApprovalRequest(
+                operation=operation,
+                operator=operator,
+                request_message=f"{operator.username} 请求在 {operation.machine.name} 执行操作"
+            )
+
+            # 发送审批请求
+            request_id = self.approval_provider.send_approval_request(request)
+            logger.info(f"📤 审批请求已发送: request_id={request_id}")
+            return request_id
+
+        except Exception as e:
+            logger.error(f"❌ 发送审批请求失败: {e}", exc_info=True)
+            return None
+
+    def get_approval_status(self, request_id: str):
+        """
+        查询审批状态
+
+        Args:
+            request_id: 审批请求 ID
+
+        Returns:
+            ApprovalResponse 对象，未审批返回 None
+        """
+        if not self.approval_provider:
+            logger.warning("⚠️ 审批提供者未初始化")
+            return None
+
+        return self.approval_provider.get_approval_status(request_id)
+
+    def cancel_approval(self, request_id: str) -> bool:
+        """
+        取消审批请求
+
+        Args:
+            request_id: 审批请求 ID
+
+        Returns:
+            是否成功取消
+        """
+        if not self.approval_provider:
+            logger.warning("⚠️ 审批提供者未初始化")
+            return False
+
+        return self.approval_provider.cancel_approval_request(request_id)

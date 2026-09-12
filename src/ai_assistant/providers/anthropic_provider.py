@@ -80,6 +80,12 @@ class AnthropicProvider(AIProvider):
         self._agentic_sessions: set = set()
         self._agentic_sessions_lock = _threading.Lock()
 
+        # 运维工具（由外部注入）
+        self.operations_tools = None
+        self.operations_enabled = False
+        self._operations_sessions: set = set()  # 运维模式会话粘性标记
+        self._operations_sessions_lock = _threading.Lock()
+
     def set_git_tools(self, git_tools, enabled: bool = True, branch_hint: str = ""):
         """
         设置 git 工具（用于代码排查）
@@ -105,6 +111,18 @@ class AnthropicProvider(AIProvider):
         self.git_tools = repo_manager.current
         self.git_tools_enabled = True
         logger.info(f"多仓库管理器已注入: 当前仓库={repo_manager.current_repo_name}")
+
+    def set_operations_tools(self, operations_tools, enabled: bool = True):
+        """
+        设置运维工具（用于运维操作）
+
+        Args:
+            operations_tools: OperationsTools 实例
+            enabled: 是否启用
+        """
+        self.operations_tools = operations_tools
+        self.operations_enabled = enabled
+        logger.info(f"运维工具已{'启用' if enabled else '禁用'}")
 
     def extract_keywords(self, query_text: str) -> KeywordExtractionResult:
         """
@@ -232,6 +250,58 @@ class AnthropicProvider(AIProvider):
                 self._agentic_sessions.add(session_id)
                 logger.info(f"会话 {session_id} 已标记为工具使用模式（后续追问自动继承）")
 
+    def _is_operations_session(self, session_id: str) -> bool:
+        """判断 session 是否已被标记为运维模式会话（线程安全）"""
+        with self._operations_sessions_lock:
+            return session_id in self._operations_sessions
+
+    def _mark_operations_session(self, session_id: Optional[str]) -> None:
+        """
+        将 session 标记为运维模式会话（线程安全）。
+
+        由 _send_with_context 在确认走 Operations 分支后调用，保证后续同 session
+        的追问持续继承运维模式。
+        """
+        if not session_id:
+            return
+        with self._operations_sessions_lock:
+            if session_id not in self._operations_sessions:
+                self._operations_sessions.add(session_id)
+                logger.info(f"会话 {session_id} 已标记为运维模式（后续追问自动继承）")
+
+    def _should_use_operations_mode(self, messages: List[Message], session_id: Optional[str] = None) -> bool:
+        """
+        判断是否应该使用 Operations 模式（运维工具调用）
+
+        触发条件（命中任一即进入）：
+        1. 运维工具已启用（前提）
+        2. 会话级粘性：该 session 曾进入过 Operations 模式
+        3. 显式 /运维 前缀
+
+        Args:
+            messages: 消息列表
+            session_id: 会话 ID（用于会话级粘性判断）
+
+        Returns:
+            是否使用 Operations 模式
+        """
+        if not self.operations_enabled or not self.operations_tools:
+            return False
+
+        # 1. 会话级粘性：该 session 进过运维模式，则一直保持
+        if session_id and self._is_operations_session(session_id):
+            logger.info(f"触发 Operations 模式：会话 {session_id} 已进入运维模式（会话级粘性继承）")
+            return True
+
+        last_user_text = self._extract_last_user_text(messages)
+
+        # 2. 检测 /运维 前缀
+        if last_user_text.strip().startswith("/运维") or last_user_text.strip().startswith("/ops"):
+            logger.info("触发 Operations 模式：检测到 /运维 或 /ops 前缀")
+            return True
+
+        return False
+
     def _has_explicit_command(self, text: str) -> bool:
         """
         检测显式斜杠指令
@@ -285,13 +355,27 @@ class AnthropicProvider(AIProvider):
         发送消息到 Claude 并获取回复
 
         根据消息内容自动选择模式：
-        - 有图片或排查关键词 → Agentic 模式（支持工具调用）
+        - /运维 前缀 → Operations 模式（运维工具调用）
+        - 有图片或排查关键词 → Agentic 模式（代码排查工具调用）
         - 其他 → 标准 RAG 模式
 
         Returns:
             (reply_text, metadata) 元组
-            metadata 包含：tool_rounds（Agentic）或 doc_count（RAG）等
+            metadata 包含：tool_rounds（Agentic/Operations）或 doc_count（RAG）等
         """
+        # 判断是否使用 Operations 模式
+        if self._should_use_operations_mode(messages, session_id):
+            logger.info("使用 Operations 模式（运维工具调用）")
+            self._mark_operations_session(session_id)
+            return self._send_with_context_operations(
+                messages,
+                doc_context,
+                session_id,
+                max_rounds=self.max_rounds,
+                timeout_mode=self.timeout_mode,
+                max_time=self.max_time
+            )
+
         # 判断是否使用 Agentic 模式
         if self._should_use_agentic_mode(messages, session_id):
             logger.info("使用 Agentic 模式（工具调用）")
@@ -720,6 +804,406 @@ class AnthropicProvider(AIProvider):
             return {"message": result_msg}
         else:
             return {"error": f"未知工具: {tool_name}"}
+
+    def _send_with_context_operations(
+        self,
+        messages: List[Message],
+        doc_context: str,
+        session_id: Optional[str] = None,
+        max_rounds: int = 6,
+        timeout_mode: str = "time",
+        max_time: int = 300,
+    ) -> tuple[str, dict]:
+        """
+        Operations 模式：支持运维工具调用的多轮对话
+
+        Args:
+            messages: 消息列表
+            doc_context: 文档上下文
+            session_id: 会话 ID
+            max_rounds: 最大工具调用轮数
+            timeout_mode: 超时模式 "time" / "rounds"
+            max_time: 总时间限制（秒），timeout_mode="time" 时生效
+
+        Returns:
+            (reply_text, metadata) 元组
+            metadata 包含 tool_rounds（实际工具调用轮数）
+        """
+        if not self.operations_tools:
+            return "❌ 运维工具未初始化", {"mode": "operations", "error": "not_initialized"}
+
+        # 生成运维工具的 Claude tools schema
+        tools_schema = self._generate_operations_tools_schema()
+
+        # 转换消息格式，移除 /运维 前缀
+        api_messages = []
+        for msg in messages:
+            content_parts = []
+            for content in msg.content:
+                if content.type == "text":
+                    text = content.data
+                    # 移除 /运维 或 /ops 前缀
+                    if text.strip().startswith("/运维"):
+                        text = text.strip()[3:].strip()
+                    elif text.strip().startswith("/ops"):
+                        text = text.strip()[4:].strip()
+                    content_parts.append({"type": "text", "text": text})
+                elif content.type == "image" and isinstance(content.data, dict):
+                    content_parts.append({
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": content.data.get("media_type", "image/png"),
+                            "data": content.data["data"],
+                        }
+                    })
+
+            if content_parts:
+                api_messages.append({"role": msg.role, "content": content_parts})
+
+        # 获取操作者身份信息（从最后一条消息的 metadata 中提取）
+        operator_info = "未知用户"
+        if messages:
+            last_msg = messages[-1]
+            if last_msg.metadata:
+                operator_name = last_msg.metadata.get("operator_name", "")
+                operator_id = last_msg.metadata.get("operator_id", "")
+                source = last_msg.metadata.get("source", "")
+                if operator_name or operator_id:
+                    operator_info = f"{operator_name} ({operator_id}, {source})"
+
+        # 构建 system prompt（运维助手指引）
+        system_parts = [
+            "你是运维助手，当前用户是授权运维人员。",
+            "",
+            "可用工具（所有工具都需要 machine_name 参数指定目标机器）：",
+            "- get_app_status(machine_name, app_name) - 查看应用运行状态",
+            "- get_app_version(machine_name, source, jar_path/log_path/version_file/api_url) - 查看应用版本/分支",
+            "- get_jar_info(machine_name, jar_path) - 分析 Java 应用 jar 包（获取 MANIFEST、Maven 信息、Git 版本）",
+            "- get_process_info(machine_name, pid/app_name) - 查看进程详情（CPU、内存、端口、线程数）",
+            "- get_system_metrics(machine_name) - 查看系统资源（CPU、内存、磁盘、负载）",
+            "- get_logs(machine_name, log_path, lines, grep_pattern) - 查看应用日志",
+            "- restart_app(machine_name, restart_script, reason, operator_id) - 重启应用（危险操作，需审批）",
+            "- stop_app(machine_name, stop_script/pid, reason, operator_id) - 停止应用（危险操作，需审批）",
+            "- start_app(machine_name, start_script, reason, operator_id) - 启动应用（危险操作，需审批）",
+            "",
+            "工具使用规则：",
+            "1. **machine_name 参数**：所有工具都需要指定目标机器名称",
+            "2. **自然语言理解**：支持模糊匹配，如 '生产1号' 可能匹配到 'production-server-1'",
+            "3. **危险操作审批**：restart/stop/start 会返回 need_approval=true 和 operation_id，告知用户等待审批",
+            "4. **错误处理**：如果工具返回 success=false，查看 error 字段了解原因",
+            "",
+            "安全规则：",
+            "1. 危险操作（重启/停止/启动）必须返回审批请求，不能直接执行",
+            "2. 只能操作配置中定义的机器和应用",
+            "3. 所有操作记录审计日志",
+            "4. 用户身份和操作原因会被记录",
+            "",
+            f"当前用户：{operator_info}",
+            "",
+            "工作流程：",
+            "1. 理解用户需求（查看状态、重启应用、排查问题等）",
+            "2. 使用合适的工具收集信息（如不确定机器名，先用 get_system_metrics 尝试）",
+            "3. 对于危险操作，明确说明影响并告知已提交审批请求",
+            "4. 给出清晰的结论和建议",
+            "",
+            "回复格式要求：",
+            "- 使用中文回答",
+            "- 执行操作时明确说明目标（哪台机器、哪个应用）",
+            "- 审批等待时告知用户 '已向管理员发送审批请求，操作 ID: {operation_id}'",
+            "- 操作完成后给出清晰的结果摘要（状态、资源使用、版本信息等）",
+            "- 如果工具调用失败，解释可能的原因（机器不存在、权限不足、连接失败等）",
+        ]
+
+        # 注入飞书文档（如果有）
+        if doc_context:
+            system_parts.append("")
+            system_parts.append(doc_context)
+
+        system_prompt = "\n".join(system_parts)
+
+        # Operations Agentic 循环
+        import time
+        start_time = time.time()
+        round_num = 0
+
+        while True:
+            round_num += 1
+
+            # 检查超时条件
+            elapsed = time.time() - start_time
+            if timeout_mode == "time":
+                if elapsed > max_time:
+                    logger.warning(f"达到总时间限制 {max_time}s，已执行 {round_num-1} 轮，耗时 {elapsed:.1f}s")
+                    break
+                logger.info(f"Operations 轮次 {round_num}/∞, 已耗时 {elapsed:.1f}s/{max_time}s")
+            elif timeout_mode == "rounds":
+                if round_num > max_rounds:
+                    logger.warning(f"达到最大轮数 {max_rounds}，返回当前结果")
+                    break
+                logger.info(f"Operations 轮次 {round_num}/{max_rounds}")
+            else:
+                logger.info(f"Operations 轮次 {round_num}")
+
+            try:
+                response = self.client.messages.create(
+                    model=self.model,
+                    max_tokens=4096,
+                    system=system_prompt,
+                    messages=api_messages,
+                    tools=tools_schema,
+                )
+
+                logger.info(
+                    f"Claude 响应: stop_reason={response.stop_reason}, "
+                    f"tokens(input:{response.usage.input_tokens}, output:{response.usage.output_tokens})"
+                )
+
+                # 收集本轮的 assistant 消息内容
+                assistant_content = []
+                tool_uses = []
+
+                for block in response.content:
+                    if block.type == "text":
+                        assistant_content.append({"type": "text", "text": block.text})
+                    elif block.type == "tool_use":
+                        assistant_content.append({
+                            "type": "tool_use",
+                            "id": block.id,
+                            "name": block.name,
+                            "input": block.input
+                        })
+                        tool_uses.append(block)
+
+                # 将 assistant 消息加入对话历史
+                api_messages.append({"role": "assistant", "content": assistant_content})
+
+                # 如果没有工具调用，返回最终文本
+                if response.stop_reason == "end_turn" or not tool_uses:
+                    final_text = ""
+                    for block in response.content:
+                        if hasattr(block, 'text'):
+                            final_text += block.text
+                    logger.info(f"Operations 完成: 总轮数={round_num}, 最终回复={len(final_text)}字符")
+
+                    # 构建 metadata（Operations 模式）
+                    metadata = {
+                        "mode": "operations",
+                        "tool_rounds": round_num,
+                    }
+
+                    return (final_text or "抱歉，未能生成有效回复。"), metadata
+
+                # 执行工具调用（串行执行，因为运维操作可能有状态变更）
+                tool_results = []
+
+                for tool_use in tool_uses:
+                    tool_name = tool_use.name
+                    tool_input = tool_use.input
+                    logger.info(f"执行运维工具: {tool_name}({tool_input})")
+
+                    try:
+                        result = self._execute_operations_tool(tool_name, tool_input)
+                        result_str = json.dumps(result, ensure_ascii=False)
+                        tool_results.append({
+                            "type": "tool_result",
+                            "tool_use_id": tool_use.id,
+                            "content": result_str
+                        })
+                        logger.debug(f"运维工具 {tool_name} 结果: {result}")
+
+                    except Exception as e:
+                        logger.error(f"运维工具 {tool_name} 执行失败: {e}")
+                        tool_results.append({
+                            "type": "tool_result",
+                            "tool_use_id": tool_use.id,
+                            "content": json.dumps({"error": str(e)}, ensure_ascii=False),
+                            "is_error": True
+                        })
+
+                # 将工具结果加入对话历史
+                api_messages.append({"role": "user", "content": tool_results})
+
+            except anthropic.APITimeoutError:
+                logger.error("Anthropic API 请求超时")
+                return "⏱️ AI 服务响应超时，请稍后重试", {"mode": "operations", "error": "timeout"}
+            except anthropic.APIConnectionError as e:
+                logger.error(f"Anthropic API 连接失败: {e}")
+                return "🔌 AI 服务连接失败，请检查网络或稍后重试", {"mode": "operations", "error": "connection"}
+            except anthropic.APIStatusError as e:
+                logger.error(f"Anthropic API 错误: status={e.status_code}, message={e.message}")
+                return f"❌ AI 服务调用失败: {e.message}", {"mode": "operations", "error": "api"}
+            except Exception as e:
+                logger.error(f"Operations 循环异常: {e}", exc_info=True)
+                return f"❌ 运维操作过程出错: {str(e)}", {"mode": "operations", "error": "exception"}
+
+        # 达到超时限制
+        timeout_msg = "⚠️ 运维操作较复杂，已达到总时间限制。以上是目前的结果，如需继续请提供更多信息。" if timeout_mode == "time" else "⚠️ 运维操作较复杂，已达到最大轮数。以上是目前的结果，如需继续请提供更多信息。"
+        return timeout_msg, {"mode": "operations", "tool_rounds": round_num, "timeout": True}
+
+    def _generate_operations_tools_schema(self) -> List[Dict[str, Any]]:
+        """
+        从 OperationsTools 实例自动生成 Claude tools schema
+
+        Returns:
+            Claude tools schema 列表
+        """
+        if not self.operations_tools:
+            return []
+
+        import inspect
+
+        schema = []
+
+        # 定义需要暴露给 AI 的方法（排除内部方法和辅助方法）
+        exposed_methods = [
+            'get_app_status',
+            'get_app_version',
+            'get_jar_info',
+            'get_process_info',
+            'get_system_metrics',
+            'get_logs',
+            'restart_app',
+            'stop_app',
+            'start_app',
+        ]
+
+        for method_name in exposed_methods:
+            method = getattr(self.operations_tools, method_name, None)
+            if not method or not callable(method):
+                continue
+
+            # 获取方法签名和文档
+            sig = inspect.signature(method)
+            doc = inspect.getdoc(method) or f"{method_name} 方法"
+
+            # 提取文档第一行作为描述
+            description_lines = doc.split('\n\n')[0].strip().split('\n')
+            description = ' '.join(line.strip() for line in description_lines if line.strip())
+
+            tool = {
+                "name": method_name,
+                "description": description,
+                "input_schema": {
+                    "type": "object",
+                    "properties": {},
+                    "required": []
+                }
+            }
+
+            # 首先添加 machine_name 参数（AI 传入机器名称字符串）
+            tool["input_schema"]["properties"]["machine_name"] = {
+                "type": "string",
+                "description": "目标机器名称（支持模糊匹配，如 'web-1' 或 '生产服务器1'）"
+            }
+            tool["input_schema"]["required"].append("machine_name")
+
+            # 解析其他参数（跳过 self 和 machine）
+            for param_name, param in sig.parameters.items():
+                if param_name in ('self', 'machine', 'operator_id'):
+                    # operator_id 由系统自动注入，不需要 AI 提供
+                    continue
+
+                # 根据类型注解确定参数类型
+                param_type = "string"
+                if param.annotation != inspect.Parameter.empty:
+                    if param.annotation == int:
+                        param_type = "integer"
+                    elif param.annotation == bool:
+                        param_type = "boolean"
+                    elif hasattr(param.annotation, '__origin__'):
+                        # 处理 Optional[str] 等类型
+                        origin = getattr(param.annotation, '__origin__', None)
+                        if origin is list:
+                            param_type = "array"
+
+                # 从文档中提取参数描述
+                param_description = f"{param_name} 参数"
+                if 'Args:' in doc:
+                    args_section = doc.split('Args:')[1].split('Returns:')[0]
+                    for line in args_section.split('\n'):
+                        if param_name + ':' in line or param_name + ' :' in line:
+                            desc_parts = line.split(':', 1)
+                            if len(desc_parts) > 1:
+                                param_description = desc_parts[1].strip()
+                                break
+
+                tool["input_schema"]["properties"][param_name] = {
+                    "type": param_type,
+                    "description": param_description
+                }
+
+                # 必需参数（没有默认值且不是 Optional）
+                if param.default == inspect.Parameter.empty:
+                    tool["input_schema"]["required"].append(param_name)
+
+            schema.append(tool)
+
+        logger.info(f"自动生成 {len(schema)} 个运维工具 schema")
+        return schema
+
+    def _execute_operations_tool(self, tool_name: str, tool_input: Dict[str, Any]) -> Any:
+        """
+        执行运维工具调用
+
+        Args:
+            tool_name: 工具名称
+            tool_input: 工具参数
+
+        Returns:
+            工具执行结果
+        """
+        if not self.operations_tools:
+            return {"success": False, "error": "运维工具未初始化", "data": None}
+
+        try:
+            # 获取方法
+            method = getattr(self.operations_tools, tool_name, None)
+            if not method or not callable(method):
+                return {"success": False, "error": f"未知运维工具: {tool_name}", "data": None}
+
+            # OperationsTools 的方法第一个参数是 Machine 对象
+            # AI 传入的是机器名称字符串，需要转换
+            # 但并非所有工具都需要 machine 参数（如 list_machines）
+
+            # 检查方法签名中是否需要 machine 参数
+            import inspect
+            sig = inspect.signature(method)
+            params = list(sig.parameters.keys())
+
+            # 如果方法需要 machine 参数，从 operations_manager 查找
+            if 'machine' in params and self.operations_tools.operations_manager:
+                machine_name = tool_input.pop('machine_name', None)
+                if not machine_name:
+                    return {"success": False, "error": "缺少 machine_name 参数", "data": None}
+
+                machine = self.operations_tools.operations_manager.find_machine(machine_name)
+                if not machine:
+                    return {
+                        "success": False,
+                        "error": f"未找到机器: {machine_name}",
+                        "data": None
+                    }
+
+                # 调用方法，传入 Machine 对象
+                result = method(machine, **tool_input)
+            else:
+                # 不需要 machine 参数，直接调用
+                result = method(**tool_input)
+
+            # 确保返回格式统一
+            if not isinstance(result, dict):
+                result = {"success": True, "data": result, "error": None}
+
+            # 处理 need_approval 情况
+            if result.get("need_approval"):
+                logger.info(f"运维操作需要审批: {tool_name}, operation_id={result.get('operation_id')}")
+
+            return result
+
+        except Exception as e:
+            logger.error(f"运维工具 {tool_name} 执行异常: {e}", exc_info=True)
+            return {"success": False, "error": str(e), "data": None}
 
     def _send_with_context_standard(
         self,

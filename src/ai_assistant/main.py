@@ -456,6 +456,14 @@ class AIAssistant:
                     content=content_parts,
                     timestamp=datetime.now()
                 )
+                # 如果是运维模式，在消息 metadata 中附加操作者信息
+                if text and (text.strip().startswith("/运维") or text.strip().startswith("/ops")):
+                    user_message.metadata = {
+                        "operator_id": parsed.get("sender_id", ""),
+                        "operator_name": parsed.get("sender_name", ""),
+                        "operator_display_name": parsed.get("sender_display_name", ""),
+                        "source": "feishu"
+                    }
                 self.context_manager.add_message(session_id, user_message)
 
             # 获取上下文消息
@@ -555,6 +563,10 @@ class AIAssistant:
             message_id = message.get("message_id", "")
             sender_id = sender.get("sender_id", {}).get("open_id", "")
 
+            # 提取发送者详细信息（用于运维模式鉴权）
+            sender_name = sender.get("sender_id", {}).get("user_id", "")  # 飞书用户ID
+            sender_display_name = ""  # 可以从 adapter 获取，这里先留空
+
             # 白名单检查
             if adapter:
                 if adapter.allowed_chats and chat_id not in adapter.allowed_chats:
@@ -585,6 +597,8 @@ class AIAssistant:
                     "text": text,
                     "message_id": message_id,
                     "sender_id": sender_id,
+                    "sender_name": sender_name,
+                    "sender_display_name": sender_display_name,
                     "image_data": None
                 }
 
@@ -610,6 +624,8 @@ class AIAssistant:
                     "text": "",  # 图片消息无文本
                     "message_id": message_id,
                     "sender_id": sender_id,
+                    "sender_name": sender_name,
+                    "sender_display_name": sender_display_name,
                     "image_data": image_data
                 }
 
@@ -661,6 +677,8 @@ class AIAssistant:
                     "text": text,
                     "message_id": message_id,
                     "sender_id": sender_id,
+                    "sender_name": sender_name,
+                    "sender_display_name": sender_display_name,
                     "image_data": image_data  # 可能为 None
                 }
 
