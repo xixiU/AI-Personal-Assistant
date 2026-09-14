@@ -1,7 +1,6 @@
 """运维操作相关的数据模型定义"""
 
 from dataclasses import dataclass, field
-from datetime import datetime
 from enum import Enum
 from typing import Optional, Dict, Any, List
 
@@ -13,10 +12,8 @@ class SSHMethod(Enum):
 
 
 class OperationRisk(Enum):
-    """运维操作风险等级"""
-    LOW = "low"           # 只读操作，无需审批
-    MEDIUM = "medium"     # 可恢复操作，需要审批
-    HIGH = "high"         # 破坏性操作，需要审批且有更严格的条件
+    """运维操作风险等级（当前仅使用 LOW，助手仅提供只读查询）"""
+    LOW = "low"           # 只读操作
 
 
 @dataclass
@@ -66,21 +63,3 @@ class OperatorIdentity:
     roles: List[str] = field(default_factory=list)  # 角色列表
     permissions: List[str] = field(default_factory=list)  # 权限列表
     metadata: Dict[str, Any] = field(default_factory=dict)  # 额外元数据
-
-
-@dataclass
-class PendingOperation:
-    """待审批的运维操作"""
-    operation_id: str                   # 操作唯一标识
-    operator: OperatorIdentity          # 操作者
-    machine: Machine                    # 目标机器
-    command: str                        # 待执行的命令
-    risk_level: OperationRisk           # 风险等级
-    reason: str = ""                    # 操作原因
-    created_at: datetime = field(default_factory=datetime.now)
-    expires_at: Optional[datetime] = None  # 过期时间
-    status: str = "pending"             # "pending" | "approved" | "rejected" | "expired" | "executed"
-    approver: Optional[str] = None      # 审批者
-    approved_at: Optional[datetime] = None
-    rejection_reason: Optional[str] = None
-    metadata: Dict[str, Any] = field(default_factory=dict)

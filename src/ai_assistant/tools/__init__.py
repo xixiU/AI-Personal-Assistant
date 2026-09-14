@@ -13,11 +13,9 @@ from ai_assistant.tools.operations_commands import (
     GetAppVersionCommand,
     GetJarInfoCommand,
     GetProcessInfoCommand,
+    GetPortInfoCommand,
     GetSystemMetricsCommand,
     GetLogsCommand,
-    RestartAppCommand,
-    StopAppCommand,
-    StartAppCommand,
 )
 
 from ai_assistant.tools.operations_tools import OperationsTools
@@ -32,11 +30,9 @@ __all__ = [
     "GetAppVersionCommand",
     "GetJarInfoCommand",
     "GetProcessInfoCommand",
+    "GetPortInfoCommand",
     "GetSystemMetricsCommand",
     "GetLogsCommand",
-    "RestartAppCommand",
-    "StopAppCommand",
-    "StartAppCommand",
     # Tools
     "OperationsTools",
 ]

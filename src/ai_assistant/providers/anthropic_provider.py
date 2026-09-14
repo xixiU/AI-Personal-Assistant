@@ -863,16 +863,43 @@ class AnthropicProvider(AIProvider):
 
         # 获取操作者身份信息（从最后一条消息的 metadata 中提取）
         operator_info = "未知用户"
+        operator_id = ""
+        operator_name = ""
+        source = "feishu"
         chat_id = None  # 用于群组白名单检查
         if messages:
             last_msg = messages[-1]
             if last_msg.metadata:
                 operator_name = last_msg.metadata.get("operator_name", "")
                 operator_id = last_msg.metadata.get("operator_id", "")
-                source = last_msg.metadata.get("source", "")
+                source = last_msg.metadata.get("source", "") or "feishu"
                 chat_id = last_msg.metadata.get("chat_id")  # 提取 chat_id
                 if operator_name or operator_id:
                     operator_info = f"{operator_name} ({operator_id}, {source})"
+
+        # 只读鉴权门：仅允许白名单内的运维同事 / 授权群组使用查询能力
+        if self.operations_tools and self.operations_tools.operations_manager:
+            from ai_assistant.core.operations_models import OperatorIdentity
+            ops_manager = self.operations_tools.operations_manager
+            operator = OperatorIdentity(
+                user_id=operator_id or "unknown",
+                username=operator_name or operator_id or "unknown",
+                metadata={"channel": source},
+            )
+            # 任取一台机器做白名单/群组校验（授权是渠道级别，与具体机器无关）
+            any_machine = next(iter(ops_manager.machines.values()), None)
+            if not ops_manager.is_authorized(
+                operator, any_machine, chat_id=chat_id
+            ):
+                logger.warning(
+                    f"运维查询被拒绝：用户 {operator.username} "
+                    f"(user_id={operator_id}, chat_id={chat_id}) 不在授权白名单/群组中"
+                )
+                return (
+                    "抱歉，您没有运维查询权限。请联系管理员将您加入运维白名单，"
+                    "或在已授权的运维群组中使用本功能。",
+                    {"mode": "operations", "error": "unauthorized"},
+                )
 
         # 构建 system prompt（运维助手指引）
         system_parts = [
@@ -922,7 +949,11 @@ class AnthropicProvider(AIProvider):
                     "重要：当多个应用同名但部署路径不同时（如不同版本/架构的 ts-service），"
                     "必须依据上面列出的『部署路径』来区分。查询进程时用 get_app_status 的 app_name "
                     "传入应用的部署路径（或路径中的唯一片段），而不是笼统的服务名，"
-                    "以免把不同版本的进程混在一起。"
+                    "以免把不同版本的进程混在一起。\n"
+                    "重要：判断『某端口是否有服务在运行』或『哪个进程占用了某端口』时，"
+                    "必须调用 get_port_info(machine_name, port)，禁止用 get_app_status(app_name=端口号)——"
+                    "端口号不在进程命令行里，那样查不到。get_port_info 返回的 cwd（工作目录）和 cmdline "
+                    "可与上面的部署路径比对，从而确认到底是哪个版本的服务在监听该端口。"
                 )
                 system_parts.append("")
 
@@ -932,38 +963,32 @@ class AnthropicProvider(AIProvider):
             "- get_app_version(machine_name, source, jar_path/log_path/version_file/api_url) - 查看应用版本/分支",
             "- get_jar_info(machine_name, jar_path) - 分析 Java 应用 jar 包（获取 MANIFEST、Maven 信息、Git 版本）",
             "- get_process_info(machine_name, pid/app_name) - 查看进程详情（CPU、内存、端口、线程数）",
+            "- get_port_info(machine_name, port) - 按端口号查询监听进程（PID、命令行、工作目录），判断端口是否有服务在运行时必须用它",
             "- get_system_metrics(machine_name) - 查看系统资源（CPU、内存、磁盘、负载）",
             "- get_logs(machine_name, log_path, lines, grep_pattern) - 查看应用日志",
-            "- restart_app(machine_name, restart_script, reason, operator_id) - 重启应用（危险操作，需审批）",
-            "- stop_app(machine_name, stop_script/pid, reason, operator_id) - 停止应用（危险操作，需审批）",
-            "- start_app(machine_name, start_script, reason, operator_id) - 启动应用（危险操作，需审批）",
+            "",
+            "本助手仅提供【只读查询】能力，不提供重启/停止/启动等任何有副作用的操作。"
+            "如果用户要求重启、停止、启动、部署、修改配置等写操作，请礼貌说明本助手只支持查询，"
+            "相关变更请运维同事手动执行。",
             "",
             "工具使用规则：",
             "1. **machine_name 参数**：使用上面列出的机器名称或别名",
             "2. **自然语言理解**：用户说'研发环境'时，使用别名映射到对应的机器名",
-            "3. **危险操作审批**：restart/stop/start 会返回 need_approval=true 和 operation_id，告知用户等待审批",
-            "4. **错误处理**：如果工具返回 success=false，查看 error 字段了解原因",
-            "",
-            "安全规则：",
-            "1. 危险操作（重启/停止/启动）必须返回审批请求，不能直接执行",
-            "2. 只能操作配置中定义的机器和应用",
-            "3. 所有操作记录审计日志",
-            "4. 用户身份和操作原因会被记录",
+            "3. **错误处理**：如果工具返回 success=false，查看 error 字段了解原因",
+            "4. **只读约束**：只能查询配置中定义的机器和应用，不得尝试执行任何变更类命令",
             "",
             f"当前用户：{operator_info}",
             "",
             "工作流程：",
-            "1. 理解用户需求（查看状态、重启应用、排查问题等）",
-            "2. 使用合适的工具收集信息（如不确定机器名，先用 get_system_metrics 尝试）",
-            "3. 对于危险操作，明确说明影响并告知已提交审批请求",
-            "4. 给出清晰的结论和建议",
+            "1. 理解用户的查询需求（查看状态、版本、日志、端口、资源等）",
+            "2. 使用合适的只读工具收集信息",
+            "3. 给出清晰的结论和建议",
             "",
             "回复格式要求：",
             "- 使用中文回答",
-            "- 执行操作时明确说明目标（哪台机器、哪个应用）",
-            "- 审批等待时告知用户 '已向管理员发送审批请求，操作 ID: {operation_id}'",
-            "- 操作完成后给出清晰的结果摘要（状态、资源使用、版本信息等）",
-            "- 如果工具调用失败，解释可能的原因（机器不存在、权限不足、连接失败等）",
+            "- 查询时明确说明目标（哪台机器、哪个应用）",
+            "- 查询完成后给出清晰的结果摘要（状态、资源使用、版本信息等）",
+            "- 如果工具调用失败，解释可能的原因（机器不存在、连接失败等）",
         ])
 
         # 注入飞书文档（如果有）
@@ -1112,11 +1137,9 @@ class AnthropicProvider(AIProvider):
             'get_app_version',
             'get_jar_info',
             'get_process_info',
+            'get_port_info',
             'get_system_metrics',
             'get_logs',
-            'restart_app',
-            'stop_app',
-            'start_app',
         ]
 
         for method_name in exposed_methods:
@@ -1252,10 +1275,6 @@ class AnthropicProvider(AIProvider):
             # 确保返回格式统一
             if not isinstance(result, dict):
                 result = {"success": True, "data": result, "error": None}
-
-            # 处理 need_approval 情况
-            if result.get("need_approval"):
-                logger.info(f"运维操作需要审批: {tool_name}, operation_id={result.get('operation_id')}")
 
             return result
 

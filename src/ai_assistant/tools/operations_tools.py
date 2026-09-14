@@ -13,7 +13,6 @@ from loguru import logger
 
 from ai_assistant.core.operations_models import (
     Machine,
-    OperationRisk,
 )
 from ai_assistant.tools.operations_commands import (
     get_command_registry,
@@ -22,11 +21,9 @@ from ai_assistant.tools.operations_commands import (
     GetAppVersionCommand,
     GetJarInfoCommand,
     GetProcessInfoCommand,
+    GetPortInfoCommand,
     GetSystemMetricsCommand,
     GetLogsCommand,
-    RestartAppCommand,
-    StopAppCommand,
-    StartAppCommand,
 )
 
 
@@ -365,6 +362,49 @@ class OperationsTools:
             logger.error(f"get_process_info failed: {e}")
             return self._error_result(f"Failed to get process info: {str(e)}")
 
+    def get_port_info(
+        self,
+        machine: Machine,
+        port: int
+    ) -> Dict[str, Any]:
+        """
+        根据端口号查询正在监听该端口的进程
+
+        当需要确认「某个端口是否有服务在运行」或「哪个进程占用了某端口」时，
+        必须使用本工具，而不是用 get_app_status(app_name=端口号)——因为端口号不会
+        出现在进程命令行里，用 grep 端口号是查不到服务的。
+
+        本工具通过 ss/netstat 定位监听 PID，并返回该进程的完整命令行和工作目录
+        （cwd），可用于区分部署路径不同的同名服务（如 ts-cs 与 ts-bs）。
+
+        Args:
+            machine: 目标机器
+            port: 端口号（整数，如 8181）
+
+        Returns:
+            Dict[str, Any]: 执行结果
+                - success: bool - 是否成功
+                - data: dict - 端口信息
+                    - port: int - 查询的端口
+                    - listening: bool - 是否有进程在监听
+                    - pids: list - 监听该端口的 PID 列表
+                    - processes: list - 每个进程的详情（basic/cmdline/cwd）
+                    - message: str - 当无监听时的说明
+                - error: str - 错误信息（如果失败）
+
+        Example:
+            >>> result = tools.get_port_info(machine, port=8181)
+            >>> if result["success"] and result["data"]["listening"]:
+            >>>     print(result["data"]["processes"][0]["cwd"])
+        """
+        try:
+            command = GetPortInfoCommand(cipher=self._cipher)
+            result = command.execute(machine, port=port)
+            return self._format_result(result)
+        except Exception as e:
+            logger.error(f"get_port_info failed: {e}")
+            return self._error_result(f"Failed to get port info: {str(e)}")
+
     def get_system_metrics(
         self,
         machine: Machine
@@ -454,186 +494,6 @@ class OperationsTools:
             logger.error(f"get_logs failed: {e}")
             return self._error_result(f"Failed to get logs: {str(e)}")
 
-    # ==================== 危险操作（需要审批） ====================
-
-    def restart_app(
-        self,
-        machine: Machine,
-        restart_script: str,
-        reason: str = "",
-        operator_id: Optional[str] = None,
-        chat_id: Optional[str] = None
-    ) -> Dict[str, Any]:
-        """
-        重启应用服务（危险操作，需要审批）
-
-        Args:
-            machine: 目标机器
-            restart_script: 重启脚本路径
-            reason: 操作原因（用于审批记录）
-            operator_id: 操作者 ID（可选）
-            chat_id: 群组/会话ID（用于群组白名单检查）
-
-        Returns:
-            Dict[str, Any]: 执行结果
-                - success: bool - 是否成功
-                - data: dict - 执行数据
-                - error: str - 错误信息（如果失败）
-                - need_approval: bool - 是否需要审批（如果返回 True，表示已创建审批请求）
-                - operation_id: str - 操作 ID（如果需要审批）
-
-        Example:
-            >>> result = tools.restart_app(
-            >>>     machine,
-            >>>     restart_script="/app/restart.sh",
-            >>>     reason="应用无响应需要重启",
-            >>>     operator_id="user123"
-            >>> )
-            >>> if result.get("need_approval"):
-            >>>     print(f"需要审批，操作 ID: {result['operation_id']}")
-        """
-        try:
-            command = RestartAppCommand(cipher=self._cipher)
-
-            # 检查是否需要审批
-            if self.operations_manager and command.risk_level in [OperationRisk.MEDIUM, OperationRisk.HIGH]:
-                # 创建审批请求
-                approval_result = self._create_approval_request(
-                    machine=machine,
-                    command_name=command.name,
-                    risk_level=command.risk_level,
-                    reason=reason,
-                    operator_id=operator_id,
-                    chat_id=chat_id,
-                    params={"restart_script": restart_script}
-                )
-
-                if approval_result.get("need_approval"):
-                    return approval_result
-
-            # 直接执行（无需审批或已审批）
-            result = command.execute(machine, restart_script=restart_script)
-            return self._format_result(result)
-
-        except Exception as e:
-            logger.error(f"restart_app failed: {e}")
-            return self._error_result(f"Failed to restart app: {str(e)}")
-
-    def stop_app(
-        self,
-        machine: Machine,
-        stop_script: Optional[str] = None,
-        pid: Optional[int] = None,
-        reason: str = "",
-        operator_id: Optional[str] = None,
-        chat_id: Optional[str] = None
-    ) -> Dict[str, Any]:
-        """
-        停止应用服务（危险操作，需要审批）
-
-        Args:
-            machine: 目标机器
-            stop_script: 停止脚本路径（可选）
-            pid: 进程 ID（可选，如果不提供脚本则使用 kill）
-            reason: 操作原因（用于审批记录）
-            operator_id: 操作者 ID（可选）
-            chat_id: 群组/会话ID（用于群组白名单检查）
-            注意：stop_script 和 pid 至少提供一个
-
-        Returns:
-            Dict[str, Any]: 执行结果（格式同 restart_app）
-
-        Example:
-            >>> result = tools.stop_app(
-            >>>     machine,
-            >>>     stop_script="/app/stop.sh",
-            >>>     reason="进行版本升级",
-            >>>     operator_id="user123"
-            >>> )
-        """
-        try:
-            command = StopAppCommand(cipher=self._cipher)
-
-            # 检查是否需要审批
-            if self.operations_manager and command.risk_level in [OperationRisk.MEDIUM, OperationRisk.HIGH]:
-                # 创建审批请求
-                approval_result = self._create_approval_request(
-                    machine=machine,
-                    command_name=command.name,
-                    risk_level=command.risk_level,
-                    reason=reason,
-                    operator_id=operator_id,
-                    chat_id=chat_id,
-                    params={"stop_script": stop_script, "pid": pid}
-                )
-
-                if approval_result.get("need_approval"):
-                    return approval_result
-
-            # 直接执行（无需审批或已审批）
-            result = command.execute(machine, stop_script=stop_script, pid=pid)
-            return self._format_result(result)
-
-        except Exception as e:
-            logger.error(f"stop_app failed: {e}")
-            return self._error_result(f"Failed to stop app: {str(e)}")
-
-    def start_app(
-        self,
-        machine: Machine,
-        start_script: str,
-        reason: str = "",
-        operator_id: Optional[str] = None,
-        chat_id: Optional[str] = None
-    ) -> Dict[str, Any]:
-        """
-        启动应用服务（危险操作，需要审批）
-
-        Args:
-            machine: 目标机器
-            start_script: 启动脚本路径
-            reason: 操作原因（用于审批记录）
-            operator_id: 操作者 ID（可选）
-            chat_id: 群组/会话ID（用于群组白名单检查）
-
-        Returns:
-            Dict[str, Any]: 执行结果（格式同 restart_app）
-
-        Example:
-            >>> result = tools.start_app(
-            >>>     machine,
-            >>>     start_script="/app/start.sh",
-            >>>     reason="版本升级完成后启动",
-            >>>     operator_id="user123"
-            >>> )
-        """
-        try:
-            command = StartAppCommand(cipher=self._cipher)
-
-            # 检查是否需要审批
-            if self.operations_manager and command.risk_level in [OperationRisk.MEDIUM, OperationRisk.HIGH]:
-                # 创建审批请求
-                approval_result = self._create_approval_request(
-                    machine=machine,
-                    command_name=command.name,
-                    risk_level=command.risk_level,
-                    reason=reason,
-                    operator_id=operator_id,
-                    chat_id=chat_id,
-                    params={"start_script": start_script}
-                )
-
-                if approval_result.get("need_approval"):
-                    return approval_result
-
-            # 直接执行（无需审批或已审批）
-            result = command.execute(machine, start_script=start_script)
-            return self._format_result(result)
-
-        except Exception as e:
-            logger.error(f"start_app failed: {e}")
-            return self._error_result(f"Failed to start app: {str(e)}")
-
     # ==================== 辅助方法 ====================
 
     def list_available_commands(self) -> List[Dict[str, Any]]:
@@ -651,63 +511,6 @@ class OperationsTools:
             >>>     print(f"{cmd['name']}: {cmd['description']} (风险: {cmd['risk_level']})")
         """
         return self.registry.list_commands()
-
-    def execute_custom_command(
-        self,
-        command_name: str,
-        machine: Machine,
-        **kwargs
-    ) -> Dict[str, Any]:
-        """
-        执行自定义注册的指令
-
-        Args:
-            command_name: 指令名称
-            machine: 目标机器
-            **kwargs: 指令参数
-
-        Returns:
-            Dict[str, Any]: 执行结果
-
-        Example:
-            >>> # 假设用户注册了自定义指令 "check_database"
-            >>> result = tools.execute_custom_command(
-            >>>     "check_database",
-            >>>     machine,
-            >>>     db_name="mydb"
-            >>> )
-        """
-        try:
-            command = self.registry.get(command_name)
-            if not command:
-                return self._error_result(f"Command '{command_name}' not found")
-
-            # 检查是否需要审批
-            if self.operations_manager and command.risk_level in [OperationRisk.MEDIUM, OperationRisk.HIGH]:
-                reason = kwargs.pop("reason", "")
-                operator_id = kwargs.pop("operator_id", None)
-                chat_id = kwargs.pop("chat_id", None)
-
-                approval_result = self._create_approval_request(
-                    machine=machine,
-                    command_name=command_name,
-                    risk_level=command.risk_level,
-                    reason=reason,
-                    operator_id=operator_id,
-                    chat_id=chat_id,
-                    params=kwargs
-                )
-
-                if approval_result.get("need_approval"):
-                    return approval_result
-
-            # 执行指令
-            result = command.execute(machine, **kwargs)
-            return self._format_result(result)
-
-        except Exception as e:
-            logger.error(f"execute_custom_command failed: {e}")
-            return self._error_result(f"Failed to execute command: {str(e)}")
 
     # ==================== 内部辅助方法 ====================
 
@@ -728,74 +531,3 @@ class OperationsTools:
             "data": None,
             "error": error_message
         }
-
-    def _create_approval_request(
-        self,
-        machine: Machine,
-        command_name: str,
-        risk_level: OperationRisk,
-        reason: str,
-        operator_id: Optional[str],
-        chat_id: Optional[str],
-        params: Dict[str, Any]
-    ) -> Dict[str, Any]:
-        """
-        创建审批请求
-
-        Args:
-            machine: 目标机器
-            command_name: 指令名称
-            risk_level: 风险等级
-            reason: 操作原因
-            operator_id: 操作者 ID
-            chat_id: 群组/会话ID（用于群组白名单检查）
-            params: 指令参数
-
-        Returns:
-            Dict[str, Any]: 审批请求结果
-        """
-        try:
-            if not self.operations_manager:
-                return {"need_approval": False}
-
-            # 构造 OperatorIdentity 对象
-            from ai_assistant.core.operations_models import OperatorIdentity
-            operator = OperatorIdentity(
-                user_id=operator_id or "unknown",
-                username=operator_id or "unknown"
-            )
-
-            # 首先检查授权（包括个人白名单和群组白名单）
-            # is_authorized(operator: OperatorIdentity, machine: Machine, operation_type, chat_id)
-            if not self.operations_manager.is_authorized(
-                operator,
-                machine,
-                operation_type="write",
-                chat_id=chat_id
-            ):
-                return {
-                    "success": False,
-                    "need_approval": False,
-                    "data": None,
-                    "error": "未授权的操作者。您不在白名单中，也不在授权群组中。"
-                }
-
-            # 调用 operations_manager 的 request_approval 方法
-            operation_id = self.operations_manager.request_approval(
-                operator=operator,
-                machine=machine,
-                command=command_name,
-                reason=reason
-            )
-
-            return {
-                "success": False,
-                "need_approval": True,
-                "operation_id": operation_id,
-                "data": None,
-                "error": f"Operation requires approval (risk level: {risk_level.value}). Operation ID: {operation_id}"
-            }
-
-        except Exception as e:
-            logger.error(f"Failed to create approval request: {e}")
-            return self._error_result(f"Failed to create approval request: {str(e)}")

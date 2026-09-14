@@ -1,59 +1,49 @@
-"""运维操作管理器核心实现"""
+"""运维操作管理器核心实现（只读模式）"""
 
 import os
-import re
-import uuid
 import paramiko
 import threading
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Optional, Dict, List, Tuple, Any
 from loguru import logger
 from cryptography.fernet import Fernet
 
 from .operations_models import (
     SSHMethod,
-    OperationRisk,
     SSHConfig,
     Application,
     Machine,
     OperatorIdentity,
-    PendingOperation
 )
-from .approval_provider import ApprovalProvider, ApprovalRequest, ApprovalResponse
 
 
 class OperationsManager:
-    """运维操作管理器
+    """运维操作管理器（只读模式）
 
     负责：
     1. 机器和应用管理
     2. SSH 连接池管理
-    3. 命令执行（安全控制）
-    4. 权限验证
-    5. 审批流程管理
-    6. 风险评估
+    3. 只读命令执行（查询状态、日志等）
+    4. 权限验证（白名单机制）
     """
 
     def __init__(
         self,
         machines: List[Machine],
         applications: List[Application],
-        approval_provider: Optional[ApprovalProvider] = None,
         encrypt_key: Optional[str] = None,
         authorization_config: Optional[Dict] = None
     ):
-        """初始化运维管理器
+        """初始化运维管理器（只读查询）
 
         Args:
             machines: 机器配置列表
             applications: 应用配置列表
-            approval_provider: 审批提供者（可选）
             encrypt_key: 加密密钥（用于解密密码），从环境变量 OPERATIONS_ENCRYPT_KEY 读取
-            authorization_config: 权限配置（operators/approvers/groups）
+            authorization_config: 权限配置（operators/groups 白名单）
         """
         self.machines: Dict[str, Machine] = {m.name: m for m in machines}
         self.applications: Dict[str, Application] = {a.name: a for a in applications}
-        self.approval_provider = approval_provider
         self.authorization_config = authorization_config or {}
 
         # 初始化加密器
@@ -72,15 +62,7 @@ class OperationsManager:
         self._ssh_pool: Dict[str, paramiko.SSHClient] = {}
         self._ssh_pool_lock = threading.Lock()
 
-        # 审批队列
-        self._pending_operations: Dict[str, PendingOperation] = {}
-        self._pending_lock = threading.Lock()
-
-        # 超时检查定时器
-        self._expiry_timer: Optional[threading.Timer] = None
-        self._start_expiry_checker()
-
-        logger.info(f"运维管理器初始化完成: {len(self.machines)} 台机器, {len(self.applications)} 个应用")
+        logger.info(f"运维管理器初始化完成（只读模式）: {len(self.machines)} 台机器, {len(self.applications)} 个应用")
 
     @classmethod
     def from_config(cls, config: Dict) -> 'OperationsManager':
@@ -136,13 +118,9 @@ class OperationsManager:
         # 获取权限配置
         authorization_config = config.get('authorization', {})
 
-        # TODO: 初始化审批提供者（根据配置）
-        approval_provider = None
-
         return cls(
             machines=machines,
             applications=applications,
-            approval_provider=approval_provider,
             authorization_config=authorization_config
         )
 
@@ -295,15 +273,13 @@ class OperationsManager:
         self,
         operator: OperatorIdentity,
         machine: Machine,
-        operation_type: str = "read",
         chat_id: Optional[str] = None
     ) -> bool:
-        """检查操作者是否有权限操作指定机器
+        """检查操作者是否有权限访问指定机器（只读权限）
 
         Args:
             operator: 操作者身份
             machine: 目标机器
-            operation_type: 操作类型 ("read" | "write" | "admin")
             chat_id: 飞书群组ID（可选，用于群组白名单鉴权）
 
         Returns:
@@ -330,22 +306,6 @@ class OperationsManager:
                     return True
 
         logger.warning(f"用户 {operator.username} (user_id={operator.user_id}, chat_id={chat_id}) 无运维权限")
-        return False
-
-        # 超级管理员拥有所有权限
-        if "admin" in operator.roles or "superadmin" in operator.roles:
-            return True
-
-        # 检查特定权限
-        required_permission = f"{machine.name}:{operation_type}"
-        if required_permission in operator.permissions:
-            return True
-
-        # 检查通配符权限
-        wildcard_permission = f"*:{operation_type}"
-        if wildcard_permission in operator.permissions:
-            return True
-
         return False
 
     def find_machine(self, query: str) -> Optional[Machine]:
@@ -405,250 +365,6 @@ class OperationsManager:
 
         return None
 
-    def get_operation_risk(self, command: str, machine: Machine) -> OperationRisk:
-        """评估命令的风险等级
-
-        Args:
-            command: 待执行的命令
-            machine: 目标机器
-
-        Returns:
-            OperationRisk: 风险等级
-        """
-        command_lower = command.lower().strip()
-
-        # 高风险命令模式
-        high_risk_patterns = [
-            r'\brm\s+-rf\b',           # rm -rf
-            r'\bdel\s+/s\s+/q\b',      # Windows 递归删除
-            r'\bformat\b',             # 格式化
-            r'\bmkfs\b',               # 创建文件系统
-            r'\bdd\s+if=',             # dd 写入
-            r'\bshutdown\b',           # 关机
-            r'\breboot\b',             # 重启
-            r'\bkill\s+-9\s+1\b',      # 杀死 init 进程
-            r'\b>>\s*/dev/sda\b',      # 直接写入磁盘
-            r'\bdrop\s+database\b',    # 删除数据库
-            r'\bdrop\s+table\b',       # 删除表
-            r'\btruncate\s+table\b',   # 清空表
-        ]
-
-        for pattern in high_risk_patterns:
-            if re.search(pattern, command_lower):
-                return OperationRisk.HIGH
-
-        # 中风险命令模式
-        medium_risk_patterns = [
-            r'\brm\b',                 # rm（非 -rf）
-            r'\bmv\b',                 # 移动文件
-            r'\bcp\b.*\b-f\b',        # 强制复制
-            r'\bsystemctl\s+stop\b',   # 停止服务
-            r'\bsystemctl\s+restart\b', # 重启服务
-            r'\bkill\b',               # 杀进程
-            r'\bpkill\b',              # 批量杀进程
-            r'\bdelete\s+from\b',      # SQL 删除
-            r'\bupdate\b.*\bset\b',    # SQL 更新
-            r'\binsert\s+into\b',      # SQL 插入
-            r'\bchmod\b',              # 修改权限
-            r'\bchown\b',              # 修改所有者
-        ]
-
-        for pattern in medium_risk_patterns:
-            if re.search(pattern, command_lower):
-                return OperationRisk.MEDIUM
-
-        # 默认为低风险（只读操作）
-        return OperationRisk.LOW
-
-    def execute_ssh_command(
-        self,
-        machine: Machine,
-        command: str,
-        operator: OperatorIdentity,
-        skip_approval: bool = False,
-        chat_id: Optional[str] = None
-    ) -> Tuple[bool, str]:
-        """执行 SSH 命令（带权限检查和审批流程）
-
-        Args:
-            machine: 目标机器
-            command: 待执行的命令
-            operator: 操作者身份
-            skip_approval: 是否跳过审批（仅用于测试或紧急情况）
-            chat_id: 飞书群组ID（可选，用于群组白名单鉴权）
-
-        Returns:
-            Tuple[bool, str]: (是否成功, 输出内容或错误信息)
-        """
-        # 1. 权限检查
-        risk_level = self.get_operation_risk(command, machine)
-        operation_type = "read" if risk_level == OperationRisk.LOW else "write"
-
-        if not self.is_authorized(operator, machine, operation_type, chat_id=chat_id):
-            return False, f"权限不足: 用户 {operator.username} 无权在 {machine.display_name} 上执行 {operation_type} 操作"
-
-        # 2. 审批流程（中高风险且未跳过审批）
-        if not skip_approval and risk_level in (OperationRisk.MEDIUM, OperationRisk.HIGH):
-            if not self.approval_provider:
-                return False, "需要审批但未配置审批提供者"
-
-            # 创建待审批操作
-            operation_id = str(uuid.uuid4())
-            pending_op = PendingOperation(
-                operation_id=operation_id,
-                operator=operator,
-                machine=machine,
-                command=command,
-                risk_level=risk_level,
-                created_at=datetime.now(),
-                expires_at=datetime.now() + timedelta(minutes=30),  # 30分钟过期
-                status="pending"
-            )
-
-            with self._pending_lock:
-                self._pending_operations[operation_id] = pending_op
-
-            # 发送审批请求
-            try:
-                approval_request = ApprovalRequest(
-                    operation=pending_op,
-                    operator=operator,
-                    request_message=f"用户 {operator.username} 请求在 {machine.display_name} 上执行命令:\n{command}\n风险等级: {risk_level.value}"
-                )
-                request_id = self.approval_provider.send_approval_request(approval_request)
-                logger.info(f"已发送审批请求: {request_id}")
-                return False, f"操作需要审批，请等待审批完成。操作ID: {operation_id}"
-            except Exception as e:
-                logger.error(f"发送审批请求失败: {e}")
-                return False, f"发送审批请求失败: {e}"
-
-        # 3. 执行命令
-        try:
-            ssh_client = self._get_ssh_client(machine)
-            stdin, stdout, stderr = ssh_client.exec_command(command, timeout=machine.ssh_config.timeout)
-
-            # 读取输出
-            output = stdout.read().decode('utf-8', errors='ignore')
-            error = stderr.read().decode('utf-8', errors='ignore')
-            exit_code = stdout.channel.recv_exit_status()
-
-            if exit_code == 0:
-                logger.info(f"命令执行成功: {machine.name} - {command[:50]}...")
-                return True, output
-            else:
-                logger.warning(f"命令执行失败 (exit={exit_code}): {machine.name} - {command[:50]}...")
-                return False, f"命令执行失败 (exit code {exit_code}):\n{error}"
-
-        except Exception as e:
-            logger.error(f"SSH 命令执行异常: {machine.name} - {e}")
-            return False, f"SSH 命令执行异常: {e}"
-
-    def request_approval(
-        self,
-        operator: OperatorIdentity,
-        machine: Machine,
-        command: str,
-        reason: str = ""
-    ) -> str:
-        """手动请求审批
-
-        Args:
-            operator: 操作者
-            machine: 目标机器
-            command: 待执行命令
-            reason: 操作原因
-
-        Returns:
-            str: 操作ID
-        """
-        operation_id = str(uuid.uuid4())
-        risk_level = self.get_operation_risk(command, machine)
-
-        pending_op = PendingOperation(
-            operation_id=operation_id,
-            operator=operator,
-            machine=machine,
-            command=command,
-            risk_level=risk_level,
-            reason=reason,
-            created_at=datetime.now(),
-            expires_at=datetime.now() + timedelta(minutes=30),
-            status="pending"
-        )
-
-        with self._pending_lock:
-            self._pending_operations[operation_id] = pending_op
-
-        logger.info(f"创建待审批操作: {operation_id}")
-        return operation_id
-
-    def approve_operation(self, operation_id: str, approver: str) -> bool:
-        """审批通过操作
-
-        Args:
-            operation_id: 操作ID
-            approver: 审批者标识
-
-        Returns:
-            bool: 是否成功
-        """
-        with self._pending_lock:
-            if operation_id not in self._pending_operations:
-                logger.warning(f"操作不存在: {operation_id}")
-                return False
-
-            operation = self._pending_operations[operation_id]
-            if operation.status != "pending":
-                logger.warning(f"操作状态不是 pending: {operation_id} ({operation.status})")
-                return False
-
-            operation.status = "approved"
-            operation.approver = approver
-            operation.approved_at = datetime.now()
-
-        logger.info(f"操作已审批通过: {operation_id} by {approver}")
-        return True
-
-    def reject_operation(self, operation_id: str, approver: str, reason: str = "") -> bool:
-        """拒绝操作
-
-        Args:
-            operation_id: 操作ID
-            approver: 审批者标识
-            reason: 拒绝原因
-
-        Returns:
-            bool: 是否成功
-        """
-        with self._pending_lock:
-            if operation_id not in self._pending_operations:
-                logger.warning(f"操作不存在: {operation_id}")
-                return False
-
-            operation = self._pending_operations[operation_id]
-            if operation.status != "pending":
-                logger.warning(f"操作状态不是 pending: {operation_id} ({operation.status})")
-                return False
-
-            operation.status = "rejected"
-            operation.approver = approver
-            operation.approved_at = datetime.now()
-            operation.rejection_reason = reason
-
-        logger.info(f"操作已拒绝: {operation_id} by {approver}, 原因: {reason}")
-        return True
-
-    def get_operation_status(self, operation_id: str) -> Optional[PendingOperation]:
-        """获取操作状态
-
-        Args:
-            operation_id: 操作ID
-
-        Returns:
-            Optional[PendingOperation]: 操作详情，不存在返回 None
-        """
-        with self._pending_lock:
-            return self._pending_operations.get(operation_id)
 
     def _get_ssh_client(self, machine: Machine) -> paramiko.SSHClient:
         """获取或创建 SSH 连接
@@ -730,43 +446,8 @@ class OperationsManager:
             logger.error(f"密码解密失败: {e}")
             raise
 
-    def _start_expiry_checker(self):
-        """启动过期检查定时器"""
-        self._check_expired_operations()
-        # 每分钟检查一次
-        self._expiry_timer = threading.Timer(60.0, self._start_expiry_checker)
-        self._expiry_timer.daemon = True
-        self._expiry_timer.start()
-
-    def _check_expired_operations(self):
-        """检查并标记过期的操作"""
-        now = datetime.now()
-        expired_count = 0
-
-        with self._pending_lock:
-            for operation in self._pending_operations.values():
-                if operation.status == "pending" and operation.expires_at and operation.expires_at < now:
-                    self._expire_operation(operation)
-                    expired_count += 1
-
-        if expired_count > 0:
-            logger.info(f"已标记 {expired_count} 个过期操作")
-
-    def _expire_operation(self, operation: PendingOperation):
-        """标记操作为过期
-
-        Args:
-            operation: 待标记的操作
-        """
-        operation.status = "expired"
-        logger.info(f"操作已过期: {operation.operation_id}")
-
     def close(self):
         """关闭管理器，释放资源"""
-        # 停止定时器
-        if self._expiry_timer:
-            self._expiry_timer.cancel()
-
         # 关闭所有 SSH 连接
         with self._ssh_pool_lock:
             for machine_name, client in self._ssh_pool.items():
@@ -777,7 +458,7 @@ class OperationsManager:
                     pass
             self._ssh_pool.clear()
 
-        logger.info("运维管理器已关闭")
+        logger.info("运维管理器已关闭（只读模式）")
 
     def __del__(self):
         """析构函数"""

@@ -9,6 +9,7 @@
 """
 
 import json
+import re
 import shlex
 import paramiko
 from abc import ABC, abstractmethod
@@ -623,7 +624,7 @@ class GetProcessInfoCommand(OperationCommand):
         try:
             # 如果没有提供 PID，尝试根据应用名称查找
             if pid is None and app_name:
-                status_cmd = GetAppStatusCommand()
+                status_cmd = GetAppStatusCommand(cipher=self.cipher)
                 status_result = status_cmd.execute(machine, app_name=app_name)
                 if status_result.success and status_result.data.get("processes"):
                     pid = int(status_result.data["processes"][0]["pid"])
@@ -685,6 +686,130 @@ class GetProcessInfoCommand(OperationCommand):
             return CommandResult(
                 success=False,
                 error=f"Failed to get process info: {str(e)}"
+            )
+
+
+class GetPortInfoCommand(OperationCommand):
+    """根据端口号查询监听该端口的进程详细信息"""
+
+    @property
+    def name(self) -> str:
+        return "get_port_info"
+
+    @property
+    def description(self) -> str:
+        return "根据端口号查询监听该端口的进程（PID/命令行/部署路径/工作目录）"
+
+    @property
+    def risk_level(self) -> OperationRisk:
+        return OperationRisk.LOW
+
+    def execute(
+        self,
+        machine: Machine,
+        port: int = None,
+        **kwargs
+    ) -> CommandResult:
+        """
+        根据端口号查询监听该端口的进程详细信息
+
+        Args:
+            machine: 目标机器
+            port: 端口号
+
+        Returns:
+            CommandResult: 执行结果
+        """
+        try:
+            # 端口号校验（AI 可能传入字符串）
+            try:
+                port = int(port)
+            except (TypeError, ValueError):
+                return CommandResult(
+                    success=False,
+                    error=f"Invalid port: {port!r}, must be an integer"
+                )
+
+            info = {"port": port}
+
+            # 1. 查找监听该端口的进程（ss 优先，netstat 兜底）
+            #    grep ':{port} ' 精确匹配「本地地址:端口」后跟空格，避免误匹配 :81810 之类
+            listen_cmd = (
+                f"ss -tlnp 2>/dev/null | grep -E ':{port}[[:space:]]' "
+                f"|| netstat -tlnp 2>/dev/null | grep -E ':{port}[[:space:]]'"
+            )
+            listen_result = self._execute_ssh_command(machine.ssh_config, listen_cmd)
+
+            if not (listen_result.success and listen_result.data and listen_result.data.strip()):
+                return CommandResult(
+                    success=True,
+                    data={
+                        "port": port,
+                        "listening": False,
+                        "message": f"端口 {port} 当前没有 TCP 进程在监听（服务可能已停止，或使用非 TCP 协议）"
+                    }
+                )
+
+            raw_listen = listen_result.data.strip()
+            info["listening"] = True
+            info["raw_listen"] = raw_listen
+
+            # 2. 从监听行中解析 PID
+            #    ss 格式:  users:(("java",pid=12345,fd=123))
+            #    netstat 格式: 12345/java
+            pids = re.findall(r'pid=(\d+)', raw_listen)
+            if not pids:
+                pids = re.findall(r'(\d+)/\S+', raw_listen)
+            # 去重并保持顺序
+            seen = set()
+            pids = [p for p in pids if not (p in seen or seen.add(p))]
+
+            if not pids:
+                info["message"] = (
+                    f"端口 {port} 正在被监听，但无法解析出 PID"
+                    f"（可能权限不足，请确认使用 root 账号）"
+                )
+                return CommandResult(success=True, data=info)
+
+            # 3. 逐个 PID 采集进程详情（含完整命令行与工作目录，用于区分同名服务）
+            processes = []
+            for pid in pids:
+                proc = {"pid": int(pid)}
+
+                # 3.1 基本信息
+                ps_cmd = (
+                    f"ps -p {pid} -o pid,ppid,user,%cpu,%mem,etime,stat,comm --no-headers"
+                )
+                ps_result = self._execute_ssh_command(machine.ssh_config, ps_cmd)
+                if ps_result.success and ps_result.data and ps_result.data.strip():
+                    parts = ps_result.data.strip().split(None, 7)
+                    keys = ["pid", "ppid", "user", "cpu", "mem", "etime", "stat", "comm"]
+                    proc["basic"] = dict(zip(keys, parts))
+
+                # 3.2 完整命令行（/proc/{pid}/cmdline，避免 ps 截断）
+                cmdline_cmd = f"tr '\\0' ' ' < /proc/{pid}/cmdline 2>/dev/null"
+                cmdline_result = self._execute_ssh_command(machine.ssh_config, cmdline_cmd)
+                if cmdline_result.success and cmdline_result.data:
+                    proc["cmdline"] = cmdline_result.data.strip()
+
+                # 3.3 工作目录（关键：用于区分不同部署路径的同名服务）
+                cwd_cmd = f"readlink /proc/{pid}/cwd 2>/dev/null"
+                cwd_result = self._execute_ssh_command(machine.ssh_config, cwd_cmd)
+                if cwd_result.success and cwd_result.data:
+                    proc["cwd"] = cwd_result.data.strip()
+
+                processes.append(proc)
+
+            info["processes"] = processes
+            info["pids"] = [int(p) for p in pids]
+
+            return CommandResult(success=True, data=info)
+
+        except Exception as e:
+            logger.error(f"Get port info failed: {e}")
+            return CommandResult(
+                success=False,
+                error=f"Failed to get port info: {str(e)}"
             )
 
 
@@ -855,176 +980,6 @@ class GetLogsCommand(OperationCommand):
             )
 
 
-# ==================== 危险操作指令 ====================
-
-
-class RestartAppCommand(OperationCommand):
-    """重启应用"""
-
-    @property
-    def name(self) -> str:
-        return "restart_app"
-
-    @property
-    def description(self) -> str:
-        return "重启应用服务（危险操作，需要审批）"
-
-    @property
-    def risk_level(self) -> OperationRisk:
-        return OperationRisk.HIGH
-
-    def execute(
-        self,
-        machine: Machine,
-        restart_script: str,
-        **kwargs
-    ) -> CommandResult:
-        """
-        重启应用
-
-        Args:
-            machine: 目标机器
-            restart_script: 重启脚本路径
-
-        Returns:
-            CommandResult: 执行结果
-        """
-        try:
-            command = f"bash {shlex.quote(restart_script)}"
-            result = self._execute_ssh_command(machine.ssh_config, command, timeout=120)
-
-            if result.success:
-                return CommandResult(
-                    success=True,
-                    data={"message": "Application restarted successfully"},
-                    raw_output=result.raw_output
-                )
-            else:
-                return result
-
-        except Exception as e:
-            logger.error(f"Restart app failed: {e}")
-            return CommandResult(
-                success=False,
-                error=f"Failed to restart app: {str(e)}"
-            )
-
-
-class StopAppCommand(OperationCommand):
-    """停止应用"""
-
-    @property
-    def name(self) -> str:
-        return "stop_app"
-
-    @property
-    def description(self) -> str:
-        return "停止应用服务（危险操作，需要审批）"
-
-    @property
-    def risk_level(self) -> OperationRisk:
-        return OperationRisk.HIGH
-
-    def execute(
-        self,
-        machine: Machine,
-        stop_script: Optional[str] = None,
-        pid: Optional[int] = None,
-        **kwargs
-    ) -> CommandResult:
-        """
-        停止应用
-
-        Args:
-            machine: 目标机器
-            stop_script: 停止脚本路径（可选）
-            pid: 进程 ID（可选，如果不提供脚本则使用 kill）
-
-        Returns:
-            CommandResult: 执行结果
-        """
-        try:
-            if stop_script:
-                command = f"bash {shlex.quote(stop_script)}"
-            elif pid:
-                command = f"kill -15 {pid}"
-            else:
-                return CommandResult(
-                    success=False,
-                    error="Either 'stop_script' or 'pid' must be provided"
-                )
-
-            result = self._execute_ssh_command(machine.ssh_config, command, timeout=60)
-
-            if result.success:
-                return CommandResult(
-                    success=True,
-                    data={"message": "Application stopped successfully"},
-                    raw_output=result.raw_output
-                )
-            else:
-                return result
-
-        except Exception as e:
-            logger.error(f"Stop app failed: {e}")
-            return CommandResult(
-                success=False,
-                error=f"Failed to stop app: {str(e)}"
-            )
-
-
-class StartAppCommand(OperationCommand):
-    """启动应用"""
-
-    @property
-    def name(self) -> str:
-        return "start_app"
-
-    @property
-    def description(self) -> str:
-        return "启动应用服务（危险操作，需要审批）"
-
-    @property
-    def risk_level(self) -> OperationRisk:
-        return OperationRisk.MEDIUM
-
-    def execute(
-        self,
-        machine: Machine,
-        start_script: str,
-        **kwargs
-    ) -> CommandResult:
-        """
-        启动应用
-
-        Args:
-            machine: 目标机器
-            start_script: 启动脚本路径
-
-        Returns:
-            CommandResult: 执行结果
-        """
-        try:
-            command = f"bash {shlex.quote(start_script)}"
-            result = self._execute_ssh_command(machine.ssh_config, command, timeout=120)
-
-            if result.success:
-                return CommandResult(
-                    success=True,
-                    data={"message": "Application started successfully"},
-                    raw_output=result.raw_output
-                )
-            else:
-                return result
-
-        except Exception as e:
-            logger.error(f"Start app failed: {e}")
-            return CommandResult(
-                success=False,
-                error=f"Failed to start app: {str(e)}"
-            )
-
-
 # ==================== 指令注册中心 ====================
 
 
@@ -1042,11 +997,9 @@ class CommandRegistry:
             GetAppVersionCommand,
             GetJarInfoCommand,
             GetProcessInfoCommand,
+            GetPortInfoCommand,
             GetSystemMetricsCommand,
             GetLogsCommand,
-            RestartAppCommand,
-            StopAppCommand,
-            StartAppCommand,
         ]
 
         for cmd_class in builtin_commands:

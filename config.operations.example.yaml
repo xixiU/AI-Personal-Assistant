@@ -1,10 +1,11 @@
 # 运维操作配置示例
 # 复制为 config.yaml 中的 operations 段落
 
+
 operations:
-  # 权限控制
+  # 权限控制（白名单）
   authorization:
-    # 运维操作触发权限（白名单）
+    # 运维查询权限：命中白名单的用户即可使用只读查询
     operators:
       feishu:
         - open_id: "ou_alice123456"
@@ -16,7 +17,7 @@ operations:
       #   - user_id: "user_001"
       #     name: "王五"
 
-    # 群组白名单（群组内所有成员都有运维权限）
+    # 群组白名单（群组内所有成员都有运维查询权限）
     groups:
       feishu:
         - chat_id: "oc_1a2b3c4d5e6f"
@@ -27,17 +28,6 @@ operations:
       # wechat:
       #   - chat_id: "wxgroup_123"
       #     name: "微信运维群"
-
-    # 危险操作审批人（收确认消息的管理员，支持多人，一人同意即可执行）
-    approvers:
-      feishu:
-        - open_id: "ou_admin001"
-          name: "运维主管王五"
-        - open_id: "ou_admin002"
-          name: "技术总监赵六"
-
-    # 审批超时（秒），超时自动取消
-    approval_timeout: 180  # 3 分钟
 
   # 机器列表
   machines:
@@ -59,13 +49,10 @@ operations:
           path: "/opt/apps/order-service-4.3.6"
           type: "java"
 
-          # 运维脚本（相对路径，基于 path）
+          # 运维脚本（相对路径，基于 path）—— 仅只读查询命令
           scripts:
-            status: "./status.sh"        # 查状态（安全操作）
-            start: "./start.sh"          # 启动（危险操作）
-            stop: "./stop.sh"            # 停止（危险操作）
-            restart: "./restart.sh"      # 重启（危险操作）
-            health: "curl -s localhost:8080/actuator/health"  # 健康检查
+            status: "./status.sh"        # 查状态（只读）
+            health: "curl -s localhost:8080/actuator/health"  # 健康检查（只读）
 
           # 日志路径（相对于 path）
           logs:
@@ -103,10 +90,6 @@ operations:
             pid_file: "app.pid"  # PID 文件路径
             health_check_url: "http://localhost:8080/health"
 
-          # 操作风险级别覆盖（可选）
-          risk_overrides:
-            restart: "caution"  # 默认 danger，可降级为 caution（跳过审批）
-
         - name: "订单服务 v4.2.0"
           alias: ["旧版订单", "灰度订单"]
           description: "订单服务旧版本，用于灰度发布和回滚"
@@ -114,7 +97,6 @@ operations:
           type: "java"
           scripts:
             status: "./status.sh"
-            restart: "./restart.sh"
           logs:
             app: "logs/application.log"
           metadata:
@@ -141,9 +123,6 @@ operations:
           type: "python"
           scripts:
             status: "supervisorctl status user-service"
-            restart: "supervisorctl restart user-service"
-            stop: "supervisorctl stop user-service"
-            start: "supervisorctl start user-service"
           logs:
             app: "logs/app.log"
           metadata:
@@ -168,7 +147,6 @@ operations:
           type: "java"
           scripts:
             status: "./status.sh"
-            restart: "./restart.sh"
           logs:
             app: "logs/application.log"
 
