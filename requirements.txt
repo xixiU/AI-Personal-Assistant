@@ -18,6 +18,7 @@ jieba>=0.42.1
 rank-bm25>=0.2.2
 numpy<2  # 兼容 onnxruntime <1.18.0（用 NumPy 1.x 编译）
 cryptography>=41.0.0  # 运维操作密码加密
+paramiko>=3.0.0  # SSH 连接（运维操作）
 
 # 测试依赖
 pytest>=7.4.0

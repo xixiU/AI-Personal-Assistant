@@ -22,3 +22,6 @@ pywechat_inner/
 pyweixin/
 .claude
 data
+
+# 忽略docs/share
+docs/share

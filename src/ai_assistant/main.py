@@ -212,11 +212,33 @@ class AIAssistant:
                 if hasattr(self.ai_provider, 'set_operations_tools'):
                     self.ai_provider.set_operations_tools(self.operations_tools, enabled=True)
                     logger.info("运维操作功能已启用")
+
+                    # 测试SSH连接
+                    logger.info("开始测试SSH连接...")
+                    test_results = self.operations_manager.test_connections()
+
+                    # 输出测试摘要
+                    success_count = sum(1 for r in test_results.values() if r["success"])
+                    total_count = len(test_results)
+
+                    if success_count == total_count:
+                        logger.info(f"✅ SSH连接测试: 全部成功 ({success_count}/{total_count})")
+                    elif success_count > 0:
+                        logger.warning(f"⚠️  SSH连接测试: 部分成功 ({success_count}/{total_count})")
+                        for name, result in test_results.items():
+                            if not result["success"]:
+                                logger.warning(f"  - {name}: {result['message']}")
+                    else:
+                        logger.error(f"❌ SSH连接测试: 全部失败 ({success_count}/{total_count})")
+                        for name, result in test_results.items():
+                            logger.error(f"  - {name}: {result['message']}")
                 else:
                     logger.warning("当前 AI Provider 不支持运维功能")
             except Exception as e:
                 logger.error(f"初始化运维功能失败: {e}")
                 logger.warning("运维功能将不可用")
+                import traceback
+                logger.debug(f"详细错误: {traceback.format_exc()}")
 
         self.reply_executor = ReplyExecutor(
             mode=self.config.reply_mode,

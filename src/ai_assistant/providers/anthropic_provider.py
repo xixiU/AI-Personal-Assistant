@@ -286,18 +286,18 @@ class AnthropicProvider(AIProvider):
             是否使用 Operations 模式
         """
         if not self.operations_enabled or not self.operations_tools:
+            logger.debug(f"运维模式未启用: operations_enabled={self.operations_enabled}, operations_tools={self.operations_tools is not None}")
             return False
 
         # 1. 会话级粘性：该 session 进过运维模式，则一直保持
         if session_id and self._is_operations_session(session_id):
-            logger.info(f"触发 Operations 模式：会话 {session_id} 已进入运维模式（会话级粘性继承）")
             return True
 
         last_user_text = self._extract_last_user_text(messages)
 
-        # 2. 检测 /运维 前缀
-        if last_user_text.strip().startswith("/运维") or last_user_text.strip().startswith("/ops"):
-            logger.info("触发 Operations 模式：检测到 /运维 或 /ops 前缀")
+        # 2. 检测 /运维 或 /ops（支持前面有 @ 提及等前缀）
+        text_stripped = last_user_text.strip()
+        if "/运维" in text_stripped or "/ops" in text_stripped:
             return True
 
         return False
@@ -863,12 +863,14 @@ class AnthropicProvider(AIProvider):
 
         # 获取操作者身份信息（从最后一条消息的 metadata 中提取）
         operator_info = "未知用户"
+        chat_id = None  # 用于群组白名单检查
         if messages:
             last_msg = messages[-1]
             if last_msg.metadata:
                 operator_name = last_msg.metadata.get("operator_name", "")
                 operator_id = last_msg.metadata.get("operator_id", "")
                 source = last_msg.metadata.get("source", "")
+                chat_id = last_msg.metadata.get("chat_id")  # 提取 chat_id
                 if operator_name or operator_id:
                     operator_info = f"{operator_name} ({operator_id}, {source})"
 
@@ -876,6 +878,23 @@ class AnthropicProvider(AIProvider):
         system_parts = [
             "你是运维助手，当前用户是授权运维人员。",
             "",
+        ]
+
+        # 添加可用机器列表
+        if self.operations_tools and self.operations_tools.operations_manager:
+            machines = self.operations_tools.operations_manager.machines
+            if machines:
+                system_parts.append("可用机器列表：")
+                for machine in machines.values():  # machines 是 Dict[str, Machine]，需要 .values()
+                    aliases = ", ".join(machine.alias) if machine.alias else machine.name
+                    apps = ", ".join([app.name for app in machine.applications]) if machine.applications else "无"
+                    machine_desc = "- {} (别名: {}, 主机: {}, 应用: {})".format(
+                        machine.name, aliases, machine.host, apps
+                    )
+                    system_parts.append(machine_desc)
+                system_parts.append("")
+
+        system_parts.extend([
             "可用工具（所有工具都需要 machine_name 参数指定目标机器）：",
             "- get_app_status(machine_name, app_name) - 查看应用运行状态",
             "- get_app_version(machine_name, source, jar_path/log_path/version_file/api_url) - 查看应用版本/分支",
@@ -888,8 +907,8 @@ class AnthropicProvider(AIProvider):
             "- start_app(machine_name, start_script, reason, operator_id) - 启动应用（危险操作，需审批）",
             "",
             "工具使用规则：",
-            "1. **machine_name 参数**：所有工具都需要指定目标机器名称",
-            "2. **自然语言理解**：支持模糊匹配，如 '生产1号' 可能匹配到 'production-server-1'",
+            "1. **machine_name 参数**：使用上面列出的机器名称或别名",
+            "2. **自然语言理解**：用户说'研发环境'时，使用别名映射到对应的机器名",
             "3. **危险操作审批**：restart/stop/start 会返回 need_approval=true 和 operation_id，告知用户等待审批",
             "4. **错误处理**：如果工具返回 success=false，查看 error 字段了解原因",
             "",
@@ -913,7 +932,7 @@ class AnthropicProvider(AIProvider):
             "- 审批等待时告知用户 '已向管理员发送审批请求，操作 ID: {operation_id}'",
             "- 操作完成后给出清晰的结果摘要（状态、资源使用、版本信息等）",
             "- 如果工具调用失败，解释可能的原因（机器不存在、权限不足、连接失败等）",
-        ]
+        ])
 
         # 注入飞书文档（如果有）
         if doc_context:
@@ -1003,7 +1022,7 @@ class AnthropicProvider(AIProvider):
                     logger.info(f"执行运维工具: {tool_name}({tool_input})")
 
                     try:
-                        result = self._execute_operations_tool(tool_name, tool_input)
+                        result = self._execute_operations_tool(tool_name, tool_input, chat_id=chat_id)
                         result_str = json.dumps(result, ensure_ascii=False)
                         tool_results.append({
                             "type": "tool_result",
@@ -1142,13 +1161,14 @@ class AnthropicProvider(AIProvider):
         logger.info(f"自动生成 {len(schema)} 个运维工具 schema")
         return schema
 
-    def _execute_operations_tool(self, tool_name: str, tool_input: Dict[str, Any]) -> Any:
+    def _execute_operations_tool(self, tool_name: str, tool_input: Dict[str, Any], chat_id: Optional[str] = None) -> Any:
         """
         执行运维工具调用
 
         Args:
             tool_name: 工具名称
             tool_input: 工具参数
+            chat_id: 群组/会话ID（用于群组白名单检查）
 
         Returns:
             工具执行结果
@@ -1166,7 +1186,7 @@ class AnthropicProvider(AIProvider):
             # AI 传入的是机器名称字符串，需要转换
             # 但并非所有工具都需要 machine 参数（如 list_machines）
 
-            # 检查方法签名中是否需要 machine 参数
+            # 检查方法签名中是否需要 machine 参数和 chat_id 参数
             import inspect
             sig = inspect.signature(method)
             params = list(sig.parameters.keys())
@@ -1185,11 +1205,17 @@ class AnthropicProvider(AIProvider):
                         "data": None
                     }
 
-                # 调用方法，传入 Machine 对象
-                result = method(machine, **tool_input)
+                # 如果方法需要 chat_id 参数，传入
+                if 'chat_id' in params:
+                    result = method(machine, chat_id=chat_id, **tool_input)
+                else:
+                    result = method(machine, **tool_input)
             else:
                 # 不需要 machine 参数，直接调用
-                result = method(**tool_input)
+                if 'chat_id' in params:
+                    result = method(chat_id=chat_id, **tool_input)
+                else:
+                    result = method(**tool_input)
 
             # 确保返回格式统一
             if not isinstance(result, dict):

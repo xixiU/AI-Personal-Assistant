@@ -6,7 +6,7 @@ import uuid
 import paramiko
 import threading
 from datetime import datetime, timedelta
-from typing import Optional, Dict, List, Tuple
+from typing import Optional, Dict, List, Tuple, Any
 from loguru import logger
 from cryptography.fernet import Fernet
 
@@ -143,6 +143,151 @@ class OperationsManager:
             approval_provider=approval_provider,
             authorization_config=authorization_config
         )
+
+    def test_connections(self) -> Dict[str, Dict[str, Any]]:
+        """
+        测试所有机器的SSH连接
+
+        Returns:
+            Dict[str, Dict[str, Any]]: 测试结果
+                {
+                    "machine_name": {
+                        "success": bool,
+                        "message": str,
+                        "details": dict  # 成功时包含系统信息
+                    }
+                }
+        """
+        results = {}
+
+        for machine_name, machine in self.machines.items():
+            try:
+                logger.info(f"测试连接: {machine.display_name} ({machine.ssh_config.host})")
+
+                # 执行简单的测试命令
+                success, output = self._execute_ssh_command_direct(
+                    machine.ssh_config,
+                    "uname -a && uptime"
+                )
+
+                if success:
+                    lines = output.strip().split('\n')
+                    results[machine_name] = {
+                        "success": True,
+                        "message": f"连接成功: {machine.display_name}",
+                        "details": {
+                            "host": machine.ssh_config.host,
+                            "uname": lines[0] if len(lines) > 0 else "",
+                            "uptime": lines[1] if len(lines) > 1 else ""
+                        }
+                    }
+                    logger.info(f"✅ {machine.display_name} 连接测试成功")
+                else:
+                    results[machine_name] = {
+                        "success": False,
+                        "message": f"连接失败: {output}",
+                        "details": {"host": machine.ssh_config.host}
+                    }
+                    logger.warning(f"❌ {machine.display_name} 连接测试失败: {output}")
+
+            except Exception as e:
+                results[machine_name] = {
+                    "success": False,
+                    "message": f"连接异常: {str(e)}",
+                    "details": {"host": machine.ssh_config.host}
+                }
+                logger.error(f"❌ {machine.display_name} 连接测试异常: {e}")
+
+        # 统计结果
+        success_count = sum(1 for r in results.values() if r["success"])
+        total_count = len(results)
+        logger.info(f"连接测试完成: {success_count}/{total_count} 台机器连接成功")
+
+        return results
+
+    def _execute_ssh_command_direct(
+        self,
+        ssh_config: SSHConfig,
+        command: str
+    ) -> Tuple[bool, str]:
+        """
+        直接执行SSH命令（不经过权限检查，仅用于内部测试）
+
+        Args:
+            ssh_config: SSH配置
+            command: 待执行的命令
+
+        Returns:
+            Tuple[bool, str]: (是否成功, 输出内容或错误信息)
+        """
+        try:
+            ssh_client = self._get_ssh_client_from_config(ssh_config)
+            stdin, stdout, stderr = ssh_client.exec_command(command, timeout=10)
+
+            output = stdout.read().decode('utf-8', errors='ignore')
+            error = stderr.read().decode('utf-8', errors='ignore')
+            exit_code = stdout.channel.recv_exit_status()
+
+            if exit_code == 0:
+                return True, output
+            else:
+                return False, f"命令执行失败 (exit code {exit_code}):\n{error}"
+
+        except Exception as e:
+            return False, f"SSH 连接失败: {str(e)}"
+
+    def _get_ssh_client_from_config(self, ssh_config: SSHConfig) -> paramiko.SSHClient:
+        """
+        从SSH配置创建SSH客户端（用于测试连接）
+
+        Args:
+            ssh_config: SSH配置
+
+        Returns:
+            paramiko.SSHClient: SSH客户端
+        """
+        client = paramiko.SSHClient()
+        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+
+        # 根据认证方式连接
+        if ssh_config.method == SSHMethod.KEY:
+            # 使用密钥认证
+            key_path = ssh_config.key_path
+            passphrase = None
+
+            if ssh_config.key_passphrase:
+                # 解密密钥密码
+                try:
+                    passphrase = self.cipher.decrypt(ssh_config.key_passphrase.encode()).decode()
+                except Exception as e:
+                    logger.warning(f"解密密钥密码失败: {e}")
+
+            client.connect(
+                hostname=ssh_config.host,
+                port=ssh_config.port,
+                username=ssh_config.username,
+                key_filename=key_path,
+                passphrase=passphrase,
+                timeout=ssh_config.timeout
+            )
+        else:
+            # 使用密码认证
+            password = None
+            if ssh_config.password:
+                try:
+                    password = self.cipher.decrypt(ssh_config.password.encode()).decode()
+                except Exception as e:
+                    logger.warning(f"解密密码失败: {e}")
+
+            client.connect(
+                hostname=ssh_config.host,
+                port=ssh_config.port,
+                username=ssh_config.username,
+                password=password,
+                timeout=ssh_config.timeout
+            )
+
+        return client
 
     def is_authorized(
         self,

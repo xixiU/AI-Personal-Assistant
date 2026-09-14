@@ -454,7 +454,8 @@ class OperationsTools:
         machine: Machine,
         restart_script: str,
         reason: str = "",
-        operator_id: Optional[str] = None
+        operator_id: Optional[str] = None,
+        chat_id: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         重启应用服务（危险操作，需要审批）
@@ -464,6 +465,7 @@ class OperationsTools:
             restart_script: 重启脚本路径
             reason: 操作原因（用于审批记录）
             operator_id: 操作者 ID（可选）
+            chat_id: 群组/会话ID（用于群组白名单检查）
 
         Returns:
             Dict[str, Any]: 执行结果
@@ -495,6 +497,7 @@ class OperationsTools:
                     risk_level=command.risk_level,
                     reason=reason,
                     operator_id=operator_id,
+                    chat_id=chat_id,
                     params={"restart_script": restart_script}
                 )
 
@@ -515,7 +518,8 @@ class OperationsTools:
         stop_script: Optional[str] = None,
         pid: Optional[int] = None,
         reason: str = "",
-        operator_id: Optional[str] = None
+        operator_id: Optional[str] = None,
+        chat_id: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         停止应用服务（危险操作，需要审批）
@@ -526,6 +530,7 @@ class OperationsTools:
             pid: 进程 ID（可选，如果不提供脚本则使用 kill）
             reason: 操作原因（用于审批记录）
             operator_id: 操作者 ID（可选）
+            chat_id: 群组/会话ID（用于群组白名单检查）
             注意：stop_script 和 pid 至少提供一个
 
         Returns:
@@ -551,6 +556,7 @@ class OperationsTools:
                     risk_level=command.risk_level,
                     reason=reason,
                     operator_id=operator_id,
+                    chat_id=chat_id,
                     params={"stop_script": stop_script, "pid": pid}
                 )
 
@@ -570,7 +576,8 @@ class OperationsTools:
         machine: Machine,
         start_script: str,
         reason: str = "",
-        operator_id: Optional[str] = None
+        operator_id: Optional[str] = None,
+        chat_id: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         启动应用服务（危险操作，需要审批）
@@ -580,6 +587,7 @@ class OperationsTools:
             start_script: 启动脚本路径
             reason: 操作原因（用于审批记录）
             operator_id: 操作者 ID（可选）
+            chat_id: 群组/会话ID（用于群组白名单检查）
 
         Returns:
             Dict[str, Any]: 执行结果（格式同 restart_app）
@@ -604,6 +612,7 @@ class OperationsTools:
                     risk_level=command.risk_level,
                     reason=reason,
                     operator_id=operator_id,
+                    chat_id=chat_id,
                     params={"start_script": start_script}
                 )
 
@@ -670,6 +679,7 @@ class OperationsTools:
             if self.operations_manager and command.risk_level in [OperationRisk.MEDIUM, OperationRisk.HIGH]:
                 reason = kwargs.pop("reason", "")
                 operator_id = kwargs.pop("operator_id", None)
+                chat_id = kwargs.pop("chat_id", None)
 
                 approval_result = self._create_approval_request(
                     machine=machine,
@@ -677,6 +687,7 @@ class OperationsTools:
                     risk_level=command.risk_level,
                     reason=reason,
                     operator_id=operator_id,
+                    chat_id=chat_id,
                     params=kwargs
                 )
 
@@ -718,6 +729,7 @@ class OperationsTools:
         risk_level: OperationRisk,
         reason: str,
         operator_id: Optional[str],
+        chat_id: Optional[str],
         params: Dict[str, Any]
     ) -> Dict[str, Any]:
         """
@@ -729,6 +741,7 @@ class OperationsTools:
             risk_level: 风险等级
             reason: 操作原因
             operator_id: 操作者 ID
+            chat_id: 群组/会话ID（用于群组白名单检查）
             params: 指令参数
 
         Returns:
@@ -738,15 +751,28 @@ class OperationsTools:
             if not self.operations_manager:
                 return {"need_approval": False}
 
-            # 调用 operations_manager 创建审批请求
-            # 这里假设 operations_manager 有 create_pending_operation 方法
-            operation_id = self.operations_manager.create_pending_operation(
+            # 首先检查授权（包括个人白名单和群组白名单）
+            if not self.operations_manager.is_authorized(operator_id, chat_id=chat_id):
+                return {
+                    "success": False,
+                    "need_approval": False,
+                    "data": None,
+                    "error": "未授权的操作者。您不在白名单中，也不在授权群组中。"
+                }
+
+            # 构造 OperatorIdentity 对象
+            from ai_assistant.core.operations_manager import OperatorIdentity
+            operator = OperatorIdentity(
+                user_id=operator_id or "unknown",
+                name=operator_id or "unknown"
+            )
+
+            # 调用 operations_manager 的 request_approval 方法
+            operation_id = self.operations_manager.request_approval(
+                operator=operator,
                 machine=machine,
-                command_name=command_name,
-                risk_level=risk_level,
-                reason=reason,
-                operator_id=operator_id,
-                params=params
+                command=command_name,
+                reason=reason
             )
 
             return {
