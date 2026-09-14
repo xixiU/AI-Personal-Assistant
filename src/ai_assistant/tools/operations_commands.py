@@ -299,6 +299,7 @@ class GetAppVersionCommand(OperationCommand):
         machine: Machine,
         source: str = "jar",
         jar_path: Optional[str] = None,
+        jar_file_path: Optional[str] = None,
         log_path: Optional[str] = None,
         version_file: Optional[str] = None,
         api_url: Optional[str] = None,
@@ -311,6 +312,7 @@ class GetAppVersionCommand(OperationCommand):
             machine: 目标机器
             source: 版本来源（jar/log/file/api）
             jar_path: JAR 包路径（source=jar 时需要）
+            jar_file_path: JAR 包内的文件路径（source=jar 时可选，默认 META-INF/MANIFEST.MF）
             log_path: 日志文件路径（source=log 时需要）
             version_file: 版本文件路径（source=file 时需要）
             api_url: API 地址（source=api 时需要）
@@ -320,7 +322,8 @@ class GetAppVersionCommand(OperationCommand):
         """
         try:
             if source == "jar" and jar_path:
-                return self._get_version_from_jar(machine, jar_path)
+                file_path = jar_file_path or "META-INF/MANIFEST.MF"
+                return self._get_version_from_jar(machine, jar_path, file_path)
             elif source == "log" and log_path:
                 return self._get_version_from_log(machine, log_path)
             elif source == "file" and version_file:
@@ -340,16 +343,31 @@ class GetAppVersionCommand(OperationCommand):
                 error=f"Failed to get app version: {str(e)}"
             )
 
-    def _get_version_from_jar(self, machine: Machine, jar_path: str) -> CommandResult:
-        """从 JAR 包获取版本信息"""
-        command = f"unzip -p {shlex.quote(jar_path)} META-INF/MANIFEST.MF 2>/dev/null || echo 'MANIFEST not found'"
+    def _get_version_from_jar(
+        self,
+        machine: Machine,
+        jar_path: str,
+        file_path: str = "META-INF/MANIFEST.MF"
+    ) -> CommandResult:
+        """
+        从 JAR 包获取版本信息
+
+        Args:
+            machine: 目标机器
+            jar_path: JAR 包路径
+            file_path: JAR 包内的文件路径（默认 META-INF/MANIFEST.MF）
+        """
+        command = f"unzip -p {shlex.quote(jar_path)} {shlex.quote(file_path)} 2>/dev/null || echo 'File not found: {file_path}'"
         result = self._execute_ssh_command(machine.ssh_config, command)
 
-        if result.success and result.data:
+        if result.success and result.data and 'File not found' not in result.data:
             version_info = self._parse_manifest(result.data)
             return CommandResult(success=True, data=version_info, raw_output=result.raw_output)
         else:
-            return result
+            return CommandResult(
+                success=False,
+                error=f"Failed to read {file_path} from JAR: {result.error or result.data}"
+            )
 
     def _get_version_from_log(self, machine: Machine, log_path: str) -> CommandResult:
         """从日志文件获取版本信息"""

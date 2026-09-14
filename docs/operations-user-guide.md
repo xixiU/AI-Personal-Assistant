@@ -113,6 +113,11 @@ if getattr(self.config, 'operations_enabled', False):
    ```
    /运维 查下订单服务的版本
    ```
+   
+   **版本检测说明**：
+   - AI 会自动从应用配置的 `metadata.version_detection` 中按顺序尝试多种检测方式
+   - 支持从 JAR 包内任意文件读取（如 `BOOT-INF/classes/git.info`）
+   - 返回第一个成功的检测结果
 
 3. **分析 JAR 包** - `get_jar_info`
    ```
@@ -346,8 +351,16 @@ operations:
           
           metadata:
             version_detection:
+              # 从 JAR 包读取自定义文件（如 Spring Boot 的 git.info）
               - type: "jar_manifest"
                 jar_path: "order-service.jar"
+                file_path: "BOOT-INF/classes/git.info"  # 可选，默认 META-INF/MANIFEST.MF
+              
+              # 备用：标准 MANIFEST.MF
+              - type: "jar_manifest"
+                jar_path: "order-service.jar"
+              
+              # 备用：从日志提取
               - type: "log_file"
                 command: "grep 'Application Version:' logs/startup.log | tail -1"
             

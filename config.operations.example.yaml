@@ -63,21 +63,27 @@ operations:
 
           # 元数据（版本检测、进程信息等）
           metadata:
-            # 版本检测配置（支持多种方式，AI 会自动调用）
+            # 版本检测配置（支持多种方式，AI 会自动按顺序尝试，直到成功）
             version_detection:
-              # 方式1：从 jar 包 MANIFEST.MF 提取
+              # 方式1：从 jar 包中读取自定义文件（如 Spring Boot 的 git.info）
               - type: "jar_manifest"
                 jar_path: "order-service.jar"
+                file_path: "BOOT-INF/classes/git.info"  # 可选，默认为 META-INF/MANIFEST.MF
 
-              # 方式2：从启动日志提取
+              # 方式2：从 jar 包 MANIFEST.MF 提取（标准方式）
+              - type: "jar_manifest"
+                jar_path: "order-service.jar"
+                # file_path 不指定时，默认读取 META-INF/MANIFEST.MF
+
+              # 方式3：从启动日志提取
               - type: "log_file"
                 command: "grep 'Application Version:' logs/startup.log | tail -1 | awk '{print $4}'"
 
-              # 方式3：从版本文件读取
+              # 方式4：从版本文件读取
               - type: "version_file"
                 file_path: "version.txt"
 
-              # 方式4：HTTP API 查询
+              # 方式5：HTTP API 查询
               - type: "api_endpoint"
                 url: "http://localhost:8080/actuator/info"
 

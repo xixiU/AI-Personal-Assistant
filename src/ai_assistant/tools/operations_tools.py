@@ -88,8 +88,10 @@ class OperationsTools:
     def get_app_version(
         self,
         machine: Machine,
-        source: str = "jar",
+        application_metadata: Optional[Dict[str, Any]] = None,
+        source: Optional[str] = None,
         jar_path: Optional[str] = None,
+        jar_file_path: Optional[str] = None,
         log_path: Optional[str] = None,
         version_file: Optional[str] = None,
         api_url: Optional[str] = None
@@ -97,14 +99,20 @@ class OperationsTools:
         """
         查询应用版本信息
 
+        支持两种模式：
+        1. 自动模式：提供 application_metadata，自动从 metadata.version_detection 配置中按顺序尝试
+        2. 手动模式：直接指定 source 和对应参数
+
         Args:
             machine: 目标机器
-            source: 版本来源，可选值:
-                - "jar": 从 JAR 包的 MANIFEST.MF 获取
+            application_metadata: 应用的 metadata 配置（包含 version_detection 列表）
+            source: 版本来源（手动模式），可选值:
+                - "jar": 从 JAR 包获取（支持指定 jar_file_path）
                 - "log": 从日志文件中查找版本信息
                 - "file": 从指定的版本文件读取
                 - "api": 从 API 接口获取
             jar_path: JAR 包路径（source="jar" 时需要）
+            jar_file_path: JAR 包内的文件路径（source="jar" 时可选，默认 META-INF/MANIFEST.MF）
             log_path: 日志文件路径（source="log" 时需要）
             version_file: 版本文件路径（source="file" 时需要）
             api_url: API 地址（source="api" 时需要）
@@ -112,30 +120,154 @@ class OperationsTools:
         Returns:
             Dict[str, Any]: 执行结果
                 - success: bool - 是否成功
-                - data: dict - 版本数据（根据 source 不同而不同）
+                - data: dict - 版本数据
                 - error: str - 错误信息（如果失败）
+                - tried_methods: list - 尝试的方法列表（自动模式）
 
         Example:
+            # 自动模式（推荐）
+            >>> result = tools.get_app_version(
+            >>>     machine,
+            >>>     application_metadata={
+            >>>         "version_detection": [
+            >>>             {"type": "jar_manifest", "jar_path": "app.jar", "file_path": "BOOT-INF/classes/git.info"},
+            >>>             {"type": "jar_manifest", "jar_path": "app.jar"}
+            >>>         ]
+            >>>     }
+            >>> )
+
+            # 手动模式
             >>> result = tools.get_app_version(
             >>>     machine,
             >>>     source="jar",
-            >>>     jar_path="/app/service.jar"
+            >>>     jar_path="/app/service.jar",
+            >>>     jar_file_path="BOOT-INF/classes/git.info"
             >>> )
         """
         try:
             command = GetAppVersionCommand()
-            result = command.execute(
-                machine,
-                source=source,
-                jar_path=jar_path,
-                log_path=log_path,
-                version_file=version_file,
-                api_url=api_url
-            )
-            return self._format_result(result)
+
+            # 自动模式：从 application_metadata 中读取 version_detection 配置
+            if application_metadata and 'version_detection' in application_metadata:
+                return self._auto_detect_version(machine, application_metadata['version_detection'], command)
+
+            # 手动模式：直接调用指定的 source
+            if source:
+                result = command.execute(
+                    machine,
+                    source=source,
+                    jar_path=jar_path,
+                    jar_file_path=jar_file_path,
+                    log_path=log_path,
+                    version_file=version_file,
+                    api_url=api_url
+                )
+                return self._format_result(result)
+
+            return self._error_result("Either 'application_metadata' or 'source' must be provided")
+
         except Exception as e:
             logger.error(f"get_app_version failed: {e}")
             return self._error_result(f"Failed to get app version: {str(e)}")
+
+    def _auto_detect_version(
+        self,
+        machine: Machine,
+        version_detection_list: List[Dict[str, Any]],
+        command: GetAppVersionCommand
+    ) -> Dict[str, Any]:
+        """
+        自动检测版本：按配置顺序尝试多种方式
+
+        Args:
+            machine: 目标机器
+            version_detection_list: version_detection 配置列表
+            command: GetAppVersionCommand 实例
+
+        Returns:
+            Dict[str, Any]: 执行结果
+        """
+        tried_methods = []
+        errors = []
+
+        for idx, config in enumerate(version_detection_list):
+            detection_type = config.get('type', '')
+            method_name = f"{detection_type} (method {idx + 1})"
+            tried_methods.append(method_name)
+
+            try:
+                result = None
+
+                if detection_type == 'jar_manifest':
+                    jar_path = config.get('jar_path')
+                    file_path = config.get('file_path', 'META-INF/MANIFEST.MF')
+                    if jar_path:
+                        result = command.execute(
+                            machine,
+                            source='jar',
+                            jar_path=jar_path,
+                            jar_file_path=file_path
+                        )
+
+                elif detection_type == 'log_file':
+                    log_command = config.get('command')
+                    if log_command:
+                        # 直接执行自定义命令
+                        ssh_result = command._execute_ssh_command(machine.ssh_config, log_command)
+                        if ssh_result.success:
+                            result = CommandResult(
+                                success=True,
+                                data={"version_from_log": ssh_result.data},
+                                raw_output=ssh_result.raw_output
+                            )
+                        else:
+                            result = ssh_result
+
+                elif detection_type == 'version_file':
+                    version_file = config.get('file_path')
+                    if version_file:
+                        result = command.execute(
+                            machine,
+                            source='file',
+                            version_file=version_file
+                        )
+
+                elif detection_type == 'api_endpoint':
+                    api_url = config.get('url')
+                    if api_url:
+                        result = command.execute(
+                            machine,
+                            source='api',
+                            api_url=api_url
+                        )
+
+                # 如果成功，直接返回
+                if result and result.success:
+                    logger.info(f"Version detection succeeded with method: {method_name}")
+                    return {
+                        "success": True,
+                        "data": result.data,
+                        "method_used": method_name,
+                        "tried_methods": tried_methods
+                    }
+                else:
+                    error_msg = result.error if result else "Invalid configuration"
+                    errors.append(f"{method_name}: {error_msg}")
+                    logger.debug(f"Version detection failed with {method_name}: {error_msg}")
+
+            except Exception as e:
+                error_msg = str(e)
+                errors.append(f"{method_name}: {error_msg}")
+                logger.debug(f"Version detection exception with {method_name}: {error_msg}")
+
+        # 所有方法都失败
+        return {
+            "success": False,
+            "data": None,
+            "error": f"All version detection methods failed. Tried: {', '.join(tried_methods)}",
+            "tried_methods": tried_methods,
+            "errors": errors
+        }
 
     def get_jar_info(
         self,
