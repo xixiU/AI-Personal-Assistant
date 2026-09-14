@@ -198,6 +198,26 @@ class AIAssistant:
             self.doc_manager = doc_manager
             logger.info("飞书文档管理器已启用")
 
+        # 初始化运维功能（如果启用）
+        if hasattr(self.config, 'operations') and self.config.operations:
+            try:
+                from ai_assistant.core.operations_manager import OperationsManager
+                from ai_assistant.tools.operations_tools import OperationsTools
+
+                # 使用 from_config 工厂方法创建 OperationsManager
+                self.operations_manager = OperationsManager.from_config(self.config.operations)
+                self.operations_tools = OperationsTools(operations_manager=self.operations_manager)
+
+                # 注入到 AI Provider
+                if hasattr(self.ai_provider, 'set_operations_tools'):
+                    self.ai_provider.set_operations_tools(self.operations_tools, enabled=True)
+                    logger.info("运维操作功能已启用")
+                else:
+                    logger.warning("当前 AI Provider 不支持运维功能")
+            except Exception as e:
+                logger.error(f"初始化运维功能失败: {e}")
+                logger.warning("运维功能将不可用")
+
         self.reply_executor = ReplyExecutor(
             mode=self.config.reply_mode,
             notification=self.config.reply_notification
@@ -462,6 +482,7 @@ class AIAssistant:
                         "operator_id": parsed.get("sender_id", ""),
                         "operator_name": parsed.get("sender_name", ""),
                         "operator_display_name": parsed.get("sender_display_name", ""),
+                        "chat_id": parsed.get("chat_id", ""),  # 添加群组ID用于群组白名单
                         "source": "feishu"
                     }
                 self.context_manager.add_message(session_id, user_message)

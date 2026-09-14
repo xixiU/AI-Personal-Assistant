@@ -16,6 +16,18 @@ operations:
       #   - user_id: "user_001"
       #     name: "王五"
 
+    # 群组白名单（群组内所有成员都有运维权限）
+    groups:
+      feishu:
+        - chat_id: "oc_1a2b3c4d5e6f"
+          name: "运维团队群"
+        - chat_id: "oc_7g8h9i0j1k2l"
+          name: "研发环境运维群"
+      # 其他渠道后续扩展
+      # wechat:
+      #   - chat_id: "wxgroup_123"
+      #     name: "微信运维群"
+
     # 危险操作审批人（收确认消息的管理员，支持多人，一人同意即可执行）
     approvers:
       feishu:

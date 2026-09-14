@@ -9,11 +9,21 @@
 ```yaml
 operations:
   authorization:
+    # 用户白名单（个人权限）
     operators:
       feishu:
         - open_id: "your_open_id_here"
           name: "张三"
     
+    # 群组白名单（群组内所有成员都有运维权限）
+    groups:
+      feishu:
+        - chat_id: "oc_1a2b3c4d5e6f"
+          name: "运维团队群"
+        - chat_id: "oc_7g8h9i0j1k2l"
+          name: "研发环境运维群"
+    
+    # 审批人（危险操作需要审批）
     approvers:
       feishu:
         - open_id: "admin_open_id"
@@ -42,6 +52,15 @@ operations:
           logs:
             app: "logs/application.log"
 ```
+
+**权限说明**：
+- `operators`: 个人白名单，指定用户的 `open_id`
+- `groups`: 群组白名单，指定飞书群组的 `chat_id`（群内所有成员都有运维权限）
+- `approvers`: 审批人，用于危险操作的审批
+
+**如何获取 chat_id**：
+1. 在飞书群组中发送任意消息，查看日志中的 `chat_id`
+2. 或使用飞书开放平台 API 查询群组列表
 
 ### 2. 生成加密密钥（如使用密码认证）
 

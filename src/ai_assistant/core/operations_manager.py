@@ -39,7 +39,8 @@ class OperationsManager:
         machines: List[Machine],
         applications: List[Application],
         approval_provider: Optional[ApprovalProvider] = None,
-        encrypt_key: Optional[str] = None
+        encrypt_key: Optional[str] = None,
+        authorization_config: Optional[Dict] = None
     ):
         """初始化运维管理器
 
@@ -48,10 +49,12 @@ class OperationsManager:
             applications: 应用配置列表
             approval_provider: 审批提供者（可选）
             encrypt_key: 加密密钥（用于解密密码），从环境变量 OPERATIONS_ENCRYPT_KEY 读取
+            authorization_config: 权限配置（operators/approvers/groups）
         """
         self.machines: Dict[str, Machine] = {m.name: m for m in machines}
         self.applications: Dict[str, Application] = {a.name: a for a in applications}
         self.approval_provider = approval_provider
+        self.authorization_config = authorization_config or {}
 
         # 初始化加密器
         if encrypt_key is None:
@@ -79,11 +82,74 @@ class OperationsManager:
 
         logger.info(f"运维管理器初始化完成: {len(self.machines)} 台机器, {len(self.applications)} 个应用")
 
+    @classmethod
+    def from_config(cls, config: Dict) -> 'OperationsManager':
+        """从配置字典创建 OperationsManager 实例
+
+        Args:
+            config: 运维配置字典，格式参考 config.operations.example.yaml
+
+        Returns:
+            OperationsManager 实例
+        """
+        # 解析机器配置
+        machines = []
+        machines_config = config.get('machines', [])
+        for machine_config in machines_config:
+            ssh_config = SSHConfig(
+                host=machine_config['host'],
+                port=machine_config.get('ssh', {}).get('port', 22),
+                username=machine_config.get('ssh', {}).get('user', 'root'),
+                method=SSHMethod.KEY if machine_config.get('ssh', {}).get('method') == 'key' else SSHMethod.PASSWORD,
+                password=machine_config.get('ssh', {}).get('password'),
+                key_path=machine_config.get('ssh', {}).get('key_path'),
+                timeout=machine_config.get('ssh', {}).get('timeout', 30)
+            )
+
+            machine = Machine(
+                name=machine_config['name'],
+                display_name=machine_config.get('alias', [machine_config['name']])[0] if machine_config.get('alias') else machine_config['name'],
+                ssh_config=ssh_config,
+                description=machine_config.get('description', ''),
+                tags=machine_config.get('tags', []),
+                metadata=machine_config.get('metadata', {})
+            )
+            machines.append(machine)
+
+        # 解析应用配置
+        applications = []
+        for machine_config in machines_config:
+            apps_config = machine_config.get('applications', [])
+            for app_config in apps_config:
+                application = Application(
+                    name=app_config['name'],
+                    display_name=app_config.get('alias', [app_config['name']])[0] if app_config.get('alias') else app_config['name'],
+                    description=app_config.get('description', ''),
+                    machines=[machine_config['name']],
+                    tags=app_config.get('tags', []),
+                    metadata=app_config.get('metadata', {})
+                )
+                applications.append(application)
+
+        # 获取权限配置
+        authorization_config = config.get('authorization', {})
+
+        # TODO: 初始化审批提供者（根据配置）
+        approval_provider = None
+
+        return cls(
+            machines=machines,
+            applications=applications,
+            approval_provider=approval_provider,
+            authorization_config=authorization_config
+        )
+
     def is_authorized(
         self,
         operator: OperatorIdentity,
         machine: Machine,
-        operation_type: str = "read"
+        operation_type: str = "read",
+        chat_id: Optional[str] = None
     ) -> bool:
         """检查操作者是否有权限操作指定机器
 
@@ -91,12 +157,33 @@ class OperationsManager:
             operator: 操作者身份
             machine: 目标机器
             operation_type: 操作类型 ("read" | "write" | "admin")
+            chat_id: 飞书群组ID（可选，用于群组白名单鉴权）
 
         Returns:
             bool: 是否有权限
         """
-        # 简化实现：检查角色和权限
-        # 实际项目中应该根据更复杂的 RBAC 规则判断
+        # 获取渠道（如 feishu）
+        channel = operator.metadata.get('channel', 'feishu')
+
+        # 从 authorization_config 中获取操作者白名单
+        operators_config = self.authorization_config.get('operators', {}).get(channel, [])
+
+        # 1. 检查用户是否在白名单中
+        for op_config in operators_config:
+            if op_config.get('open_id') == operator.user_id or op_config.get('user_id') == operator.user_id:
+                logger.debug(f"用户 {operator.username} 在运维白名单中")
+                return True
+
+        # 2. 检查群组白名单（如果提供了 chat_id）
+        if chat_id:
+            groups_config = self.authorization_config.get('groups', {}).get(channel, [])
+            for group_config in groups_config:
+                if group_config.get('chat_id') == chat_id:
+                    logger.debug(f"群组 {chat_id} 在运维白名单中")
+                    return True
+
+        logger.warning(f"用户 {operator.username} (user_id={operator.user_id}, chat_id={chat_id}) 无运维权限")
+        return False
 
         # 超级管理员拥有所有权限
         if "admin" in operator.roles or "superadmin" in operator.roles:
@@ -226,7 +313,8 @@ class OperationsManager:
         machine: Machine,
         command: str,
         operator: OperatorIdentity,
-        skip_approval: bool = False
+        skip_approval: bool = False,
+        chat_id: Optional[str] = None
     ) -> Tuple[bool, str]:
         """执行 SSH 命令（带权限检查和审批流程）
 
@@ -235,6 +323,7 @@ class OperationsManager:
             command: 待执行的命令
             operator: 操作者身份
             skip_approval: 是否跳过审批（仅用于测试或紧急情况）
+            chat_id: 飞书群组ID（可选，用于群组白名单鉴权）
 
         Returns:
             Tuple[bool, str]: (是否成功, 输出内容或错误信息)
@@ -243,7 +332,7 @@ class OperationsManager:
         risk_level = self.get_operation_risk(command, machine)
         operation_type = "read" if risk_level == OperationRisk.LOW else "write"
 
-        if not self.is_authorized(operator, machine, operation_type):
+        if not self.is_authorized(operator, machine, operation_type, chat_id=chat_id):
             return False, f"权限不足: 用户 {operator.username} 无权在 {machine.display_name} 上执行 {operation_type} 操作"
 
         # 2. 审批流程（中高风险且未跳过审批）
