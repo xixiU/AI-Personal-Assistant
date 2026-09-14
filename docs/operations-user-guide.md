@@ -354,7 +354,8 @@ operations:
               # 从 JAR 包读取自定义文件（如 Spring Boot 的 git.info）
               - type: "jar_manifest"
                 jar_path: "order-service.jar"
-                file_path: "BOOT-INF/classes/git.info"  # 可选，默认 META-INF/MANIFEST.MF
+                # 可选，默认 META-INF/MANIFEST.MF
+                file_path: "BOOT-INF/classes/git.info"
               
               # 备用：标准 MANIFEST.MF
               - type: "jar_manifest"

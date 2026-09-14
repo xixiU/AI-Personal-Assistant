@@ -57,6 +57,7 @@ services:
       - CUDA_VISIBLE_DEVICES=0       # 容器内可见的 GPU 编号（device_ids 已限制后从 0 开始）
       - PYTHONUNBUFFERED=1           # Python 输出不缓冲，实时显示日志
       - TZ=Asia/Shanghai             # 时区：东八区（UTC+8）
+      - OPERATIONS_ENCRYPT_KEY=CVVY6cIQzd8i5JVUWxAYJ8JhLKUC0OLnGD47LuxaW5g=  # 密钥key
 
   # ==========================================
   # CPU 版本（无需 GPU，体积更小）
