@@ -40,6 +40,8 @@ class Application:
     description: str = ""               # 应用描述
     machines: List[str] = field(default_factory=list)  # 关联的机器名称列表
     tags: List[str] = field(default_factory=list)      # 标签（用于分类和搜索）
+    aliases: List[str] = field(default_factory=list)   # 别名（如 ts-cs / ts-bs，用于精确区分同名服务）
+    path: str = ""                      # 部署路径（用于精确定位进程，区分同名不同版本服务）
     metadata: Dict[str, Any] = field(default_factory=dict)  # 额外元数据
 
 

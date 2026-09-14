@@ -882,16 +882,48 @@ class AnthropicProvider(AIProvider):
 
         # 添加可用机器列表
         if self.operations_tools and self.operations_tools.operations_manager:
-            machines = self.operations_tools.operations_manager.machines
+            ops_manager = self.operations_tools.operations_manager
+            machines = ops_manager.machines
+            applications = ops_manager.applications  # Dict[str, Application]
             if machines:
                 system_parts.append("可用机器列表：")
                 for machine in machines.values():  # machines 是 Dict[str, Machine]，需要 .values()
-                    aliases = ", ".join(machine.alias) if machine.alias else machine.name
-                    apps = ", ".join([app.name for app in machine.applications]) if machine.applications else "无"
-                    machine_desc = "- {} (别名: {}, 主机: {}, 应用: {})".format(
-                        machine.name, aliases, machine.host, apps
+                    # 别名/自然语言映射来自 display_name 和 tags
+                    alias_parts = []
+                    if machine.display_name and machine.display_name != machine.name:
+                        alias_parts.append(machine.display_name)
+                    if machine.tags:
+                        alias_parts.extend(machine.tags)
+                    aliases = ", ".join(alias_parts) if alias_parts else machine.name
+                    # host 在 ssh_config 中
+                    host = machine.ssh_config.host if machine.ssh_config else "未知"
+                    machine_desc = "- {} (别名/标签: {}, 主机: {})".format(
+                        machine.name, aliases, host
                     )
                     system_parts.append(machine_desc)
+
+                    # 列出该机器上的应用详情（别名、部署路径、描述）
+                    machine_apps = [
+                        app for app in applications.values()
+                        if machine.name in app.machines
+                    ]
+                    for app in machine_apps:
+                        app_aliases = ", ".join(app.aliases) if app.aliases else "无"
+                        app_line = "    · 应用「{}」(别名: {}".format(app.name, app_aliases)
+                        if app.path:
+                            app_line += ", 部署路径: {}".format(app.path)
+                        if app.description:
+                            app_line += ", 说明: {}".format(app.description)
+                        app_line += ")"
+                        system_parts.append(app_line)
+                system_parts.append("")
+                # 引导 AI 用部署路径精确区分同名服务
+                system_parts.append(
+                    "重要：当多个应用同名但部署路径不同时（如不同版本/架构的 ts-service），"
+                    "必须依据上面列出的『部署路径』来区分。查询进程时用 get_app_status 的 app_name "
+                    "传入应用的部署路径（或路径中的唯一片段），而不是笼统的服务名，"
+                    "以免把不同版本的进程混在一起。"
+                )
                 system_parts.append("")
 
         system_parts.extend([

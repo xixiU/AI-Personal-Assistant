@@ -3,14 +3,14 @@
 
 提供可扩展的运维指令体系，支持：
 - 指令抽象基类和内置指令实现
-- SSH 命令安全拼接（避免注入）
+- SSH 命令执行（支持密码和密钥认证）
 - 指令注册中心
 - 风险等级标记
 """
 
 import json
 import shlex
-import subprocess
+import paramiko
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Dict, Any, Optional, List, Type
@@ -53,6 +53,15 @@ class CommandResult:
 
 class OperationCommand(ABC):
     """运维指令抽象基类"""
+
+    def __init__(self, cipher=None):
+        """
+        初始化运维指令
+
+        Args:
+            cipher: 密码解密器（用于解密 SSH 配置中的密码）
+        """
+        self.cipher = cipher
 
     @property
     @abstractmethod
@@ -107,43 +116,100 @@ class OperationCommand(ABC):
         Returns:
             CommandResult: 执行结果
         """
+        client = None
         try:
-            # 构建 SSH 命令
-            ssh_cmd = self._build_ssh_command(ssh_config, command)
+            # 使用 paramiko 建立 SSH 连接（支持密码和密钥认证）
+            client = self._create_ssh_client(ssh_config)
 
-            # 执行命令
-            result = subprocess.run(
-                ssh_cmd,
-                capture_output=True,
-                text=True,
-                timeout=timeout or ssh_config.timeout,
-                shell=False  # 安全：不使用 shell
-            )
+            exec_timeout = timeout or ssh_config.timeout
+            stdin, stdout, stderr = client.exec_command(command, timeout=exec_timeout)
 
-            if result.returncode == 0:
+            output = stdout.read().decode('utf-8', errors='ignore')
+            error = stderr.read().decode('utf-8', errors='ignore')
+            exit_code = stdout.channel.recv_exit_status()
+
+            if exit_code == 0:
                 return CommandResult(
                     success=True,
-                    data=result.stdout.strip(),
-                    raw_output=result.stdout
+                    data=output.strip(),
+                    raw_output=output
                 )
             else:
                 return CommandResult(
                     success=False,
-                    error=f"Command failed with exit code {result.returncode}: {result.stderr}",
-                    raw_output=result.stderr
+                    error=f"Command failed with exit code {exit_code}: {error}",
+                    raw_output=error
                 )
 
-        except subprocess.TimeoutExpired:
-            return CommandResult(
-                success=False,
-                error=f"Command timeout after {timeout or ssh_config.timeout} seconds"
-            )
         except Exception as e:
             logger.error(f"SSH command execution failed: {e}")
             return CommandResult(
                 success=False,
                 error=f"Execution error: {str(e)}"
             )
+        finally:
+            if client:
+                try:
+                    client.close()
+                except Exception:
+                    pass
+
+    def _create_ssh_client(self, ssh_config: SSHConfig) -> paramiko.SSHClient:
+        """
+        根据 SSH 配置创建 paramiko 客户端（支持密码和密钥认证）
+
+        Args:
+            ssh_config: SSH 配置
+
+        Returns:
+            paramiko.SSHClient: 已连接的 SSH 客户端
+
+        Raises:
+            Exception: 连接失败时抛出
+        """
+        client = paramiko.SSHClient()
+        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+
+        if ssh_config.method == SSHMethod.KEY:
+            # 密钥认证
+            passphrase = None
+            if ssh_config.key_passphrase and self.cipher:
+                try:
+                    passphrase = self.cipher.decrypt(ssh_config.key_passphrase.encode()).decode()
+                except Exception as e:
+                    logger.warning(f"解密密钥密码失败: {e}")
+
+            client.connect(
+                hostname=ssh_config.host,
+                port=ssh_config.port,
+                username=ssh_config.username,
+                key_filename=ssh_config.key_path,
+                passphrase=passphrase,
+                timeout=ssh_config.timeout
+            )
+        else:
+            # 密码认证：解密配置中的密码
+            password = None
+            if ssh_config.password:
+                if self.cipher:
+                    try:
+                        password = self.cipher.decrypt(ssh_config.password.encode()).decode()
+                    except Exception as e:
+                        logger.warning(f"解密密码失败: {e}")
+                        password = ssh_config.password
+                else:
+                    # 无 cipher 时按明文处理（向后兼容）
+                    password = ssh_config.password
+
+            client.connect(
+                hostname=ssh_config.host,
+                port=ssh_config.port,
+                username=ssh_config.username,
+                password=password,
+                timeout=ssh_config.timeout
+            )
+
+        return client
 
     def _build_ssh_command(
         self,

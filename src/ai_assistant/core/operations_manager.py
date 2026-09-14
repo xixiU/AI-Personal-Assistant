@@ -127,6 +127,8 @@ class OperationsManager:
                     description=app_config.get('description', ''),
                     machines=[machine_config['name']],
                     tags=app_config.get('tags', []),
+                    aliases=app_config.get('alias', []),
+                    path=app_config.get('path', ''),
                     metadata=app_config.get('metadata', {})
                 )
                 applications.append(application)
@@ -360,6 +362,11 @@ class OperationsManager:
         # 精确匹配名称
         if query in self.machines:
             return self.machines[query]
+
+        # 精确匹配主机 IP/地址（AI 有时会用 IP 作为标识）
+        for machine in self.machines.values():
+            if machine.ssh_config and machine.ssh_config.host == query:
+                return machine
 
         # 模糊匹配显示名称、描述、标签
         for machine in self.machines.values():

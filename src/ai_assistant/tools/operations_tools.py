@@ -43,10 +43,17 @@ class OperationsTools:
         初始化运维工具
 
         Args:
-            operations_manager: 运维管理器实例（用于审批流程），可选
+            operations_manager: 运维管理器实例（用于审批流程和密码解密），可选
         """
         self.registry = get_command_registry()
         self.operations_manager = operations_manager
+
+    @property
+    def _cipher(self):
+        """获取密码解密器（来自 operations_manager，用于 SSH 密码认证）"""
+        if self.operations_manager:
+            return getattr(self.operations_manager, "cipher", None)
+        return None
 
     # ==================== 工具方法 ====================
 
@@ -78,7 +85,7 @@ class OperationsTools:
             >>>     print(f"状态: {result['data']['status']}")
         """
         try:
-            command = GetAppStatusCommand()
+            command = GetAppStatusCommand(cipher=self._cipher)
             result = command.execute(machine, app_name=app_name)
             return self._format_result(result)
         except Exception as e:
@@ -145,7 +152,7 @@ class OperationsTools:
             >>> )
         """
         try:
-            command = GetAppVersionCommand()
+            command = GetAppVersionCommand(cipher=self._cipher)
 
             # 自动模式：从 application_metadata 中读取 version_detection 配置
             if application_metadata and 'version_detection' in application_metadata:
@@ -305,7 +312,7 @@ class OperationsTools:
             >>>     commit = git_info.get("git.commit.id.abbrev", "unknown")
         """
         try:
-            command = GetJarInfoCommand()
+            command = GetJarInfoCommand(cipher=self._cipher)
             result = command.execute(machine, jar_path=jar_path)
             return self._format_result(result)
         except Exception as e:
@@ -351,7 +358,7 @@ class OperationsTools:
             >>>     threads = result["data"]["thread_count"]
         """
         try:
-            command = GetProcessInfoCommand()
+            command = GetProcessInfoCommand(cipher=self._cipher)
             result = command.execute(machine, pid=pid, app_name=app_name)
             return self._format_result(result)
         except Exception as e:
@@ -392,7 +399,7 @@ class OperationsTools:
             >>>     mem_usage = result["data"]["memory"]["usage_percent"]
         """
         try:
-            command = GetSystemMetricsCommand()
+            command = GetSystemMetricsCommand(cipher=self._cipher)
             result = command.execute(machine)
             return self._format_result(result)
         except Exception as e:
@@ -435,7 +442,7 @@ class OperationsTools:
             >>> )
         """
         try:
-            command = GetLogsCommand()
+            command = GetLogsCommand(cipher=self._cipher)
             result = command.execute(
                 machine,
                 log_path=log_path,
@@ -486,7 +493,7 @@ class OperationsTools:
             >>>     print(f"需要审批，操作 ID: {result['operation_id']}")
         """
         try:
-            command = RestartAppCommand()
+            command = RestartAppCommand(cipher=self._cipher)
 
             # 检查是否需要审批
             if self.operations_manager and command.risk_level in [OperationRisk.MEDIUM, OperationRisk.HIGH]:
@@ -545,7 +552,7 @@ class OperationsTools:
             >>> )
         """
         try:
-            command = StopAppCommand()
+            command = StopAppCommand(cipher=self._cipher)
 
             # 检查是否需要审批
             if self.operations_manager and command.risk_level in [OperationRisk.MEDIUM, OperationRisk.HIGH]:
@@ -601,7 +608,7 @@ class OperationsTools:
             >>> )
         """
         try:
-            command = StartAppCommand()
+            command = StartAppCommand(cipher=self._cipher)
 
             # 检查是否需要审批
             if self.operations_manager and command.risk_level in [OperationRisk.MEDIUM, OperationRisk.HIGH]:
@@ -751,21 +758,27 @@ class OperationsTools:
             if not self.operations_manager:
                 return {"need_approval": False}
 
+            # 构造 OperatorIdentity 对象
+            from ai_assistant.core.operations_models import OperatorIdentity
+            operator = OperatorIdentity(
+                user_id=operator_id or "unknown",
+                username=operator_id or "unknown"
+            )
+
             # 首先检查授权（包括个人白名单和群组白名单）
-            if not self.operations_manager.is_authorized(operator_id, chat_id=chat_id):
+            # is_authorized(operator: OperatorIdentity, machine: Machine, operation_type, chat_id)
+            if not self.operations_manager.is_authorized(
+                operator,
+                machine,
+                operation_type="write",
+                chat_id=chat_id
+            ):
                 return {
                     "success": False,
                     "need_approval": False,
                     "data": None,
                     "error": "未授权的操作者。您不在白名单中，也不在授权群组中。"
                 }
-
-            # 构造 OperatorIdentity 对象
-            from ai_assistant.core.operations_manager import OperatorIdentity
-            operator = OperatorIdentity(
-                user_id=operator_id or "unknown",
-                name=operator_id or "unknown"
-            )
 
             # 调用 operations_manager 的 request_approval 方法
             operation_id = self.operations_manager.request_approval(
