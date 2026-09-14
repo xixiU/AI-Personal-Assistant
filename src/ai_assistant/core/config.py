@@ -102,6 +102,9 @@ class Config:
     troubleshoot_branch_hint: str = ""  # 版本号→分支映射提示（注入给 AI）
     troubleshoot_repositories: List['RepositoryConfig'] = None  # 多仓库配置列表
 
+    # 运维操作配置
+    operations: Optional[Dict[str, Any]] = None  # 运维功能配置（machines/applications/authorization）
+
     # IM 适配器配置
     adapters: List[Dict[str, Any]] = None
 
@@ -278,5 +281,9 @@ class Config:
         # 解析适配器
         if "adapters" in data:
             config.adapters = data["adapters"]
+
+        # 解析运维操作配置
+        if "operations" in data:
+            config.operations = data["operations"]
 
         return config
