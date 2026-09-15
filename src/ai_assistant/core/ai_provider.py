@@ -228,6 +228,8 @@ class AIProvider(ABC):
         messages: List[Message],
         session_id: Optional[str] = None,
         source: str = "unknown",
+        context_key: str = "",
+        chain_info: Optional[dict] = None,
     ) -> Tuple[str, Optional[str], dict]:
         """
         统一入口：记录日志 + 计时 + 调用 send_message + 保存历史
@@ -236,8 +238,11 @@ class AIProvider(ABC):
 
         Args:
             messages: 消息列表
-            session_id: 会话 ID
+            session_id: 会话 ID（归档/聚合维度，飞书为群 chat_id）
             source: 提问来源（"feishu", "wechat", "web"）
+            context_key: 引用链标识（飞书 root_id 或链首 message_id），随对话历史落盘，
+                供下一轮"引用追问"时按链重建完整历史。
+            chain_info: 引用链排查字段（message_id/parent_id/root_id），随历史落盘用于核对。
 
         Returns:
             (reply, record_id, metadata) 元组。
@@ -276,6 +281,8 @@ class AIProvider(ABC):
                         latency_ms=0,
                         source=source,
                         metadata=metadata,
+                        context_key=context_key,
+                        chain_info=chain_info,
                     )
                 except Exception as e:
                     logger.warning(f"保存拦截记录失败: {e}")
@@ -323,6 +330,8 @@ class AIProvider(ABC):
                         latency_ms=int(duration * 1000),
                         source=source,
                         metadata=metadata,  # 传递 metadata（包含 mode、tool_rounds 等）
+                        context_key=context_key,
+                        chain_info=chain_info,
                     )
             except Exception as e:
                 logger.warning(f"保存对话历史失败: {e}")

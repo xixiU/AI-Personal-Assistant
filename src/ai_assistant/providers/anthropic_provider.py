@@ -68,23 +68,19 @@ class AnthropicProvider(AIProvider):
         self.tool_timeout = 30  # 单个工具超时（秒），由外部配置注入
         self.repo_manager = None  # 多仓库管理器（由外部注入）
 
-        # 会话级 Agentic 粘性标记：一旦某 session 进入过工具使用（代码排查）模式，
-        # 就把 session_id 记在这里。后续该 session 的所有追问都自动继承 Agentic 模式，
-        # 不再依赖上下文消息窗口中是否还留有 mode=="agentic" 的历史回复。
-        #
-        # 背景（修复的原始 bug）：原实现靠遍历 messages 找 assistant.metadata.mode=="agentic"
-        # 来判断"追问继承"。但 ContextManager 只保留最近 max_messages 条消息（默认 10），
-        # 多轮追问后，最早那条带 agentic 标记的回复会被挤出窗口，导致第二/第三次追问
-        # 掉回 RAG 模式。改用会话级集合持久记录，彻底摆脱窗口滑动的影响。
-        import threading as _threading
-        self._agentic_sessions: set = set()
-        self._agentic_sessions_lock = _threading.Lock()
+        # 注意：已彻底移除"会话级粘性"机制（原 _agentic_sessions / _operations_sessions）。
+        # 原设计让"群里有人用过一次工具/运维模式，该群 session 就永久继承该模式"，
+        # 由于 session_id == 飞书 chat_id（房间级、永久、跨用户共享），导致：
+        #   - 跨用户污染：甲用 /运维 后，乙在同群问普通问题也被拖进运维模式并被鉴权拒绝
+        #   - 跨话题污染：一次运维查询后，同群所有后续话题永久停留在运维模式
+        #   - 永不过期：set 只增不减，进程不重启就一直粘着
+        # 现在模式判定只看"当前这条消息本身"，不看群里以前发生过什么。
+        # 多轮话题延续改由用户显式「引用」上一条回复来表达（引用链 root_id），
+        # 无引用 = 全新对话，从头开始，不粘连任何历史。
 
         # 运维工具（由外部注入）
         self.operations_tools = None
         self.operations_enabled = False
-        self._operations_sessions: set = set()  # 运维模式会话粘性标记
-        self._operations_sessions_lock = _threading.Lock()
 
     def set_git_tools(self, git_tools, enabled: bool = True, branch_hint: str = ""):
         """
@@ -174,24 +170,22 @@ class AnthropicProvider(AIProvider):
         """
         判断是否应该使用 Agentic 模式（工具调用）
 
-        触发条件（命中任一即进入）：
+        触发条件（命中任一即进入，全部只看"当前这条消息本身"）：
         1. Git 工具已启用（前提）
-        2. 会话级粘性：该 session 曾进入过 Agentic 模式（持久记忆，不受上下文窗口影响）
-        3. 显式斜杠指令（/排查、/查代码、/code）
-        4. 工具意图关键词（"查代码""看源码""排查"等自然语言，用户引用追问也生效）
-        5. 图片消息（日志截图）
-        6. 追问兜底：历史对话消息里仍留有 Agentic 模式回复（自动继承）
+        2. 显式斜杠指令（/排查、/查代码、/code）
+        3. 工具意图关键词（"查代码""看源码""排查"等自然语言）
+        4. 图片消息（日志截图）
 
-        设计说明：
-        - 条件 2 是修复"多轮追问后模式丢失"的核心。只要 session 进过一次工具模式，
-          后续所有追问（包括基于第二/第三次回答的引用追问）都自动保持工具模式。
-        - 条件 4 满足"普通文档检索模式下，追问携带查代码等关键词则自动切工具模式"的诉求；
-          文档检索结果仍会作为上下文注入，辅助 AI 判断。
-        - 关键词采用明确的"工具/代码意图"词，避免误伤纯文档查询（如"fastjson2 报错怎么解决"）。
+        已移除的粘连逻辑（原条件 2 会话级粘性 + 原条件 6 历史兜底继承）：
+        - 原"会话级粘性"让群里有人用过工具模式后，同群所有后续消息永久继承，
+          与运维模式同源，造成跨用户/跨话题污染，已删除。
+        - 原"历史兜底"遍历上下文窗口里的 assistant.metadata.mode=='agentic' 来继承，
+          同样属于隐式粘连，已删除。
+        - 多轮话题延续统一改由用户显式「引用」上一条回复表达，无引用 = 全新对话。
 
         Args:
             messages: 消息列表
-            session_id: 会话 ID（用于会话级粘性判断）
+            session_id: 会话 ID（保留参数仅为签名兼容，不再用于粘性判断）
 
         Returns:
             是否使用 Agentic 模式
@@ -199,88 +193,38 @@ class AnthropicProvider(AIProvider):
         if not self.git_tools_enabled or not self.git_tools:
             return False
 
-        # 1. 会话级粘性：该 session 进过工具模式，则一直保持（不受消息窗口滑动影响）
-        if session_id and self._is_agentic_session(session_id):
-            logger.info(f"触发 Agentic 模式：会话 {session_id} 已进入工具使用模式（会话级粘性继承）")
-            return True
-
         last_user_text = self._extract_last_user_text(messages)
 
-        # 2. 显式斜杠指令检测
+        # 1. 显式斜杠指令检测
         if self._has_explicit_command(last_user_text):
             logger.info("触发 Agentic 模式：显式指令")
             return True
 
-        # 3. 工具意图关键词检测（自然语言，支持引用追问触发）
+        # 2. 工具意图关键词检测（自然语言）
         if self._has_tool_intent_keyword(last_user_text):
             logger.info("触发 Agentic 模式：命中工具意图关键词（如查代码/看源码/排查）")
             return True
 
-        # 4. 检查是否有图片（日志截图）
+        # 3. 检查当前消息是否有图片（日志截图）
         for msg in messages:
             for content in msg.content:
                 if content.type == "image":
                     logger.info("触发 Agentic 模式：检测到图片消息")
                     return True
 
-        # 5. 追问兜底：检查历史是否有 Agentic 模式回复（窗口内仍能命中时）
-        for msg in messages:
-            if msg.role == "assistant" and msg.metadata.get("mode") == "agentic":
-                logger.info("触发 Agentic 模式：历史对话中使用过代码排查模式（自动继承）")
-                return True
-
         return False
-
-    def _is_agentic_session(self, session_id: str) -> bool:
-        """判断 session 是否已被标记为 Agentic 粘性会话（线程安全）"""
-        with self._agentic_sessions_lock:
-            return session_id in self._agentic_sessions
-
-    def _mark_agentic_session(self, session_id: Optional[str]) -> None:
-        """
-        将 session 标记为 Agentic 粘性会话（线程安全）。
-
-        由 _send_with_context 在确认走 Agentic 分支后调用，保证后续同 session
-        的追问持续继承工具使用模式。
-        """
-        if not session_id:
-            return
-        with self._agentic_sessions_lock:
-            if session_id not in self._agentic_sessions:
-                self._agentic_sessions.add(session_id)
-                logger.info(f"会话 {session_id} 已标记为工具使用模式（后续追问自动继承）")
-
-    def _is_operations_session(self, session_id: str) -> bool:
-        """判断 session 是否已被标记为运维模式会话（线程安全）"""
-        with self._operations_sessions_lock:
-            return session_id in self._operations_sessions
-
-    def _mark_operations_session(self, session_id: Optional[str]) -> None:
-        """
-        将 session 标记为运维模式会话（线程安全）。
-
-        由 _send_with_context 在确认走 Operations 分支后调用，保证后续同 session
-        的追问持续继承运维模式。
-        """
-        if not session_id:
-            return
-        with self._operations_sessions_lock:
-            if session_id not in self._operations_sessions:
-                self._operations_sessions.add(session_id)
-                logger.info(f"会话 {session_id} 已标记为运维模式（后续追问自动继承）")
 
     def _should_use_operations_mode(self, messages: List[Message], session_id: Optional[str] = None) -> bool:
         """
         判断是否应该使用 Operations 模式（运维工具调用）
 
-        触发条件（命中任一即进入）：
-        1. 运维工具已启用（前提）
-        2. 会话级粘性：该 session 曾进入过 Operations 模式
-        3. 显式 /运维 前缀
+        触发条件（唯一）：当前这条消息显式带 /运维 或 /ops 前缀。
+        不再有任何"会话级粘性"——不看群里以前是否用过运维模式。
+        多轮运维追问请用户显式「引用」上一条运维回复来延续（引用链承载话题）。
 
         Args:
             messages: 消息列表
-            session_id: 会话 ID（用于会话级粘性判断）
+            session_id: 会话 ID（保留参数仅为签名兼容，不再用于粘性判断）
 
         Returns:
             是否使用 Operations 模式
@@ -289,13 +233,9 @@ class AnthropicProvider(AIProvider):
             logger.debug(f"运维模式未启用: operations_enabled={self.operations_enabled}, operations_tools={self.operations_tools is not None}")
             return False
 
-        # 1. 会话级粘性：该 session 进过运维模式，则一直保持
-        if session_id and self._is_operations_session(session_id):
-            return True
-
         last_user_text = self._extract_last_user_text(messages)
 
-        # 2. 检测 /运维 或 /ops（支持前面有 @ 提及等前缀）
+        # 唯一触发：当前消息显式带 /运维 或 /ops（支持前面有 @ 提及等前缀）
         text_stripped = last_user_text.strip()
         if "/运维" in text_stripped or "/ops" in text_stripped:
             return True
@@ -363,10 +303,9 @@ class AnthropicProvider(AIProvider):
             (reply_text, metadata) 元组
             metadata 包含：tool_rounds（Agentic/Operations）或 doc_count（RAG）等
         """
-        # 判断是否使用 Operations 模式
+        # 判断是否使用 Operations 模式（仅看当前消息是否带 /运维 前缀，无会话粘性）
         if self._should_use_operations_mode(messages, session_id):
             logger.info("使用 Operations 模式（运维工具调用）")
-            self._mark_operations_session(session_id)
             return self._send_with_context_operations(
                 messages,
                 doc_context,
@@ -376,11 +315,9 @@ class AnthropicProvider(AIProvider):
                 max_time=self.max_time
             )
 
-        # 判断是否使用 Agentic 模式
+        # 判断是否使用 Agentic 模式（仅看当前消息，无会话粘性）
         if self._should_use_agentic_mode(messages, session_id):
             logger.info("使用 Agentic 模式（工具调用）")
-            # 标记会话为工具使用模式，后续追问自动继承（修复多轮追问模式丢失）
-            self._mark_agentic_session(session_id)
             return self._send_with_context_agentic(
                 messages,
                 doc_context,

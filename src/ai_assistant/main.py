@@ -10,12 +10,13 @@ AI 自动回复助手 - 主程序
 import time
 import sys
 import os
+import re
 import queue
 import threading
 import requests
 import signal
 import atexit
-from typing import Optional
+from typing import Optional, List
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from datetime import datetime
@@ -416,6 +417,20 @@ class AIAssistant:
             message_id = parsed["message_id"]
             user_id = parsed.get("sender_id", "unknown")
 
+            # 上下文关联 key（历史注入维度，独立于 session_id）：
+            #   - 用户「引用」了某条消息 → 用 root_id（整条引用链共享历史，实现"引用即延续话题"）
+            #     机器人用 reply API 回复用户消息 A 时，引用链根就是 A；用户之后引用机器人回复
+            #     再追问，其 root_id 仍指向 A —— 于是与第 1 轮存历史用的 key(=message_id A) 对齐。
+            #   - 未引用 → 用本条 message_id：每条消息都是独立 key，get_context 必然返回空，
+            #     即"全新对话、零历史、从头开始"，彻底杜绝跨话题/跨用户的历史粘连。
+            # session_id（=chat_id 群级）保持不变，仍用于并发锁/去重/思考表情/回复发送等房间级逻辑。
+            root_id = parsed.get("root_id", "")
+            context_key = root_id if root_id else message_id
+            logger.info(
+                f"上下文 key: {context_key} "
+                f"({'引用链 root_id' if root_id else '无引用→独立 message_id（全新对话）'})"
+            )
+
             # 保存原始 text 用于运维模式检测（需要保留 @ 提及来识别命令）
             original_text = text
 
@@ -452,7 +467,8 @@ class AIAssistant:
                             content=content_parts,
                             timestamp=datetime.now()
                         )
-                        self.context_manager.add_message(session_id, user_message)
+                        # 历史入库用 context_key（引用链维度），与主流程一致
+                        self.context_manager.add_message(context_key, user_message)
 
                     # 带文字的消息是真实提问，记为待处理，等当前请求结束后补跑，
                     # 避免用户的问题被静默丢弃
@@ -496,12 +512,12 @@ class AIAssistant:
             is_operations_mode = original_text and ("/运维" in original_text or "/ops" in original_text)
 
             # 去掉飞书 @ 占位符（如 @_user_1），避免污染 AI 输入和检索关键词
-            import re
             if text:
                 text = re.sub(r"@_user_\d+\s*", "", text).strip()
                 content_parts.append(Content(type="text", data=text))
 
             # 内容为空时不入上下文（例如纯图片已提前入过），避免产生空消息
+            user_message = None
             if content_parts:
                 user_message = Message(
                     role="user",
@@ -519,18 +535,39 @@ class AIAssistant:
                         "source": "feishu"
                     }
                     logger.info(f"已注入运维 metadata: {user_message.metadata}")
-                self.context_manager.add_message(session_id, user_message)
+                # 历史入库仍写内存（保留短窗口能力，兼容无引用的极短连续追问）
+                self.context_manager.add_message(context_key, user_message)
 
-            # 获取上下文消息
-            context_messages = self.context_manager.get_context(session_id)
-            logger.info(f"Sending {len(context_messages)} messages to AI")
+            # 构建注入给 AI 的上下文消息：
+            #   - 有引用(root_id) → 路径 B：从持久化 chat_history 按 context_key 重建整条
+            #     引用链的完整问答，作为唯一真相源。不依赖内存窗口（内存有 max_messages=10
+            #     截断 + 会话过期 + 重启易失三大限制，无法保证"完整历史"）。
+            #   - 无引用 → 全新对话：内存该 key 必为空，context_messages 只含当前这条，零历史。
+            if root_id and self.chat_history:
+                context_messages = self._rebuild_context_from_chain(context_key, user_message)
+            else:
+                context_messages = self.context_manager.get_context(context_key)
+            logger.info(f"Sending {len(context_messages)} messages to AI (context_key={context_key})")
+
+            # 引用链排查字段：随历史落盘，便于核对飞书 root_id 行为
+            chain_info = {
+                "message_id": message_id,
+                "parent_id": parsed.get("parent_id", ""),
+                "root_id": root_id,
+            }
 
             # 调用 AI 生成回复
             ai_start = time_mod.time()
             record_id = None
             metadata = {}
             try:
-                reply, record_id, metadata = self.ai_provider.call(context_messages, session_id=session_id, source="feishu")
+                reply, record_id, metadata = self.ai_provider.call(
+                    context_messages,
+                    session_id=session_id,
+                    source="feishu",
+                    context_key=context_key,
+                    chain_info=chain_info,
+                )
             except DocIndexingInProgressError:
                 # 文档索引更新中，加入延迟重试队列
                 logger.info(f"文档索引更新中，将消息加入延迟重试队列: session={session_id}")
@@ -547,7 +584,8 @@ class AIAssistant:
                 timestamp=datetime.now(),
                 metadata=metadata  # 保存模式信息（如 mode: "agentic"）
             )
-            self.context_manager.add_message(session_id, ai_message)
+            # AI 回复入库同样用 context_key，保证下一轮引用能取到本轮问答
+            self.context_manager.add_message(context_key, ai_message)
 
             # 通过适配器发送回复（使用 message_id 回复具体消息）
             send_start = time_mod.time()
@@ -591,6 +629,58 @@ class AIAssistant:
                     except Exception as e:
                         logger.error(f"补跑暂存提问失败: {e}", exc_info=True)
 
+    def _rebuild_context_from_chain(self, context_key: str, current_user_message) -> List[Message]:
+        """
+        路径 B：按引用链标识从持久化 chat_history 重建整条链的完整历史。
+
+        用于"用户引用某条消息追问"场景。从 jsonl 里捞出该 context_key 的全部历史轮
+        （每条含 query/answer），按时间升序展开成交替的 user/assistant 消息，最后接上
+        当前这条新提问。不依赖内存 ContextManager，因此不受 max_messages 截断、
+        会话过期、进程重启影响 —— 这正是"注入整条链所有对话与回答"的落地。
+
+        Args:
+            context_key: 引用链标识（飞书 root_id）
+            current_user_message: 当前这轮用户消息（Message 对象；内容为空时可能为 None）
+
+        Returns:
+            重建后的消息列表：[历史 user/assistant 交替...] + [当前 user 消息]
+        """
+        rebuilt: List[Message] = []
+        try:
+            records = self.chat_history.get_records_by_context_key(context_key)
+        except Exception as e:
+            logger.warning(f"按引用链重建历史失败，回退到当前消息: {e}")
+            records = []
+
+        for rec in records:
+            query = (rec.get("query") or "").strip()
+            answer = (rec.get("answer") or "").strip()
+            # 去掉飞书 @ 占位符，保持与实时消息一致的干净文本
+            if query:
+                query = re.sub(r"@_user_\d+\s*", "", query).strip()
+            if query:
+                rebuilt.append(Message(
+                    role="user",
+                    content=[Content(type="text", data=query)],
+                    timestamp=datetime.now(),
+                ))
+            if answer:
+                rebuilt.append(Message(
+                    role="assistant",
+                    content=[Content(type="text", data=answer)],
+                    timestamp=datetime.now(),
+                ))
+
+        # 末尾追加当前这轮新提问（尚未落盘，链里不含，不会重复）
+        if current_user_message is not None:
+            rebuilt.append(current_user_message)
+
+        logger.info(
+            f"引用链重建: context_key={context_key}, 命中历史 {len(records)} 轮, "
+            f"注入消息 {len(rebuilt)} 条"
+        )
+        return rebuilt
+
     def _parse_feishu_event(self, event_data: dict, adapter=None) -> Optional[dict]:
         """
         从飞书事件数据中解析出消息信息
@@ -617,6 +707,15 @@ class AIAssistant:
             message_type = message.get("message_type", "")
             message_id = message.get("message_id", "")
             sender_id = sender.get("sender_id", {}).get("open_id", "")
+
+            # 引用/回复关系（引用链方案的地基）：
+            # 飞书「回复某条消息」时，message 事件会带 parent_id（被直接引用的那条消息 ID）
+            # 和 root_id（整条引用链的根消息 ID）。普通发言不带这两个字段。
+            # 当前仅提取并打日志用于实测确认报文结构，暂不改变 session 逻辑。
+            parent_id = message.get("parent_id", "")
+            root_id = message.get("root_id", "")
+            if parent_id or root_id:
+                logger.info(f"🔗 引用消息: message_id={message_id}, parent_id={parent_id}, root_id={root_id}")
 
             # 提取发送者详细信息（用于运维模式鉴权）
             sender_name = sender.get("sender_id", {}).get("user_id", "")  # 飞书用户ID
@@ -651,6 +750,8 @@ class AIAssistant:
                     "chat_type": message.get("chat_type", "p2p"),
                     "text": text,
                     "message_id": message_id,
+                    "parent_id": parent_id,
+                    "root_id": root_id,
                     "sender_id": sender_id,
                     "sender_name": sender_name,
                     "sender_display_name": sender_display_name,
