@@ -424,12 +424,25 @@ class GetAppVersionCommand(OperationCommand):
             jar_path: JAR 包路径
             file_path: JAR 包内的文件路径（默认 META-INF/MANIFEST.MF）
         """
-        command = f"unzip -p {shlex.quote(jar_path)} {shlex.quote(file_path)} 2>/dev/null || echo 'File not found: {file_path}'"
+        # 用 unzip -p 提取 jar 内文件。注意：SSH 登录会执行 .bashrc，可能打印
+        # "PROMPT_COMMAND：只读变量" 之类的 stderr 噪音并污染退出码，所以：
+        # 1) 显式 grep 出目标行做存在性判断（不依赖 unzip 退出码）
+        # 2) 不做任何解析，直接把整段原始内容交给大模型自行读取分支/commit
+        marker = "___GITINFO_NOT_FOUND___"
+        command = (
+            f"unzip -p {shlex.quote(jar_path)} {shlex.quote(file_path)} 2>/dev/null"
+            f" || echo {marker}"
+        )
         result = self._execute_ssh_command(machine.ssh_config, command)
 
-        if result.success and result.data and 'File not found' not in result.data:
-            version_info = self._parse_manifest(result.data)
-            return CommandResult(success=True, data=version_info, raw_output=result.raw_output)
+        content = (result.data or "").strip()
+        if result.success and content and marker not in content:
+            # 不解析：原始内容(通常是 JSON 或 key=value)整体返回，大模型能直接读懂
+            return CommandResult(
+                success=True,
+                data={"file_path": file_path, "content": content},
+                raw_output=result.raw_output
+            )
         else:
             return CommandResult(
                 success=False,

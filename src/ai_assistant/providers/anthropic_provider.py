@@ -1266,6 +1266,48 @@ class AnthropicProvider(AIProvider):
                         "data": None
                     }
 
+                # 特殊处理 get_app_version: Claude 通常从进程 cmdline 发现绝对 jar_path，
+                # 但默认只读 MANIFEST.MF（无 git 分支信息）。这里按 path 前缀匹配到配置的应用，
+                # 把配置里 version_detection 指定的 jar 内文件（如 BOOT-INF/classes/git.info）
+                # 注入为 jar_file_path，从而读到 git 分支/commit 信息。保留 Claude 的绝对 jar_path。
+                if (tool_name == 'get_app_version'
+                        and tool_input.get('jar_path')
+                        and not tool_input.get('jar_file_path')
+                        and not tool_input.get('application_metadata')):
+                    jar_path = tool_input['jar_path']
+                    manager = self.operations_tools.operations_manager
+                    apps = list(manager.applications.values()) if manager else []
+
+                    # 取 path 最长（最精确）的前缀匹配，避免同前缀路径误配
+                    best_app = None
+                    best_len = -1
+                    for app in apps:
+                        app_path = getattr(app, 'path', '') or ''
+                        if app_path and jar_path.startswith(app_path) and len(app_path) > best_len:
+                            best_app = app
+                            best_len = len(app_path)
+
+                    if best_app is not None:
+                        metadata = getattr(best_app, 'metadata', {}) or {}
+                        # 从 version_detection 里找到第一个带 file_path 的 jar_manifest 配置
+                        jar_file_path = None
+                        for cfg in metadata.get('version_detection', []):
+                            if cfg.get('type') == 'jar_manifest' and cfg.get('file_path'):
+                                jar_file_path = cfg['file_path']
+                                break
+                        if jar_file_path:
+                            tool_input['source'] = 'jar'
+                            tool_input['jar_file_path'] = jar_file_path
+                            logger.info(
+                                f"✅ get_app_version 自动注入 jar_file_path={jar_file_path} "
+                                f"(应用: {best_app.name})"
+                            )
+                        else:
+                            logger.debug(f"应用 {best_app.name} 无 jar_manifest.file_path 配置，读取默认 MANIFEST.MF")
+                    else:
+                        logger.debug(f"get_app_version 未匹配到应用配置: jar_path={jar_path}, 候选应用={len(apps)} 个")
+
+
                 # 如果方法需要 chat_id 参数，传入
                 if 'chat_id' in params:
                     result = method(machine, chat_id=chat_id, **tool_input)
