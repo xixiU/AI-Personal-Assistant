@@ -408,13 +408,16 @@ class AIAssistant:
             if not parsed:
                 logger.debug("Event parsing returned None, skipping")
                 return
-            logger.info("parsed message:{}",parsed)
+            logger.debug("parsed message:{}",parsed)
 
             session_id = parsed["chat_id"]
             text = parsed["text"]
             image_data = parsed.get("image_data")
             message_id = parsed["message_id"]
             user_id = parsed.get("sender_id", "unknown")
+
+            # 保存原始 text 用于运维模式检测（需要保留 @ 提及来识别命令）
+            original_text = text
 
             # 新消息到达：清除该 session 的纯图片等待标记，让等待线程立即放行
             image_already_in_context = False
@@ -488,7 +491,14 @@ class AIAssistant:
             content_parts = []
             if image_data and not image_already_in_context:
                 content_parts.append(Content(type="image", data=image_data))
+
+            # 在构建消息前，先用原始 text 检测运维模式，然后再清理 @ 提及
+            is_operations_mode = original_text and ("/运维" in original_text or "/ops" in original_text)
+
+            # 去掉飞书 @ 占位符（如 @_user_1），避免污染 AI 输入和检索关键词
+            import re
             if text:
+                text = re.sub(r"@_user_\d+\s*", "", text).strip()
                 content_parts.append(Content(type="text", data=text))
 
             # 内容为空时不入上下文（例如纯图片已提前入过），避免产生空消息
@@ -499,7 +509,8 @@ class AIAssistant:
                     timestamp=datetime.now()
                 )
                 # 如果是运维模式，在消息 metadata 中附加操作者信息
-                if text and (text.strip().startswith("/运维") or text.strip().startswith("/ops")):
+                # 使用 original_text 检测（保留 @ 提及），支持 "/运维" 或 "/ops" 出现在消息任意位置
+                if is_operations_mode:
                     user_message.metadata = {
                         "operator_id": parsed.get("sender_id", ""),
                         "operator_name": parsed.get("sender_name", ""),
@@ -507,6 +518,7 @@ class AIAssistant:
                         "chat_id": parsed.get("chat_id", ""),  # 添加群组ID用于群组白名单
                         "source": "feishu"
                     }
+                    logger.info(f"已注入运维 metadata: {user_message.metadata}")
                 self.context_manager.add_message(session_id, user_message)
 
             # 获取上下文消息

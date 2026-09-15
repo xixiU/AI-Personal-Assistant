@@ -861,21 +861,27 @@ class AnthropicProvider(AIProvider):
             if content_parts:
                 api_messages.append({"role": msg.role, "content": content_parts})
 
-        # 获取操作者身份信息（从最后一条消息的 metadata 中提取）
+        # 获取操作者身份信息（从消息列表中倒序查找第一条带 metadata 的）
         operator_info = "未知用户"
         operator_id = ""
         operator_name = ""
         source = "feishu"
         chat_id = None  # 用于群组白名单检查
-        if messages:
-            last_msg = messages[-1]
-            if last_msg.metadata:
-                operator_name = last_msg.metadata.get("operator_name", "")
-                operator_id = last_msg.metadata.get("operator_id", "")
-                source = last_msg.metadata.get("source", "") or "feishu"
-                chat_id = last_msg.metadata.get("chat_id")  # 提取 chat_id
+
+        # 倒序遍历消息，找到第一条有 metadata 的（通常是最近的 /运维 触发消息）
+        for msg in reversed(messages):
+            if msg.metadata and any(k in msg.metadata for k in ["operator_id", "operator_name", "chat_id"]):
+                operator_name = msg.metadata.get("operator_name", "")
+                operator_id = msg.metadata.get("operator_id", "")
+                source = msg.metadata.get("source", "") or "feishu"
+                chat_id = msg.metadata.get("chat_id")
                 if operator_name or operator_id:
                     operator_info = f"{operator_name} ({operator_id}, {source})"
+                logger.info(f"从消息 metadata 提取操作者信息: {operator_info}, chat_id={chat_id}")
+                break
+        else:
+            # 没找到任何带 metadata 的消息
+            logger.warning(f"未找到带运维 metadata 的消息，共检查 {len(messages)} 条消息")
 
         # 只读鉴权门：仅允许白名单内的运维同事 / 授权群组使用查询能力
         if self.operations_tools and self.operations_tools.operations_manager:
