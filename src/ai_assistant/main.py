@@ -308,6 +308,8 @@ class AIAssistant:
             if name == "feishu":
                 from ai_assistant.adapters.feishu_bot import FeishuBotAdapter
                 bot_config = adapter_config.get("bot_api", {})
+                # 注入历史消息回溯配置（支持"先发图、后发文字"场景）
+                bot_config["lookback_count"] = self.config.context_feishu_lookback_count
                 adapter = FeishuBotAdapter(bot_config)
                 self.adapters.append(adapter)
                 logger.info("Feishu Bot API adapter initialized")

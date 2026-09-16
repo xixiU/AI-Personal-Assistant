@@ -32,6 +32,9 @@ class Config:
     context_session_timeout: int = 3600
     # 纯图片消息等待后续文字描述的合并窗口（秒），0 表示关闭等待
     context_lone_image_wait: float = 8.0
+    # 飞书 bot 模式：收集当前消息前 N 条历史消息（支持"先发图、后发文字"场景）
+    # 0 表示只处理当前消息（旧行为），>=1 表示向前回溯 N 条
+    context_feishu_lookback_count: int = 5
 
     # AI配置
     ai_primary_provider: str = "openai"

@@ -60,6 +60,9 @@ class FeishuBotAdapter(IMAdapter):
         # 用户昵称缓存（open_id -> name），避免反馈时重复调用飞书通讯录 API
         self._user_name_cache: Dict[str, str] = {}
 
+        # 历史消息回溯配置（支持"先发图、后发文字"场景）
+        self.lookback_count = config.get("lookback_count", 5)
+
     def cache_message_record(self, message_id: str, record_id: str):
         """
         缓存飞书消息 ID 到 record_id 的映射
@@ -165,6 +168,52 @@ class FeishuBotAdapter(IMAdapter):
             text = "".join(text_parts).strip()
 
         return text, image_keys
+
+    def _fetch_recent_messages(self, chat_id: str, current_message_id: str, count: int) -> List[Dict[str, Any]]:
+        """
+        拉取指定会话的最近 N 条消息（不含当前消息）
+
+        Args:
+            chat_id: 会话 ID
+            current_message_id: 当前触发的消息 ID（向前回溯时排除此消息，避免重复）
+            count: 拉取条数
+
+        Returns:
+            消息列表（按时间升序，最老的在前），每条含 message_id / message_type / content / create_time
+        """
+        if count <= 0:
+            return []
+
+        try:
+            token = self.get_tenant_access_token()
+            url = f"{self.base_url}/open-apis/im/v1/messages"
+            headers = {"Authorization": f"Bearer {token}"}
+            # container_id_type 必须与 container_id 格式匹配：chat_id 用 chat
+            params = {
+                "container_id_type": "chat",
+                "container_id": chat_id,
+                "page_size": min(count + 5, 50),  # 多拉几条用于过滤当前消息后还够 N 条
+            }
+
+            response = requests.get(url, headers=headers, params=params, timeout=10)
+            response.raise_for_status()
+            data = response.json()
+
+            if data.get("code") != 0:
+                logger.warning(f"拉取历史消息失败: code={data.get('code')}, msg={data.get('msg')}")
+                return []
+
+            items = data.get("data", {}).get("items", [])
+            # 过滤掉当前消息，避免重复
+            items = [m for m in items if m.get("message_id") != current_message_id]
+            # 飞书返回的是降序（最新在前），翻转成升序（最老在前）
+            items.reverse()
+            # 只取最近 count 条
+            return items[-count:] if len(items) > count else items
+
+        except Exception as e:
+            logger.error(f"拉取历史消息异常: {e}")
+            return []
 
     def download_image(self, message_id: str, image_key: str) -> Optional[Dict[str, str]]:
         """
@@ -589,7 +638,10 @@ class FeishuBotAdapter(IMAdapter):
 
     def get_last_message_as_message(self) -> Optional[Message]:
         """
-        获取最后的消息作为 Message 对象
+        获取最后的消息作为 Message 对象，支持回溯最近 N 条历史消息
+
+        当配置 lookback_count > 0 时，会向前回溯 N 条消息，收集其中的图片和文本
+        （支持"用户先发图、再发文字"场景）。历史消息的文本会标注"[历史消息]"前缀。
 
         Returns:
             Message 对象
@@ -598,23 +650,73 @@ class FeishuBotAdapter(IMAdapter):
             return None
 
         contents = []
+        chat_id = self.latest_message.get("chat_id")
+        current_message_id = self.latest_message.get("message_id")
 
-        # 图片放在文本之前：视觉模型先看到图，再读提问，效果更稳
-        image_keys = self.latest_message.get("image_keys") or []
-        message_id = self.latest_message.get("message_id")
-        for image_key in image_keys:
-            if not message_id:
+        # 回溯历史消息（拉取最近 N 条，不含当前消息）
+        history_images = 0
+        history_texts = []
+        if self.lookback_count > 0 and chat_id and current_message_id:
+            recent_messages = self._fetch_recent_messages(chat_id, current_message_id, self.lookback_count)
+            logger.info(f"回溯历史消息: 拉取 {len(recent_messages)} 条")
+
+            for msg in recent_messages:
+                msg_type = msg.get("message_type", "")
+                content_str = msg.get("content", "{}")
+                try:
+                    content_data = json.loads(content_str)
+                except Exception:
+                    continue
+
+                # 解析历史消息的文本和图片
+                hist_text, hist_image_keys = self._parse_message_content(msg_type, content_data)
+                hist_msg_id = msg.get("message_id")
+
+                # 收集历史图片
+                for image_key in hist_image_keys:
+                    if not hist_msg_id:
+                        continue
+                    image_data = self.download_image(hist_msg_id, image_key)
+                    if image_data:
+                        contents.append(Content(type="image", data=image_data))
+                        history_images += 1
+                    else:
+                        logger.warning(f"历史图片下载失败: message_id={hist_msg_id}, image_key={image_key}")
+
+                # 收集历史文本
+                if hist_text.strip():
+                    history_texts.append(hist_text.strip())
+
+        # 当前消息的图片（放在历史图片之后，当前文本之前）
+        current_image_keys = self.latest_message.get("image_keys") or []
+        current_images = 0
+        for image_key in current_image_keys:
+            if not current_message_id:
                 logger.warning("缺少 message_id，无法下载图片")
                 break
-            image_data = self.download_image(message_id, image_key)
+            image_data = self.download_image(current_message_id, image_key)
             if image_data:
                 contents.append(Content(type="image", data=image_data))
+                current_images += 1
             else:
                 logger.warning(f"图片下载失败，已跳过: image_key={image_key}")
 
-        text = self.latest_message.get("text", "")
-        if text.strip():
-            contents.append(Content(type="text", data=text))
+        # 构造文本部分：历史文本 + 当前文本
+        text_parts = []
+        if history_texts:
+            text_parts.append(
+                f"[最近 {len(history_texts)} 条历史消息，可能与当前问题相关或无关，请自行判断]:\n" +
+                "\n".join(f"- {t}" for t in history_texts)
+            )
+        current_text = self.latest_message.get("text", "").strip()
+        if current_text:
+            if history_texts:
+                text_parts.append(f"\n[当前消息]: {current_text}")
+            else:
+                text_parts.append(current_text)
+
+        if text_parts:
+            contents.append(Content(type="text", data="\n".join(text_parts)))
 
         if not contents:
             logger.warning("消息既无可用图片也无文本，跳过")
@@ -622,7 +724,8 @@ class FeishuBotAdapter(IMAdapter):
 
         logger.info(
             f"构造消息: {len(contents)} 个内容块 "
-            f"(图片 {sum(1 for c in contents if c.type == 'image')} 个)"
+            f"(历史图片 {history_images}, 当前图片 {current_images}, "
+            f"历史文本 {len(history_texts)} 条)"
         )
         return Message(
             role="user",
