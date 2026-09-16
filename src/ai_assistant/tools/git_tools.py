@@ -493,6 +493,13 @@ class GitTools:
         if not args or args[0] not in readonly_commands:
             return {"error": f"不允许的命令: {args[0] if args else '(空)'}，仅支持只读命令: {', '.join(sorted(readonly_commands))}"}
 
+        # 修正常见的参数冲突：-L 与 --follow 不兼容
+        # git log -L <start>,<end>:<file> 本身就会追踪行的历史，不需要 --follow
+        if args[0] == 'log' and any(arg.startswith('-L') for arg in args):
+            if '--follow' in args:
+                args = [a for a in args if a != '--follow']
+                logger.info("git log -L 与 --follow 冲突，已自动去除 --follow")
+
         try:
             output = self._run_git_command(args, timeout=60)
             logger.info(f"run_git_command: {' '.join(args)}, output_lines={len(output.splitlines())}")
