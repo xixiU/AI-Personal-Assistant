@@ -253,7 +253,9 @@ class AIProvider(ABC):
         provider_name = self.__class__.__name__
         model_name = getattr(self, 'model', 'unknown')
 
-        logger.info(f"调用 AI: provider={provider_name}, model={model_name}, messages={messages}")
+        # 消息摘要：不打印图片 base64 本体，只打类型+大小，避免日志被刷爆
+        _msg_summary = "; ".join(m.summary() for m in messages)
+        logger.info(f"调用 AI: provider={provider_name}, model={model_name}, messages=[{_msg_summary}]")
 
         # 输入侧提示词攻击防护：这是 feishu/wechat/web 三个来源的唯一公共入口。
         # 在调用大模型之前，用 AI 自主判断输入是否为"越狱/指令覆盖""窃取账号密码密钥"

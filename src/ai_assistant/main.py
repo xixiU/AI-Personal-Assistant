@@ -409,7 +409,15 @@ class AIAssistant:
             if not parsed:
                 logger.debug("Event parsing returned None, skipping")
                 return
-            logger.debug("parsed message:{}",parsed)
+            # 打印解析结果时，图片只打大小+类型，不打 base64 本体（避免日志刷屏）
+            _parsed_log = dict(parsed)
+            _img = _parsed_log.get("image_data")
+            if isinstance(_img, dict):
+                _b64 = _img.get("data", "")
+                _parsed_log["image_data"] = (
+                    f"<image {_img.get('media_type', '?')}, ~{int(len(_b64) * 3 / 4)}B>"
+                )
+            logger.debug("parsed message:{}", _parsed_log)
 
             session_id = parsed["chat_id"]
             text = parsed["text"]
@@ -434,20 +442,24 @@ class AIAssistant:
             # 保存原始 text 用于运维模式检测（需要保留 @ 提及来识别命令）
             original_text = text
 
-            # 新消息到达：清除该 session 的纯图片等待标记，让等待线程立即放行
-            image_already_in_context = False
+            # 新消息到达：取回该 session 暂存的"纯图片"（先图后文场景）。
+            # 图片与文字是两条独立飞书消息，各自 message_id 不同、不共享 context_key，
+            # 唯一稳定的桥是 session_id(群 chat_id)。这里把暂存图片本体取出，随本条消息
+            # 一起并入 content_parts（归到当前 context_key），从根上避免"写入键=session_id、
+            # 读取键=context_key"不一致导致的丢图（488fac5 统一读取键后引入的回归）。
+            pending_image = None
             with self._processing_lock:
-                if self._pending_lone_images.pop(session_id, None) is not None:
-                    # 之前那张纯图片已由等待逻辑放入上下文，本次不要重复添加
-                    image_already_in_context = True
+                popped = self._pending_lone_images.pop(session_id, None)
+            if popped is not None:
+                pending_image = popped.get("image")
 
             # 纯图片无文字：用户很可能正在分两条发（先图后文），
             # 立即调 AI 只能反问。这里短暂等待后续文字消息合并处理。
             if image_data and not text and self._lone_image_wait > 0:
                 if self._defer_lone_image(session_id, image_data, message_id):
+                    # 等待期内收到后续消息，图片已被该消息取走一并处理
                     return
-                # 等待期内没有后续文字，图片已入上下文，避免下方重复添加
-                image_already_in_context = True
+                # 等待超时仍无文字：按纯图片正常处理（image_data 仍在手，下方会加入）
 
             # 防重复：同一 session 已有请求在处理中，将消息加入上下文
             # 注意：不能无条件丢弃，否则用户"先发图、AI 处理中再发文字"时，
@@ -456,7 +468,10 @@ class AIAssistant:
                 if session_id in self._processing_sessions:
                     # 构建消息内容
                     content_parts = []
-                    if image_data and not image_already_in_context:
+                    # 先图后文场景：先并入暂存的纯图片，再并入当前消息自带的图/文
+                    if pending_image is not None:
+                        content_parts.append(Content(type="image", data=pending_image))
+                    if image_data:
                         content_parts.append(Content(type="image", data=image_data))
                     if text:
                         content_parts.append(Content(type="text", data=text))
@@ -503,9 +518,12 @@ class AIAssistant:
                         logger.warning(f"添加思考表情失败（不影响主流程）: {e}")
 
             # 构建用户消息（支持图文）
-            # image_already_in_context: 图片已由纯图片等待逻辑入过上下文，不重复添加
+            # 先图后文场景：pending_image 是上一条纯图片消息暂存的图片，随本条一并注入，
+            # 与当前消息归到同一个 context_key，杜绝写入键/读取键不一致导致的丢图。
             content_parts = []
-            if image_data and not image_already_in_context:
+            if pending_image is not None:
+                content_parts.append(Content(type="image", data=pending_image))
+            if image_data:
                 content_parts.append(Content(type="image", data=image_data))
 
             # 在构建消息前，先用原始 text 检测运维模式，然后再清理 @ 提及
@@ -548,6 +566,12 @@ class AIAssistant:
             else:
                 context_messages = self.context_manager.get_context(context_key)
             logger.info(f"Sending {len(context_messages)} messages to AI (context_key={context_key})")
+
+            # 图片链路诊断日志：逐条打印将送入 AI 的消息 content 组成，快速定位图片在哪一步丢失。
+            # 关键排查项：本轮若发了图，这里必须出现 image(...) 块；若只剩 text，则图在
+            # 消息构建/上下文读取阶段已丢，而非 provider 转换阶段。摘要不含 base64 本体。
+            for _i, _m in enumerate(context_messages):
+                logger.info(f"  [→AI] msg#{_i} {_m.summary()}")
 
             # 引用链排查字段：随历史落盘，便于核对飞书 root_id 行为
             chain_info = {
@@ -855,14 +879,19 @@ class AIAssistant:
 
         用户经常分两条发送："先发日志截图 → 再发问题描述"。
         如果收到图片就立即调用 AI，AI 手里没有任何问题描述，只能反问，
-        既慢又答不到点上。这里先把图片存入上下文，等待一个短窗口：
-        - 窗口内收到了文字消息 → 由那条文字消息触发 AI（图片已在上下文里，
-          _should_use_agentic_mode 会因历史图片进入排查模式）
-        - 窗口内没有文字 → 返回 False，按纯图片正常处理（AI 会主动询问）
+        既慢又答不到点上。这里把图片本体暂存到 _pending_lone_images，等待一个短窗口：
+        - 窗口内收到了文字消息 → 主流程 pop 出暂存图片，随那条文字消息一并注入
+          content_parts（归到当前 context_key，_should_use_agentic_mode 因图片进入排查模式）
+        - 窗口内没有文字 → 返回 False，调用方用手里的 image_data 按纯图片正常处理
+
+        注意（防回归）：不要在这里把图片写进 context_manager。图片与文字是两条独立
+        飞书消息、context_key 不同，若在此用 session_id 写上下文，会与主流程用 context_key
+        读取上下文不一致，导致图片读不到（历史回归 bug）。暂存 image 本体、由文字消息
+        取走并入是唯一稳定路径。
 
         Args:
-            session_id: 会话 ID
-            image_data: 已下载的图片数据
+            session_id: 会话 ID（群 chat_id，纯图片与后续文字唯一稳定的共享桥）
+            image_data: 已下载的图片数据（dict: {"data": base64, "media_type": ...}）
             message_id: 飞书消息 ID
 
         Returns:
@@ -871,39 +900,32 @@ class AIAssistant:
         """
         import time as time_mod
 
-        # 图片先入上下文，这样后续文字消息触发 AI 时能看到它
-        self.context_manager.add_message(
-            session_id,
-            Message(
-                role="user",
-                content=[Content(type="image", data=image_data)],
-                timestamp=datetime.now()
-            )
-        )
-
         arrive_ts = time_mod.time()
+        # 暂存图片本体（不写上下文）：值为 dict，含图片与到达时间戳。
+        # 等待循环靠比对 ts 判断是否被后续消息接管。
         with self._processing_lock:
-            self._pending_lone_images[session_id] = arrive_ts
+            self._pending_lone_images[session_id] = {"image": image_data, "ts": arrive_ts}
 
         logger.info(
-            f"收到纯图片消息，图片已入上下文，等待 {self._lone_image_wait}s 看是否有后续文字描述: "
+            f"收到纯图片消息，图片已暂存，等待 {self._lone_image_wait}s 看是否有后续文字描述: "
             f"session={session_id}"
         )
 
-        # 轮询等待：一旦有新消息进入该 session，标记会被覆盖或清除
+        # 轮询等待：一旦有新消息进入该 session，标记会被 pop 走或被新图片覆盖
         deadline = arrive_ts + self._lone_image_wait
         while time_mod.time() < deadline:
             time_mod.sleep(0.3)
             with self._processing_lock:
                 current = self._pending_lone_images.get(session_id)
-            # 标记被后续消息清除/更新，说明已有新消息接管
-            if current != arrive_ts:
+            # 标记被后续消息取走(None)或被新图片更新(ts 变化)，说明已有新消息接管
+            if current is None or current.get("ts") != arrive_ts:
                 logger.info(f"等待期内收到后续消息，纯图片交由后续消息一并处理: session={session_id}")
                 return True
 
-        # 超时：清除标记，按纯图片继续处理
+        # 超时：清除标记，按纯图片继续处理（image_data 仍在调用方手中）
         with self._processing_lock:
-            if self._pending_lone_images.get(session_id) == arrive_ts:
+            current = self._pending_lone_images.get(session_id)
+            if current is not None and current.get("ts") == arrive_ts:
                 del self._pending_lone_images[session_id]
         logger.info(f"等待超时，未收到文字描述，按纯图片处理（AI 将主动询问）: session={session_id}")
         return False

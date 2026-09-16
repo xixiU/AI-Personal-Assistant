@@ -9,6 +9,25 @@ class Content:
     type: str  # "text" | "image" | "video"
     data: Union[str, bytes]
 
+    def summary(self) -> str:
+        """
+        日志用摘要：不输出图片 base64 本体（动辄几十~上百 KB，会刷爆日志），
+        图片只打类型+大小，文本只打长度。
+        """
+        if self.type == "image" and isinstance(self.data, dict):
+            b64 = self.data.get("data", "")
+            media = self.data.get("media_type", "?")
+            # base64 长度 * 3/4 约等于原始字节数
+            approx = int(len(b64) * 3 / 4)
+            path = self.data.get("path") or self.data.get("file_path")
+            path_part = f", path={path}" if path else ""
+            return f"image({media}, ~{approx}B{path_part})"
+        if self.type == "image":
+            return f"image(BAD:{type(self.data).__name__})"
+        if isinstance(self.data, str):
+            return f"text(len={len(self.data)})"
+        return f"{self.type}({type(self.data).__name__})"
+
 
 @dataclass
 class Message:
@@ -17,6 +36,10 @@ class Message:
     content: List[Content]
     timestamp: datetime
     metadata: dict = field(default_factory=dict)  # 存储模式信息等元数据（如 mode: "agentic"）
+
+    def summary(self) -> str:
+        """日志用摘要：role + 各 content 的脱敏摘要（不含图片 base64）。"""
+        return f"{self.role}[{', '.join(c.summary() for c in self.content)}]"
 
 
 @dataclass
