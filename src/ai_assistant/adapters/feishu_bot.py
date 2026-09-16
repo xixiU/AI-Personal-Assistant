@@ -116,6 +116,56 @@ class FeishuBotAdapter(IMAdapter):
             logger.error(f"添加表情回复失败: {e}")
             return False
 
+    @staticmethod
+    def _parse_message_content(message_type: str, content_data: dict) -> tuple:
+        """
+        按飞书消息类型解析出文本和图片 key 列表
+
+        飞书各类型 content 结构：
+        - text:  {"text": "..."}
+        - image: {"image_key": "img_v2_xxx"}
+        - post:  {"content": [[{"tag": "text", "text": "..."},
+                               {"tag": "img", "image_key": "img_v2_xxx"}], ...]}
+
+        Args:
+            message_type: 消息类型 text / image / post
+            content_data: 已 json.loads 的 content 字典
+
+        Returns:
+            (text, image_keys) 元组
+        """
+        text = ""
+        image_keys = []
+
+        if message_type == "text":
+            text = content_data.get("text", "")
+
+        elif message_type == "image":
+            key = content_data.get("image_key")
+            if key:
+                image_keys.append(key)
+
+        elif message_type == "post":
+            # post 是二维数组：段落列表，每段是元素列表
+            text_parts = []
+            for paragraph in content_data.get("content", []) or []:
+                if not isinstance(paragraph, list):
+                    continue
+                for element in paragraph:
+                    if not isinstance(element, dict):
+                        continue
+                    tag = element.get("tag")
+                    if tag in ("text", "a", "at"):
+                        text_parts.append(element.get("text", ""))
+                    elif tag == "img":
+                        key = element.get("image_key")
+                        if key:
+                            image_keys.append(key)
+                text_parts.append("\n")
+            text = "".join(text_parts).strip()
+
+        return text, image_keys
+
     def download_image(self, message_id: str, image_key: str) -> Optional[Dict[str, str]]:
         """
         下载飞书消息中的图片
@@ -137,8 +187,26 @@ class FeishuBotAdapter(IMAdapter):
             response = requests.get(url, headers=headers, params=params, timeout=30)
             response.raise_for_status()
 
-            # 获取图片类型
+            # 获取图片类型：去掉 "; charset=xxx" 后缀，Anthropic 只接受纯 MIME
             content_type = response.headers.get("Content-Type", "image/png")
+            content_type = content_type.split(";")[0].strip().lower()
+
+            # 非标准/缺失类型时按魔术字节兜底，避免 media_type 不合法被 API 拒绝
+            SUPPORTED = {"image/png", "image/jpeg", "image/gif", "image/webp"}
+            if content_type not in SUPPORTED:
+                raw = response.content
+                if raw.startswith(b"\xff\xd8\xff"):
+                    detected = "image/jpeg"
+                elif raw.startswith(b"\x89PNG\r\n\x1a\n"):
+                    detected = "image/png"
+                elif raw.startswith(b"GIF8"):
+                    detected = "image/gif"
+                elif raw[:4] == b"RIFF" and raw[8:12] == b"WEBP":
+                    detected = "image/webp"
+                else:
+                    detected = "image/png"
+                logger.warning(f"图片 Content-Type 不受支持({content_type})，按魔术字节判定为 {detected}")
+                content_type = detected
 
             # base64 编码
             image_data = base64.b64encode(response.content).decode("utf-8")
@@ -341,24 +409,34 @@ class FeishuBotAdapter(IMAdapter):
 
                 logger.info(f"📩 v1.0 Message: chat_id={chat_id}, msg_type={msg_type}, sender={sender_id}")
 
+                # v1.0 图片消息：image_key 在事件顶层
+                v1_image_key = event.get("image_key", "")
+
                 if msg_type == "text" and text:
-                    # 转换为 v2.0 兼容格式，返回给主流程处理
-                    return {
-                        "header": {"event_id": event_data.get("uuid", "unknown")},
-                        "event": {
-                            "message": {
-                                "message_id": message_id,
-                                "chat_id": chat_id,
-                                "chat_type": event.get("chat_type", ""),
-                                "message_type": "text",
-                                "content": json.dumps({"text": text})
-                            },
-                            "sender": {
-                                "sender_id": {"open_id": sender_id}
-                            }
+                    normalized_type = "text"
+                    normalized_content = json.dumps({"text": text})
+                elif msg_type == "image" and v1_image_key:
+                    normalized_type = "image"
+                    normalized_content = json.dumps({"image_key": v1_image_key})
+                else:
+                    return None
+
+                # 转换为 v2.0 兼容格式，返回给主流程处理
+                return {
+                    "header": {"event_id": event_data.get("uuid", "unknown")},
+                    "event": {
+                        "message": {
+                            "message_id": message_id,
+                            "chat_id": chat_id,
+                            "chat_type": event.get("chat_type", ""),
+                            "message_type": normalized_type,
+                            "content": normalized_content
+                        },
+                        "sender": {
+                            "sender_id": {"open_id": sender_id}
                         }
                     }
-                return None
+                }
 
             # v2.0 事件格式
             header = event_data.get("header", {})
@@ -459,21 +537,35 @@ class FeishuBotAdapter(IMAdapter):
             content_str = message.get("content", "{}")
             content_data = json.loads(content_str)
 
-            # 仅处理文本消息
-            if message.get("message_type") != "text":
-                logger.info(f"⏭️  Skipping non-text message type: {message.get('message_type')}")
+            # 支持的消息类型：text（纯文本）、image（图片，如日志截图）、post（图文混排富文本）
+            message_type = message.get("message_type", "")
+            if message_type not in ("text", "image", "post"):
+                logger.info(f"⏭️  Skipping unsupported message type: {message_type}")
                 self.latest_event = None
                 return False
 
-            text = content_data.get("text", "")
+            # 按消息类型解析文本与图片 key
+            text, image_keys = self._parse_message_content(message_type, content_data)
 
-            # 飞书机器人模式：所有文本消息都触发（不检查关键词）
-            logger.info(f"🎯 Message received in {chat_type} chat, triggering AI response")
+            # 图片消息通常没有文字说明，给一句默认提问，避免只发图时 text 为空
+            if image_keys and not text.strip():
+                text = "请分析这张截图中的问题。"
+
+            if not text.strip() and not image_keys:
+                logger.info(f"⏭️  Skipping empty message (type={message_type})")
+                self.latest_event = None
+                return False
+
+            logger.info(
+                f"🎯 Message received in {chat_type} chat "
+                f"(type={message_type}, images={len(image_keys)}), triggering AI response"
+            )
             self.latest_message = {
                 "message_id": message.get("message_id"),
                 "chat_id": chat_id,
                 "chat_type": chat_type,
                 "text": text,
+                "image_keys": image_keys,
                 "sender_id": sender_id,
                 "sender_name": event["sender"].get("sender_id", {}).get("open_id", "")
             }
@@ -505,10 +597,36 @@ class FeishuBotAdapter(IMAdapter):
         if not self.latest_message:
             return None
 
-        content = Content(type="text", data=self.latest_message["text"])
+        contents = []
+
+        # 图片放在文本之前：视觉模型先看到图，再读提问，效果更稳
+        image_keys = self.latest_message.get("image_keys") or []
+        message_id = self.latest_message.get("message_id")
+        for image_key in image_keys:
+            if not message_id:
+                logger.warning("缺少 message_id，无法下载图片")
+                break
+            image_data = self.download_image(message_id, image_key)
+            if image_data:
+                contents.append(Content(type="image", data=image_data))
+            else:
+                logger.warning(f"图片下载失败，已跳过: image_key={image_key}")
+
+        text = self.latest_message.get("text", "")
+        if text.strip():
+            contents.append(Content(type="text", data=text))
+
+        if not contents:
+            logger.warning("消息既无可用图片也无文本，跳过")
+            return None
+
+        logger.info(
+            f"构造消息: {len(contents)} 个内容块 "
+            f"(图片 {sum(1 for c in contents if c.type == 'image')} 个)"
+        )
         return Message(
             role="user",
-            content=[content],
+            content=contents,
             timestamp=datetime.now()
         )
 
