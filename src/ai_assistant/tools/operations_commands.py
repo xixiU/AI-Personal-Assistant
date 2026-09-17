@@ -349,6 +349,14 @@ class GetAppStatusCommand(OperationCommand):
 class GetAppVersionCommand(OperationCommand):
     """查询应用版本"""
 
+    # 企业规范：Java 应用的版本/分支/commit 统一放在 jar 内 BOOT-INF/classes/git.info，
+    # 由构建流水线写入。MANIFEST.MF 只有 Implementation-Version 之类的粗粒度信息，
+    # 拿不到分支和 commit，因此未显式指定文件时优先读 git.info，读不到再退回 MANIFEST.MF。
+    DEFAULT_JAR_FILE_CANDIDATES = (
+        "BOOT-INF/classes/git.info",
+        "META-INF/MANIFEST.MF",
+    )
+
     @property
     def name(self) -> str:
         return "get_app_version"
@@ -379,7 +387,8 @@ class GetAppVersionCommand(OperationCommand):
             machine: 目标机器
             source: 版本来源（jar/log/file/api）
             jar_path: JAR 包路径（source=jar 时需要）
-            jar_file_path: JAR 包内的文件路径（source=jar 时可选，默认 META-INF/MANIFEST.MF）
+            jar_file_path: JAR 包内的文件路径（source=jar 时可选）。不传时按企业规范
+                依次尝试 BOOT-INF/classes/git.info → META-INF/MANIFEST.MF
             log_path: 日志文件路径（source=log 时需要）
             version_file: 版本文件路径（source=file 时需要）
             api_url: API 地址（source=api 时需要）
@@ -389,8 +398,21 @@ class GetAppVersionCommand(OperationCommand):
         """
         try:
             if source == "jar" and jar_path:
-                file_path = jar_file_path or "META-INF/MANIFEST.MF"
-                return self._get_version_from_jar(machine, jar_path, file_path)
+                if jar_file_path:
+                    # 调用方（配置的 version_detection 或 AI）显式指定了文件，尊重原意，不做候选回退
+                    return self._get_version_from_jar(machine, jar_path, jar_file_path)
+                # 未指定时按企业规范依次尝试 git.info → MANIFEST.MF
+                last_result = None
+                for candidate in self.DEFAULT_JAR_FILE_CANDIDATES:
+                    last_result = self._get_version_from_jar(machine, jar_path, candidate)
+                    if last_result.success:
+                        logger.info(f"版本信息读取成功: jar={jar_path}, 文件={candidate}")
+                        return last_result
+                    logger.debug(f"jar 内 {candidate} 不存在或为空，尝试下一个候选")
+                return last_result or CommandResult(
+                    success=False,
+                    error=f"Failed to read version info from JAR: {jar_path}"
+                )
             elif source == "log" and log_path:
                 return self._get_version_from_log(machine, log_path)
             elif source == "file" and version_file:
@@ -414,7 +436,7 @@ class GetAppVersionCommand(OperationCommand):
         self,
         machine: Machine,
         jar_path: str,
-        file_path: str = "META-INF/MANIFEST.MF"
+        file_path: str = "BOOT-INF/classes/git.info"
     ) -> CommandResult:
         """
         从 JAR 包获取版本信息
@@ -422,7 +444,7 @@ class GetAppVersionCommand(OperationCommand):
         Args:
             machine: 目标机器
             jar_path: JAR 包路径
-            file_path: JAR 包内的文件路径（默认 META-INF/MANIFEST.MF）
+            file_path: JAR 包内的文件路径（默认 BOOT-INF/classes/git.info，企业规范位置）
         """
         # 用 unzip -p 提取 jar 内文件。注意：SSH 登录会执行 .bashrc，可能打印
         # "PROMPT_COMMAND：只读变量" 之类的 stderr 噪音并污染退出码，所以：

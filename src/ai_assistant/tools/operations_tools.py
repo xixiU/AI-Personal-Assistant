@@ -116,7 +116,8 @@ class OperationsTools:
                 - "file": 从指定的版本文件读取
                 - "api": 从 API 接口获取
             jar_path: JAR 包路径（source="jar" 时需要）
-            jar_file_path: JAR 包内的文件路径（source="jar" 时可选，默认 META-INF/MANIFEST.MF）
+            jar_file_path: JAR 包内的文件路径（source="jar" 时可选）。不传时按企业规范
+                依次尝试 BOOT-INF/classes/git.info → META-INF/MANIFEST.MF
             log_path: 日志文件路径（source="log" 时需要）
             version_file: 版本文件路径（source="file" 时需要）
             api_url: API 地址（source="api" 时需要）
@@ -204,7 +205,9 @@ class OperationsTools:
 
                 if detection_type == 'jar_manifest':
                     jar_path = config.get('jar_path')
-                    file_path = config.get('file_path', 'META-INF/MANIFEST.MF')
+                    # file_path 缺省时不再硬写 MANIFEST.MF：交给 command 按企业规范
+                    # 依次尝试 git.info → MANIFEST.MF，避免拿到没有分支/commit 的结果
+                    file_path = config.get('file_path')
                     if jar_path:
                         result = command.execute(
                             machine,

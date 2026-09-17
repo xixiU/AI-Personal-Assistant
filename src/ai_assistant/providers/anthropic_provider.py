@@ -1070,6 +1070,9 @@ class AnthropicProvider(AIProvider):
             "可用工具（所有工具都需要 machine_name 参数指定目标机器）：",
             "- get_app_status(machine_name, app_name) - 查看应用运行状态",
             "- get_app_version(machine_name, source, jar_path/log_path/version_file/api_url) - 查看应用版本/分支",
+            "  · Java 应用查版本/分支/commit 一律用 source='jar' 调这个工具，不要自己拼 MANIFEST 路径；"
+            "工具会按企业规范读取 jar 内 BOOT-INF/classes/git.info（构建流水线写入，含分支和 commit），"
+            "读不到才回退 MANIFEST.MF。除用户明确指定外，不要传 jar_file_path。",
             "- get_jar_info(machine_name, jar_path) - 分析 Java 应用 jar 包（获取 MANIFEST、Maven 信息、Git 版本）",
             "- get_process_info(machine_name, pid/app_name) - 查看进程详情（CPU、内存、端口、线程数）",
             "- get_port_info(machine_name, port) - 按端口号查询监听进程（PID、命令行、工作目录），判断端口是否有服务在运行时必须用它",
@@ -1382,10 +1385,11 @@ class AnthropicProvider(AIProvider):
                         "data": None
                     }
 
-                # 特殊处理 get_app_version: Claude 通常从进程 cmdline 发现绝对 jar_path，
-                # 但默认只读 MANIFEST.MF（无 git 分支信息）。这里按 path 前缀匹配到配置的应用，
-                # 把配置里 version_detection 指定的 jar 内文件（如 BOOT-INF/classes/git.info）
-                # 注入为 jar_file_path，从而读到 git 分支/commit 信息。保留 Claude 的绝对 jar_path。
+                # 特殊处理 get_app_version: Claude 通常从进程 cmdline 发现绝对 jar_path。
+                # 这里按 path 前缀匹配到配置的应用，把配置里 version_detection 指定的 jar 内
+                # 文件注入为 jar_file_path，保留 Claude 的绝对 jar_path。
+                # 匹配不到配置也不要紧：工具层默认按企业规范先读 BOOT-INF/classes/git.info，
+                # 再回退 MANIFEST.MF，因此这里只补 source，不再硬塞文件路径。
                 if (tool_name == 'get_app_version'
                         and tool_input.get('jar_path')
                         and not tool_input.get('jar_file_path')
@@ -1412,16 +1416,21 @@ class AnthropicProvider(AIProvider):
                                 jar_file_path = cfg['file_path']
                                 break
                         if jar_file_path:
-                            tool_input['source'] = 'jar'
                             tool_input['jar_file_path'] = jar_file_path
                             logger.info(
                                 f"✅ get_app_version 自动注入 jar_file_path={jar_file_path} "
                                 f"(应用: {best_app.name})"
                             )
                         else:
-                            logger.debug(f"应用 {best_app.name} 无 jar_manifest.file_path 配置，读取默认 MANIFEST.MF")
+                            logger.debug(
+                                f"应用 {best_app.name} 无 jar_manifest.file_path 配置，"
+                                f"按企业规范默认尝试 BOOT-INF/classes/git.info"
+                            )
                     else:
                         logger.debug(f"get_app_version 未匹配到应用配置: jar_path={jar_path}, 候选应用={len(apps)} 个")
+
+                    # Claude 偶尔漏传 source 导致工具直接报参数缺失，这里按 jar_path 补齐
+                    tool_input['source'] = 'jar'
 
 
                 # 如果方法需要 chat_id 参数，传入

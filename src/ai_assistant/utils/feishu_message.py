@@ -298,6 +298,12 @@ class FeishuMessageBuilder:
             note_parts.append(f"🔍 代码排查模式")
             if tool_rounds is not None and tool_rounds > 0:
                 note_parts.append(f"🔧 工具调用: {tool_rounds}轮")
+        elif mode == "operations":
+            # 必须单列：早期只判断 agentic，运维回复落进 else 被标成"知识库模式"，
+            # 与实际执行的模式不符，用户无法从卡片确认是否真进了运维模式。
+            note_parts.append(f"🛠️ 运维模式")
+            if tool_rounds is not None and tool_rounds > 0:
+                note_parts.append(f"🔧 工具调用: {tool_rounds}轮")
         else:
             # 统一为知识库模式（包括 rag 和 standard）
             note_parts.append(f"📚 知识库模式")
