@@ -63,6 +63,9 @@ class FeishuBotAdapter(IMAdapter):
         # 历史消息回溯配置（支持"先发图、后发文字"场景）
         self.lookback_count = config.get("lookback_count", 5)
 
+        # 日志文件管理器（由 main.py 注入；None 表示不处理文件附件）
+        self.log_file_manager = config.get("log_file_manager")
+
     def cache_message_record(self, message_id: str, record_id: str):
         """
         缓存飞书消息 ID 到 record_id 的映射
@@ -122,23 +125,26 @@ class FeishuBotAdapter(IMAdapter):
     @staticmethod
     def _parse_message_content(message_type: str, content_data: dict) -> tuple:
         """
-        按飞书消息类型解析出文本和图片 key 列表
+        按飞书消息类型解析出文本、图片 key 列表和文件附件列表
 
         飞书各类型 content 结构：
         - text:  {"text": "..."}
         - image: {"image_key": "img_v2_xxx"}
+        - file:  {"file_key": "file_v3_xxx", "file_name": "app.log"}
         - post:  {"content": [[{"tag": "text", "text": "..."},
-                               {"tag": "img", "image_key": "img_v2_xxx"}], ...]}
+                               {"tag": "img", "image_key": "img_v2_xxx"},
+                               {"tag": "media"/"file", "file_key": "...", "file_name": "..."}], ...]}
 
         Args:
-            message_type: 消息类型 text / image / post
+            message_type: 消息类型 text / image / file / post
             content_data: 已 json.loads 的 content 字典
 
         Returns:
-            (text, image_keys) 元组
+            (text, image_keys, files) 三元组；files 为 [{"file_key","file_name"}]
         """
         text = ""
         image_keys = []
+        files = []
 
         if message_type == "text":
             text = content_data.get("text", "")
@@ -147,6 +153,14 @@ class FeishuBotAdapter(IMAdapter):
             key = content_data.get("image_key")
             if key:
                 image_keys.append(key)
+
+        elif message_type == "file":
+            key = content_data.get("file_key")
+            if key:
+                files.append({
+                    "file_key": key,
+                    "file_name": content_data.get("file_name") or "attachment",
+                })
 
         elif message_type == "post":
             # post 是二维数组：段落列表，每段是元素列表
@@ -164,10 +178,111 @@ class FeishuBotAdapter(IMAdapter):
                         key = element.get("image_key")
                         if key:
                             image_keys.append(key)
+                    elif tag in ("media", "file"):
+                        key = element.get("file_key")
+                        if key:
+                            files.append({
+                                "file_key": key,
+                                "file_name": element.get("file_name") or "attachment",
+                            })
                 text_parts.append("\n")
             text = "".join(text_parts).strip()
 
-        return text, image_keys
+        return text, image_keys, files
+
+    def download_file(self, message_id: str, file_key: str) -> Optional[bytes]:
+        """
+        下载飞书消息中的文件附件
+
+        与 download_image 的差别：resources 接口的 type 参数为 file，
+        且返回的是原始字节（不做 base64，日志文件按文本处理）。
+
+        Args:
+            message_id: 消息 ID
+            file_key: 文件 key
+
+        Returns:
+            文件字节；失败返回 None
+        """
+        try:
+            token = self.get_tenant_access_token()
+            url = f"{self.base_url}/open-apis/im/v1/messages/{message_id}/resources/{file_key}"
+            headers = {"Authorization": f"Bearer {token}"}
+            params = {"type": "file"}
+
+            logger.debug(f"下载飞书文件: message_id={message_id}, file_key={file_key}")
+            response = requests.get(url, headers=headers, params=params, timeout=60)
+            response.raise_for_status()
+            logger.info(f"文件下载成功: size={len(response.content)} bytes")
+            return response.content
+        except Exception as e:
+            logger.error(f"下载飞书文件失败: {e}")
+            return None
+
+    def _collect_log_files(self, message_id: str, files: List[Dict[str, str]], chat_id: str) -> List[Content]:
+        """
+        下载并落地文件附件，产出 log_file 类型的 Content 块。
+
+        小文本日志把正文一并带上（AI 可直接分析）；zip 解压后只给路径与文件清单，
+        由 AI 用代码排查工具按需读取，避免把整包日志塞进上下文。
+
+        Args:
+            message_id: 消息 ID（下载资源需要）
+            files: [{"file_key","file_name"}] 列表
+            chat_id: 会话 ID（用于分目录存放）
+
+        Returns:
+            log_file 类型的 Content 列表
+        """
+        manager = self.log_file_manager
+        if not manager or not getattr(manager, "enabled", False) or not files:
+            return []
+
+        contents: List[Content] = []
+        for item in files:
+            file_name = item.get("file_name") or "attachment"
+            if not manager.is_allowed(file_name):
+                logger.info(f"跳过非日志类附件: {file_name}")
+                continue
+
+            data = self.download_file(message_id, item.get("file_key", ""))
+            if not data:
+                continue
+
+            path = manager.save_bytes(chat_id, file_name, data)
+            if not path:
+                # 落地失败或超过大小上限：告知 AI 这一情况，不静默丢弃
+                contents.append(Content(type="log_file", data={
+                    "name": file_name,
+                    "path": "",
+                    "text": "",
+                    "note": "文件超过大小上限或保存失败，未能读取内容",
+                }))
+                continue
+
+            if path.lower().endswith(".zip"):
+                out_dir, extracted = manager.extract_zip(path)
+                listing = "\n".join(f"- {p}" for p in extracted[:50])
+                contents.append(Content(type="log_file", data={
+                    "name": file_name,
+                    "path": out_dir or path,
+                    "text": "",
+                    "note": (
+                        f"这是一个日志压缩包，已解压到本地目录 {out_dir or path}。"
+                        f"其中文本日志 {len(extracted)} 个：\n{listing}"
+                        if extracted else
+                        f"这是一个压缩包，已解压到 {out_dir or path}，未发现文本日志文件。"
+                    ),
+                }))
+            else:
+                contents.append(Content(type="log_file", data={
+                    "name": file_name,
+                    "path": path,
+                    "text": manager.read_text_head(path),
+                    "note": "",
+                }))
+
+        return contents
 
     def _fetch_recent_messages(self, chat_id: str, current_message_id: str, count: int) -> List[Dict[str, Any]]:
         """
@@ -588,26 +703,29 @@ class FeishuBotAdapter(IMAdapter):
 
             # 支持的消息类型：text（纯文本）、image（图片，如日志截图）、post（图文混排富文本）
             message_type = message.get("message_type", "")
-            if message_type not in ("text", "image", "post"):
+            if message_type not in ("text", "image", "post", "file"):
                 logger.info(f"⏭️  Skipping unsupported message type: {message_type}")
                 self.latest_event = None
                 return False
 
-            # 按消息类型解析文本与图片 key
-            text, image_keys = self._parse_message_content(message_type, content_data)
+            # 按消息类型解析文本、图片 key 与文件附件
+            text, image_keys, files = self._parse_message_content(message_type, content_data)
 
-            # 图片消息通常没有文字说明，给一句默认提问，避免只发图时 text 为空
+            # 图片/文件消息通常没有文字说明，给一句默认提问，避免 text 为空
             if image_keys and not text.strip():
                 text = "请分析这张截图中的问题。"
+            elif files and not text.strip():
+                text = "请分析这个日志文件中的问题。"
 
-            if not text.strip() and not image_keys:
+            if not text.strip() and not image_keys and not files:
                 logger.info(f"⏭️  Skipping empty message (type={message_type})")
                 self.latest_event = None
                 return False
 
             logger.info(
                 f"🎯 Message received in {chat_type} chat "
-                f"(type={message_type}, images={len(image_keys)}), triggering AI response"
+                f"(type={message_type}, images={len(image_keys)}, files={len(files)}), "
+                f"triggering AI response"
             )
             self.latest_message = {
                 "message_id": message.get("message_id"),
@@ -615,6 +733,7 @@ class FeishuBotAdapter(IMAdapter):
                 "chat_type": chat_type,
                 "text": text,
                 "image_keys": image_keys,
+                "files": files,
                 "sender_id": sender_id,
                 "sender_name": event["sender"].get("sender_id", {}).get("open_id", "")
             }
@@ -668,17 +787,22 @@ class FeishuBotAdapter(IMAdapter):
                 except Exception:
                     continue
 
-                # 解析历史消息的文本和图片
-                hist_text, hist_image_keys = self._parse_message_content(msg_type, content_data)
+                # 解析历史消息的文本和图片（回溯不下载历史文件附件，只取图片与文本：
+                # 历史文件与当前提问的相关性弱，下载大文件代价高且易误导）
+                hist_text, hist_image_keys, _hist_files = self._parse_message_content(msg_type, content_data)
                 hist_msg_id = msg.get("message_id")
 
-                # 收集历史图片
+                # 收集历史图片。打 from_history 标记：回溯图片与当前消息图片会合并进
+                # 同一个 Message，若不区分，模式判定无法分辨"用户这次发的图"和
+                # "群里别人早前发的无关截图"，后者不应触发代码排查模式。
                 for image_key in hist_image_keys:
                     if not hist_msg_id:
                         continue
                     image_data = self.download_image(hist_msg_id, image_key)
                     if image_data:
-                        contents.append(Content(type="image", data=image_data))
+                        marked = dict(image_data)
+                        marked["from_history"] = True
+                        contents.append(Content(type="image", data=marked))
                         history_images += 1
                     else:
                         logger.warning(f"历史图片下载失败: message_id={hist_msg_id}, image_key={image_key}")
@@ -701,6 +825,13 @@ class FeishuBotAdapter(IMAdapter):
             else:
                 logger.warning(f"图片下载失败，已跳过: image_key={image_key}")
 
+        # 当前消息的日志文件附件（下载 + 落地，产出 log_file 内容块）
+        current_files = self.latest_message.get("files") or []
+        log_contents: List[Content] = []
+        if current_files and current_message_id and chat_id:
+            log_contents = self._collect_log_files(current_message_id, current_files, chat_id)
+            contents.extend(log_contents)
+
         # 构造文本部分：历史文本 + 当前文本
         text_parts = []
         if history_texts:
@@ -719,13 +850,13 @@ class FeishuBotAdapter(IMAdapter):
             contents.append(Content(type="text", data="\n".join(text_parts)))
 
         if not contents:
-            logger.warning("消息既无可用图片也无文本，跳过")
+            logger.warning("消息既无可用图片、文件也无文本，跳过")
             return None
 
         logger.info(
             f"构造消息: {len(contents)} 个内容块 "
             f"(历史图片 {history_images}, 当前图片 {current_images}, "
-            f"历史文本 {len(history_texts)} 条)"
+            f"日志文件 {len(log_contents)}, 历史文本 {len(history_texts)} 条)"
         )
         return Message(
             role="user",

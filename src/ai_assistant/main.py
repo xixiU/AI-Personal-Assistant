@@ -290,6 +290,21 @@ class AIAssistant:
         self.pending_retry_queue = []
         self._last_indexing_check_time = 0  # 上次检查索引状态的时间
 
+        # 日志文件管理器：用户上传 .log/.txt/zip 时落地到本地并注入 AI 上下文，
+        # 带日志文件的消息自动进入代码排查模式。需在 _init_adapters 之前建好，
+        # 适配器构造时要拿到它。
+        from ai_assistant.utils.log_files import LogFileManager
+        self.log_file_manager = LogFileManager(
+            enabled=getattr(self.config, "log_files_enabled", True),
+            base_dir=getattr(self.config, "log_files_dir", "./data/log_files"),
+            max_size_mb=getattr(self.config, "log_files_max_size_mb", 20),
+            inline_chars=getattr(self.config, "log_files_inline_chars", 20000),
+            cleanup_hour=getattr(self.config, "log_files_cleanup_hour", 23),
+            retention_hours=getattr(self.config, "log_files_retention_hours", 24),
+            allowed_ext=getattr(self.config, "log_files_allowed_ext", None),
+        )
+        self.log_file_manager.start_cleanup_scheduler()
+
         # 初始化适配器
         self.adapters = []
         self.webhook_server = None
@@ -318,6 +333,8 @@ class AIAssistant:
                 bot_config = adapter_config.get("bot_api", {})
                 # 注入历史消息回溯配置（支持"先发图、后发文字"场景）
                 bot_config["lookback_count"] = self.config.context_feishu_lookback_count
+                # 注入日志文件管理器（用户上传 .log/.txt/zip 时落地并注入上下文）
+                bot_config["log_file_manager"] = self.log_file_manager
                 adapter = FeishuBotAdapter(bot_config)
                 self.adapters.append(adapter)
                 logger.info("Feishu Bot API adapter initialized")
@@ -483,6 +500,8 @@ class AIAssistant:
                         content_parts.append(Content(type="image", data=pending_image))
                     if image_data:
                         content_parts.append(Content(type="image", data=image_data))
+                    for _lc in parsed.get("log_contents") or []:
+                        content_parts.append(_lc)
                     if text:
                         content_parts.append(Content(type="text", data=text))
 
@@ -535,6 +554,9 @@ class AIAssistant:
                 content_parts.append(Content(type="image", data=pending_image))
             if image_data:
                 content_parts.append(Content(type="image", data=image_data))
+            # 日志文件附件（已在解析阶段下载落地），与图片同样触发代码排查模式
+            for _lc in parsed.get("log_contents") or []:
+                content_parts.append(_lc)
 
             # 在构建消息前，先用原始 text 检测运维模式，然后再清理 @ 提及
             is_operations_mode = original_text and ("/运维" in original_text or "/ops" in original_text)
@@ -699,10 +721,14 @@ class AIAssistant:
                     timestamp=datetime.now(),
                 ))
             if answer:
+                # 把该轮落盘的 metadata（含 mode）一并带回：模式继承判定读它来识别
+                # "这条链此前用过 agentic/operations"，比重新扫描历史文本猜测更准
+                # （mode 是实际执行结果，而文本里出现"查代码"未必真进过工具模式）。
                 rebuilt.append(Message(
                     role="assistant",
                     content=[Content(type="text", data=answer)],
                     timestamp=datetime.now(),
+                    metadata=rec.get("metadata") or {},
                 ))
 
         # 末尾追加当前这轮新提问（尚未落盘，链里不含，不会重复）
@@ -872,10 +898,52 @@ class AIAssistant:
                     "image_data": image_data  # 可能为 None
                 }
 
+            # 处理文件消息（用户上传日志 .log/.txt 或 zip 日志包）
+            elif message_type == "file":
+                content_str = message.get("content", "{}")
+                content_data = json_mod.loads(content_str)
+                file_key = content_data.get("file_key", "")
+                file_name = content_data.get("file_name") or "attachment"
+
+                if not file_key or not adapter:
+                    logger.warning("文件消息但无 file_key 或 adapter")
+                    return None
+
+                manager = getattr(self, "log_file_manager", None)
+                if not manager or not manager.enabled:
+                    logger.info(f"日志文件处理未启用，跳过文件消息: {file_name}")
+                    return None
+                if not manager.is_allowed(file_name):
+                    logger.info(f"跳过非日志类附件: {file_name}")
+                    return None
+
+                log_contents = adapter._collect_log_files(
+                    message_id, [{"file_key": file_key, "file_name": file_name}], chat_id
+                )
+                if not log_contents:
+                    logger.error(f"日志文件处理失败，跳过: {file_name}")
+                    return None
+
+                logger.info(f"解析文件消息: name={file_name}, 内容块={len(log_contents)}")
+                return {
+                    "chat_id": chat_id,
+                    "chat_type": message.get("chat_type", "p2p"),
+                    # 文件消息通常无文字说明，给一句默认提问，避免 text 为空
+                    "text": "请分析这个日志文件中的问题。",
+                    "message_id": message_id,
+                    "parent_id": parent_id,
+                    "root_id": root_id,
+                    "sender_id": sender_id,
+                    "sender_name": sender_name,
+                    "sender_display_name": sender_display_name,
+                    "image_data": None,
+                    "log_contents": log_contents,
+                }
+
             else:
                 content_preview = str(message.get("content", ""))[:200]
                 logger.info(
-                    f"跳过非文本/图片消息: {message_type}, content 预览={content_preview}"
+                    f"跳过非文本/图片/文件消息: {message_type}, content 预览={content_preview}"
                 )
                 return None
 

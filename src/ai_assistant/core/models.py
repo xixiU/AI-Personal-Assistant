@@ -6,14 +6,19 @@ from typing import List, Union
 @dataclass
 class Content:
     """消息内容（支持多模态）"""
-    type: str  # "text" | "image" | "video"
+    # log_file 的 data 为 dict：{"name","path","text","note"}
+    type: str  # "text" | "image" | "video" | "log_file"
     data: Union[str, bytes]
 
     def summary(self) -> str:
         """
         日志用摘要：不输出图片 base64 本体（动辄几十~上百 KB，会刷爆日志），
-        图片只打类型+大小，文本只打长度。
+        图片只打类型+大小，文本只打长度，日志文件只打文件名与正文长度。
         """
+        if self.type == "log_file" and isinstance(self.data, dict):
+            name = self.data.get("name", "?")
+            text_len = len(self.data.get("text") or "")
+            return f"log_file({name}, text_len={text_len})"
         if self.type == "image" and isinstance(self.data, dict):
             b64 = self.data.get("data", "")
             media = self.data.get("media_type", "?")

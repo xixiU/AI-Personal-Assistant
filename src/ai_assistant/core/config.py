@@ -36,6 +36,15 @@ class Config:
     # 0 表示只处理当前消息（旧行为），>=1 表示向前回溯 N 条
     context_feishu_lookback_count: int = 5
 
+    # 日志文件附件（用户上传 .txt/.log 或 zip 日志包，自动进入代码排查模式）
+    log_files_enabled: bool = True
+    log_files_dir: str = "./data/log_files"       # 下载落地目录（按会话分子目录）
+    log_files_max_size_mb: int = 20               # 单文件大小上限（MB），超限跳过
+    log_files_inline_chars: int = 20000           # 直接注入 AI 的文本字符数上限，超出只给路径
+    log_files_cleanup_hour: int = 23              # 每日清理时刻（0-23，本地时间）
+    log_files_retention_hours: int = 24           # 保留时长（小时），早于此的文件被清理
+    log_files_allowed_ext: List[str] = None       # 允许的扩展名，None 时用内置默认
+
     # AI配置
     ai_primary_provider: str = "openai"
     ai_primary_base_url: str = "http://localhost:8000"
@@ -168,6 +177,20 @@ class Config:
             config.context_lone_image_wait = float(
                 data["context"].get("lone_image_wait", config.context_lone_image_wait)
             )
+            config.context_feishu_lookback_count = data["context"].get(
+                "feishu_lookback_count", config.context_feishu_lookback_count
+            )
+
+        # 解析日志文件附件配置
+        if "log_files" in data:
+            lf = data["log_files"]
+            config.log_files_enabled = lf.get("enabled", config.log_files_enabled)
+            config.log_files_dir = lf.get("dir", config.log_files_dir)
+            config.log_files_max_size_mb = lf.get("max_size_mb", config.log_files_max_size_mb)
+            config.log_files_inline_chars = lf.get("inline_chars", config.log_files_inline_chars)
+            config.log_files_cleanup_hour = lf.get("cleanup_hour", config.log_files_cleanup_hour)
+            config.log_files_retention_hours = lf.get("retention_hours", config.log_files_retention_hours)
+            config.log_files_allowed_ext = lf.get("allowed_ext", config.log_files_allowed_ext)
 
         # 解析AI配置
         if "ai" in data:

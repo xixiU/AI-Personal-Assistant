@@ -168,26 +168,56 @@ class AnthropicProvider(AIProvider):
             logger.warning(f"Claude 安全判定失败，放行本次请求: {e}")
             return PromptSafetyResult(is_attack=False, attack_type="none", reason="")
 
+    @staticmethod
+    def _inherited_chain_mode(messages: List[Message]) -> str:
+        """
+        从引用链历史中取最近一次实际使用过的模式，用于"引用追问自动延续模式"。
+
+        判定依据是 assistant 消息落盘的 metadata.mode（实际执行结果），而不是
+        重新扫描历史文本猜测——文本里出现"查代码"未必真进过工具模式。
+        取最近一轮而非任意一轮：同一条链上用户可能从排查聊到运维，最近一次
+        才代表当前话题状态。
+
+        作用域限定在引用链（root_id）内，与已废弃的"会话级粘性"有本质区别：
+        粘性绑 session_id（=群 chat_id，房间级、跨用户共享），导致 A 用过运维后
+        群里 B 问普通问题也被拖进运维；而引用链由用户显式引用行为构成、话题内聚，
+        B 不引用就不共享 root_id，天然不会被污染。详见 operations-mode-sticky-session-bug。
+
+        Args:
+            messages: 消息列表（引用链重建后的完整历史）
+
+        Returns:
+            "agentic" / "operations" / ""（无可继承模式）
+        """
+        for msg in reversed(messages):
+            if msg.role != "assistant":
+                continue
+            mode = (msg.metadata or {}).get("mode", "")
+            if mode in ("agentic", "operations"):
+                return mode
+        return ""
+
     def _should_use_agentic_mode(self, messages: List[Message], session_id: Optional[str] = None) -> bool:
         """
         判断是否应该使用 Agentic 模式（工具调用）
 
-        触发条件（命中任一即进入，全部只看"当前这条消息本身"）：
+        触发条件（命中任一即进入）：
         1. Git 工具已启用（前提）
         2. 显式斜杠指令（/排查、/查代码、/code）
         3. 工具意图关键词（"查代码""看源码""排查"等自然语言）
-        4. 图片消息（日志截图）
+        4. 图片消息（日志截图）或日志文件附件
+        5. 引用链继承：本条无任何触发词，但所引用的链此前用过 Agentic 模式
 
-        已移除的粘连逻辑（原条件 2 会话级粘性 + 原条件 6 历史兜底继承）：
-        - 原"会话级粘性"让群里有人用过工具模式后，同群所有后续消息永久继承，
-          与运维模式同源，造成跨用户/跨话题污染，已删除。
-        - 原"历史兜底"遍历上下文窗口里的 assistant.metadata.mode=='agentic' 来继承，
-          同样属于隐式粘连，已删除。
-        - 多轮话题延续统一改由用户显式「引用」上一条回复表达，无引用 = 全新对话。
+        条件 5 的优先级最低——"当前消息有触发词以当前为准，没有才继承历史"。
+        因此从 RAG 链升级到排查/运维，用户在引用时显式带上触发词即可；
+        反向不需要"退出指令"，因为排查/运维模式同样会注入 RAG 文档检索结果，
+        是普通问答的超集，没有"需要退回普通模式"的场景。
+
+        与已废弃的"会话级粘性"的区别见 _inherited_chain_mode 文档字符串。
 
         Args:
             messages: 消息列表
-            session_id: 会话 ID（保留参数仅为签名兼容，不再用于粘性判断）
+            session_id: 会话 ID（保留参数仅为签名兼容，不用于粘性判断）
 
         Returns:
             是否使用 Agentic 模式
@@ -207,22 +237,128 @@ class AnthropicProvider(AIProvider):
             logger.info("触发 Agentic 模式：命中工具意图关键词（如查代码/看源码/排查）")
             return True
 
-        # 3. 检查当前消息是否有图片（日志截图）
-        for msg in messages:
-            for content in msg.content:
-                if content.type == "image":
-                    logger.info("触发 Agentic 模式：检测到图片消息")
-                    return True
+        # 3. 当前这轮带图片（日志截图）或日志文件附件。
+        #    只看最后一条 user 消息：引用链历史里的图片属于往轮，不应反复触发。
+        if self._current_turn_has_attachment(messages):
+            logger.info("触发 Agentic 模式：当前消息带图片/日志文件")
+            return True
+
+        # 4. 引用链继承（优先级最低）：本条没有任何触发词，
+        #    但用户引用的这条链此前就在用工具模式，延续之，免去重复输入触发词。
+        inherited = self._inherited_chain_mode(messages)
+        if inherited == "agentic":
+            logger.info("触发 Agentic 模式：引用链继承（历史轮次曾使用工具模式）")
+            return True
 
         return False
+
+    @staticmethod
+    def _content_to_api_parts(content) -> List[Dict[str, Any]]:
+        """
+        把单个 Content 转成 Anthropic API 的 content part 列表。
+
+        三种模式（Agentic/Operations/RAG）共用，避免各写一遍导致某个分支
+        漏掉新增类型（log_file 就属于新增类型，漏掉会静默丢附件）。
+
+        Args:
+            content: Content 对象
+
+        Returns:
+            API content part 列表（不支持的类型返回空列表）
+        """
+        if content.type == "text":
+            return [{"type": "text", "text": content.data}]
+
+        if content.type == "image" and isinstance(content.data, dict):
+            return [{
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": content.data.get("media_type", "image/png"),
+                    "data": content.data["data"],
+                }
+            }]
+
+        if content.type == "log_file" and isinstance(content.data, dict):
+            # 日志文件以文本形式注入：小文件带正文，大文件/压缩包只给路径，
+            # 由 AI 用代码排查工具按需读取，避免整包日志塞爆上下文。
+            name = content.data.get("name", "attachment")
+            path = content.data.get("path", "")
+            note = content.data.get("note", "")
+            text = content.data.get("text", "")
+            parts = [f"[用户上传的日志文件] 文件名: {name}"]
+            if path:
+                parts.append(f"本地路径: {path}")
+            if note:
+                parts.append(note)
+            if text:
+                parts.append(f"文件内容:\n{text}")
+            elif path and not note:
+                parts.append("（内容未内联，可用代码排查工具读取上述路径）")
+            return [{"type": "text", "text": "\n".join(parts)}]
+
+        return []
+
+    @staticmethod
+    def _current_turn_has_attachment(messages: List[Message]) -> bool:
+        """
+        判断"当前这一轮"是否带图片或日志文件附件。
+
+        只检查末尾连续的 user 消息，不扫描整个 messages：引用链重建后历史轮里
+        也有图片，若全量扫描会让一条曾发过截图的链永久停在排查模式。
+
+        Args:
+            messages: 消息列表
+
+        Returns:
+            当前轮是否含 image 或 log_file 内容块
+        """
+        for msg in reversed(messages):
+            if msg.role != "user":
+                break
+            for content in msg.content:
+                if content.type == "log_file":
+                    return True
+                if content.type == "image":
+                    # 回溯拉来的历史图片带 from_history 标记，不算当前轮的附件：
+                    # 否则群里别人早前发的无关截图会把普通提问拖进排查模式。
+                    if isinstance(content.data, dict) and content.data.get("from_history"):
+                        continue
+                    return True
+        return False
+
+    def _has_explicit_operations_command(self, messages: List[Message]) -> bool:
+        """
+        当前消息是否显式带 /运维 或 /ops 前缀（不含引用链继承）。
+
+        单独拆出来供 _send_with_context 做优先级判定：显式指令必须优先于
+        引用链继承，否则一条运维链会吃掉后续显式写了 /查代码 的追问。
+
+        Args:
+            messages: 消息列表
+
+        Returns:
+            当前消息是否显式请求运维模式
+        """
+        if not self.operations_enabled or not self.operations_tools:
+            return False
+        text_stripped = self._extract_last_user_text(messages).strip()
+        return "/运维" in text_stripped or "/ops" in text_stripped
 
     def _should_use_operations_mode(self, messages: List[Message], session_id: Optional[str] = None) -> bool:
         """
         判断是否应该使用 Operations 模式（运维工具调用）
 
-        触发条件（唯一）：当前这条消息显式带 /运维 或 /ops 前缀。
-        不再有任何"会话级粘性"——不看群里以前是否用过运维模式。
-        多轮运维追问请用户显式「引用」上一条运维回复来延续（引用链承载话题）。
+        触发条件：
+        1. 当前这条消息显式带 /运维 或 /ops 前缀
+        2. 引用链继承：本条无前缀，但所引用的链此前用过 Operations 模式
+
+        不存在"会话级粘性"——不看群里以前是否用过运维模式，只看当前消息 +
+        用户显式引用的那条链。作用域区别见 _inherited_chain_mode 文档字符串。
+
+        安全性：继承只决定"走哪个模式"，不放宽权限。运维白名单在进入模式后
+        按当前发言人重新校验（见 _send_with_context_operations 的鉴权门），
+        因此 B 引用 A 的运维链追问，仍会被白名单拦住，不构成绕过。
 
         Args:
             messages: 消息列表
@@ -237,9 +373,14 @@ class AnthropicProvider(AIProvider):
 
         last_user_text = self._extract_last_user_text(messages)
 
-        # 唯一触发：当前消息显式带 /运维 或 /ops（支持前面有 @ 提及等前缀）
+        # 1. 当前消息显式带 /运维 或 /ops（支持前面有 @ 提及等前缀）
         text_stripped = last_user_text.strip()
         if "/运维" in text_stripped or "/ops" in text_stripped:
+            return True
+
+        # 2. 引用链继承：免去每轮运维追问都要重复输入 /运维
+        if self._inherited_chain_mode(messages) == "operations":
+            logger.info("触发 Operations 模式：引用链继承（历史轮次曾使用运维模式）")
             return True
 
         return False
@@ -298,16 +439,21 @@ class AnthropicProvider(AIProvider):
 
         根据消息内容自动选择模式：
         - /运维 前缀 → Operations 模式（运维工具调用）
-        - 有图片或排查关键词 → Agentic 模式（代码排查工具调用）
+        - 有图片/日志文件或排查关键词 → Agentic 模式（代码排查工具调用）
+        - 以上都无、但引用的链此前用过某模式 → 继承该模式
         - 其他 → 标准 RAG 模式
+
+        判定顺序遵循"当前消息优先于引用链继承"：先看当前消息的显式意图，
+        只有当前消息没有任何触发词时才回落到继承。否则一条用过 /运维 的链
+        会让后续显式写了 /查代码 的追问仍被路由进运维模式。
 
         Returns:
             (reply_text, metadata) 元组
             metadata 包含：tool_rounds（Agentic/Operations）或 doc_count（RAG）等
         """
-        # 判断是否使用 Operations 模式（仅看当前消息是否带 /运维 前缀，无会话粘性）
-        if self._should_use_operations_mode(messages, session_id):
-            logger.info("使用 Operations 模式（运维工具调用）")
+        # 第一优先级：当前消息的显式意图（不看引用链历史）
+        if self._has_explicit_operations_command(messages):
+            logger.info("使用 Operations 模式（当前消息显式 /运维）")
             return self._send_with_context_operations(
                 messages,
                 doc_context,
@@ -317,10 +463,22 @@ class AnthropicProvider(AIProvider):
                 max_time=self.max_time
             )
 
-        # 判断是否使用 Agentic 模式（仅看当前消息，无会话粘性）
+        # 判断是否使用 Agentic 模式（当前消息触发词/附件，或引用链继承）
         if self._should_use_agentic_mode(messages, session_id):
             logger.info("使用 Agentic 模式（工具调用）")
             return self._send_with_context_agentic(
+                messages,
+                doc_context,
+                session_id,
+                max_rounds=self.max_rounds,
+                timeout_mode=self.timeout_mode,
+                max_time=self.max_time
+            )
+
+        # 引用链继承运维模式（当前消息无任何触发词时才走到这里）
+        if self._should_use_operations_mode(messages, session_id):
+            logger.info("使用 Operations 模式（引用链继承）")
+            return self._send_with_context_operations(
                 messages,
                 doc_context,
                 session_id,
@@ -382,17 +540,7 @@ class AnthropicProvider(AIProvider):
         for msg in messages:
             content_parts = []
             for content in msg.content:
-                if content.type == "text":
-                    content_parts.append({"type": "text", "text": content.data})
-                elif content.type == "image" and isinstance(content.data, dict):
-                    content_parts.append({
-                        "type": "image",
-                        "source": {
-                            "type": "base64",
-                            "media_type": content.data.get("media_type", "image/png"),
-                            "data": content.data["data"],
-                        }
-                    })
+                content_parts.extend(self._content_to_api_parts(content))
 
             if content_parts:
                 api_messages.append({"role": msg.role, "content": content_parts})
@@ -810,15 +958,8 @@ class AnthropicProvider(AIProvider):
                     elif text.strip().startswith("/ops"):
                         text = text.strip()[4:].strip()
                     content_parts.append({"type": "text", "text": text})
-                elif content.type == "image" and isinstance(content.data, dict):
-                    content_parts.append({
-                        "type": "image",
-                        "source": {
-                            "type": "base64",
-                            "media_type": content.data.get("media_type", "image/png"),
-                            "data": content.data["data"],
-                        }
-                    })
+                else:
+                    content_parts.extend(self._content_to_api_parts(content))
 
             if content_parts:
                 api_messages.append({"role": msg.role, "content": content_parts})
@@ -1324,18 +1465,7 @@ class AnthropicProvider(AIProvider):
             for msg in messages:
                 content_parts = []
                 for content in msg.content:
-                    if content.type == "text":
-                        content_parts.append({"type": "text", "text": content.data})
-                    elif content.type == "image" and isinstance(content.data, dict):
-                        # 图片内容：{"data": base64, "media_type": "image/png"}
-                        content_parts.append({
-                            "type": "image",
-                            "source": {
-                                "type": "base64",
-                                "media_type": content.data.get("media_type", "image/png"),
-                                "data": content.data["data"],
-                            }
-                        })
+                    content_parts.extend(self._content_to_api_parts(content))
 
                 if content_parts:
                     api_messages.append({"role": msg.role, "content": content_parts})
