@@ -17,6 +17,8 @@ from ai_assistant.core.ai_provider import (
     AIProvider,
     KeywordExtractionResult,
     PromptSafetyResult,
+    classify_api_error,
+    friendly_api_error_message,
     _KEYWORD_EXTRACTION_SYSTEM_PROMPT,
     _parse_keyword_extraction_response,
     _PROMPT_SAFETY_SYSTEM_PROMPT,
@@ -671,12 +673,18 @@ class AnthropicProvider(AIProvider):
                 # 将工具结果加入对话历史
                 api_messages.append({"role": "user", "content": tool_results})
 
-            except anthropic.APITimeoutError:
+            except anthropic.APITimeoutError as e:
                 logger.error("Anthropic API 请求超时")
-                return "⏱️ AI 服务响应超时，请稍后重试", {"mode": "agentic", "error": "timeout"}
+                return "⏱️ AI 服务响应超时，请稍后重试", {
+                    "mode": "agentic", "error": "timeout",
+                    "error_detail": f"APITimeoutError: {e}",
+                }
             except anthropic.APIConnectionError as e:
                 logger.error(f"Anthropic API 连接失败: {e}")
-                return "🔌 AI 服务连接失败，请检查网络或稍后重试", {"mode": "agentic", "error": "connection"}
+                return "🔌 AI 服务连接失败，请检查网络或稍后重试", {
+                    "mode": "agentic", "error": "connection",
+                    "error_detail": f"APIConnectionError: {e}",
+                }
             except anthropic.APIStatusError as e:
                 logger.error(f"Anthropic API 错误: status={e.status_code}, message={e.message}")
 
@@ -689,10 +697,17 @@ class AnthropicProvider(AIProvider):
                         logger.info(f"已回退，当前消息数: {len(api_messages)}")
                         continue  # 重试当前轮次
 
-                return f"❌ AI 服务调用失败: {e.message}", {"mode": "agentic", "error": "api"}
+                error_type = classify_api_error(e.status_code, str(e.message))
+                return friendly_api_error_message(error_type, e.message), {
+                    "mode": "agentic", "error": error_type,
+                    "error_detail": f"status={e.status_code}, message={e.message}",
+                }
             except Exception as e:
                 logger.error(f"Agentic 循环异常: {e}", exc_info=True)
-                return f"❌ 排查过程出错: {str(e)}", {"mode": "agentic", "error": "exception"}
+                return f"❌ 排查过程出错: {str(e)}", {
+                    "mode": "agentic", "error": "exception",
+                    "error_detail": f"{type(e).__name__}: {e}",
+                }
 
         # 达到超时限制
         timeout_msg = "⚠️ 排查过程较复杂，已达到总时间限制。以上是目前的分析结果，如需继续请提供更多信息。" if timeout_mode == "time" else "⚠️ 排查过程较复杂，已达到最大分析轮数。以上是目前的分析结果，如需继续请提供更多信息。"
@@ -1053,18 +1068,31 @@ class AnthropicProvider(AIProvider):
                 # 将工具结果加入对话历史
                 api_messages.append({"role": "user", "content": tool_results})
 
-            except anthropic.APITimeoutError:
+            except anthropic.APITimeoutError as e:
                 logger.error("Anthropic API 请求超时")
-                return "⏱️ AI 服务响应超时，请稍后重试", {"mode": "operations", "error": "timeout"}
+                return "⏱️ AI 服务响应超时，请稍后重试", {
+                    "mode": "operations", "error": "timeout",
+                    "error_detail": f"APITimeoutError: {e}",
+                }
             except anthropic.APIConnectionError as e:
                 logger.error(f"Anthropic API 连接失败: {e}")
-                return "🔌 AI 服务连接失败，请检查网络或稍后重试", {"mode": "operations", "error": "connection"}
+                return "🔌 AI 服务连接失败，请检查网络或稍后重试", {
+                    "mode": "operations", "error": "connection",
+                    "error_detail": f"APIConnectionError: {e}",
+                }
             except anthropic.APIStatusError as e:
                 logger.error(f"Anthropic API 错误: status={e.status_code}, message={e.message}")
-                return f"❌ AI 服务调用失败: {e.message}", {"mode": "operations", "error": "api"}
+                error_type = classify_api_error(e.status_code, str(e.message))
+                return friendly_api_error_message(error_type, e.message), {
+                    "mode": "operations", "error": error_type,
+                    "error_detail": f"status={e.status_code}, message={e.message}",
+                }
             except Exception as e:
                 logger.error(f"Operations 循环异常: {e}", exc_info=True)
-                return f"❌ 运维操作过程出错: {str(e)}", {"mode": "operations", "error": "exception"}
+                return f"❌ 运维操作过程出错: {str(e)}", {
+                    "mode": "operations", "error": "exception",
+                    "error_detail": f"{type(e).__name__}: {e}",
+                }
 
         # 达到超时限制
         timeout_msg = "⚠️ 运维操作较复杂，已达到总时间限制。以上是目前的结果，如需继续请提供更多信息。" if timeout_mode == "time" else "⚠️ 运维操作较复杂，已达到最大轮数。以上是目前的结果，如需继续请提供更多信息。"
@@ -1368,29 +1396,30 @@ class AnthropicProvider(AIProvider):
 
             return reply, metadata
 
-        except anthropic.APITimeoutError:
+        except anthropic.APITimeoutError as e:
             logger.error("Anthropic API 请求超时")
-            return "⏱️ AI 服务响应超时，请稍后重试", {"mode": "rag", "error": "timeout"}
+            return "⏱️ AI 服务响应超时，请稍后重试", {
+                "mode": "rag", "error": "timeout",
+                "error_detail": f"APITimeoutError: {e}",
+            }
         except anthropic.APIConnectionError as e:
             logger.error(f"Anthropic API 连接失败: {e}")
-            return "🔌 AI 服务连接失败，请检查网络或稍后重试", {"mode": "rag", "error": "connection"}
+            return "🔌 AI 服务连接失败，请检查网络或稍后重试", {
+                "mode": "rag", "error": "connection",
+                "error_detail": f"APIConnectionError: {e}",
+            }
         except anthropic.APIStatusError as e:
             status_code = e.status_code
             logger.error(f"Anthropic API 错误: status={status_code}, message={e.message}")
             logger.error(f"请求详情: base_url={self.client.base_url}, model={self.model}")
             logger.error(f"响应体: {e.response.text if hasattr(e.response, 'text') else 'N/A'}")
 
-            # 针对特定错误码返回友好消息
-            if status_code == 401:
-                return "❌ Anthropic API 认证失败，请检查 API Key 是否正确", {"mode": "rag", "error": "auth"}
-            elif status_code == 402:
-                return "💳 Anthropic 账户余额不足，请充值后重试", {"mode": "rag", "error": "quota"}
-            elif status_code == 429:
-                return "⏱️ Anthropic API 请求过于频繁，请稍后重试", {"mode": "rag", "error": "rate_limit"}
-            elif status_code >= 500:
-                return "🔧 Anthropic 服务暂时不可用，请稍后重试", {"mode": "rag", "error": "server"}
-            else:
-                return f"❌ AI 服务调用失败: {e.message}", {"mode": "rag", "error": "api"}
+            # 错误分类同时看状态码和错误文案：网关常把额度耗尽返回 403 而非 402
+            error_type = classify_api_error(status_code, str(e.message))
+            return friendly_api_error_message(error_type, e.message), {
+                "mode": "rag", "error": error_type,
+                "error_detail": f"status={status_code}, message={e.message}",
+            }
 
     def check_health(self) -> bool:
         """检查 Anthropic API 服务健康状态"""

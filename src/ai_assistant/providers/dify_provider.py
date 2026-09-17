@@ -8,7 +8,12 @@ import requests
 import threading
 from typing import Any, Dict, List, Optional
 from loguru import logger
-from ai_assistant.core.ai_provider import AIProvider, KeywordExtractionResult
+from ai_assistant.core.ai_provider import (
+    AIProvider,
+    KeywordExtractionResult,
+    classify_api_error,
+    friendly_api_error_message,
+)
 from ai_assistant.core.models import Message
 
 
@@ -51,7 +56,7 @@ class DifyProvider(AIProvider):
         messages: List[Message],
         doc_context: str = "",
         session_id: Optional[str] = None
-    ) -> str:
+    ):
         """
         发送消息到 Dify API（线程安全）
 
@@ -59,6 +64,10 @@ class DifyProvider(AIProvider):
             messages: 消息列表
             doc_context: 文档上下文（前置拼接到 query，截断 8000 字符）
             session_id: 会话 ID，用于维持多用户对话上下文
+
+        Returns:
+            成功时返回回复文本；失败时返回 (提示语, metadata) 元组，
+            metadata.error 供上层统一告警使用。
         """
         try:
             # 构建请求头
@@ -163,31 +172,33 @@ class DifyProvider(AIProvider):
             )
             return reply
 
-        except requests.exceptions.Timeout:
+        # 失败分支返回 (提示语, metadata) 元组：AIProvider.call() 兼容元组与纯字符串，
+        # metadata 中的 error 字段是统一 webhook 告警的触发依据。
+        except requests.exceptions.Timeout as e:
             logger.error("Dify API 请求超时")
-            return "⏱️ Dify 服务响应超时，请稍后重试"
+            return "⏱️ Dify 服务响应超时，请稍后重试", {
+                "mode": "dify", "error": "timeout", "error_detail": f"Timeout: {e}",
+            }
         except requests.exceptions.HTTPError as e:
-            status_code = e.response.status_code if e.response else 0
-            response_text = e.response.text if e.response else 'N/A'
+            status_code = e.response.status_code if e.response is not None else 0
+            response_text = e.response.text if e.response is not None else 'N/A'
             logger.error(f"Dify API HTTP 错误: status={status_code}, response={response_text}")
 
-            # 针对特定错误码返回友好消息
-            if status_code == 401:
-                return "❌ Dify API 认证失败，请检查 API Key 是否正确"
-            elif status_code == 402:
-                return "💳 Dify 账户余额不足，请充值后重试"
-            elif status_code == 429:
-                return "⏱️ Dify API 请求过于频繁，请稍后重试"
-            elif status_code >= 500:
-                return "🔧 Dify 服务暂时不可用，请稍后重试"
-            else:
-                return f"❌ Dify 服务调用失败: HTTP {status_code}"
+            error_type = classify_api_error(status_code, response_text)
+            return friendly_api_error_message(error_type, f"HTTP {status_code}"), {
+                "mode": "dify", "error": error_type,
+                "error_detail": f"status={status_code}, response={response_text}",
+            }
         except requests.exceptions.RequestException as e:
             logger.error(f"Dify API 请求失败: {e}")
-            return "🔌 Dify 服务连接失败，请检查网络或稍后重试"
+            return "🔌 Dify 服务连接失败，请检查网络或稍后重试", {
+                "mode": "dify", "error": "connection", "error_detail": f"{type(e).__name__}: {e}",
+            }
         except (KeyError, IndexError) as e:
             logger.error(f"解析 Dify 响应失败: {e}")
-            return "❌ Dify 响应格式错误，请稍后重试"
+            return "❌ Dify 响应格式错误，请稍后重试", {
+                "mode": "dify", "error": "exception", "error_detail": f"响应解析失败 {type(e).__name__}: {e}",
+            }
 
     def check_health(self) -> bool:
         """检查 Dify API 服务健康状态"""

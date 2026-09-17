@@ -12,6 +12,68 @@ class DocIndexingInProgressError(Exception):
     pass
 
 
+# 额度/余额类错误的特征词。网关（如 new-api / one-api）常把额度耗尽返回成 403 而非 402，
+# 例如：{"type":"new_api_error","message":"token quota is not enough, token remain quota: $1.74"}。
+# 只按状态码分类会把它归成通用 api 错误，导致告警缺少"需要充值"这一关键处置信息。
+_QUOTA_ERROR_HINTS = (
+    "quota", "insufficient", "balance", "billing", "credit",
+    "余额", "额度", "欠费", "配额",
+)
+
+
+def classify_api_error(status_code: int, message: str) -> str:
+    """
+    把 HTTP 状态码 + 错误文案归类为统一的错误类型标识。
+
+    Args:
+        status_code: HTTP 状态码
+        message: 错误文案（可为空）
+
+    Returns:
+        auth / quota / rate_limit / server / api 之一
+    """
+    text = (message or "").lower()
+    if any(hint in text for hint in _QUOTA_ERROR_HINTS):
+        return "quota"
+    if status_code == 401:
+        return "auth"
+    if status_code == 402:
+        return "quota"
+    if status_code == 429:
+        return "rate_limit"
+    if status_code >= 500:
+        return "server"
+    if status_code == 403:
+        # 排除额度后，403 多为 Key 权限不足
+        return "auth"
+    return "api"
+
+
+def friendly_api_error_message(error_type: str, message: str = "") -> str:
+    """
+    把错误类型转成面向用户的提示语。
+
+    额度/认证类错误不回显上游原文：原文常包含账户余额、request id 等运维信息，
+    对提问者没有价值，且容易被误当成业务内容。原文只进日志和告警。
+
+    Args:
+        error_type: classify_api_error 的返回值
+        message: 上游错误文案（仅 api 类型会截断回显）
+
+    Returns:
+        面向用户的提示文本
+    """
+    presets = {
+        "auth": "❌ AI 服务认证失败（API Key 无效或权限不足），已通知维护人员处理",
+        "quota": "💳 AI 服务额度/余额不足，已通知维护人员处理，请稍后重试",
+        "rate_limit": "⏱️ AI 服务请求过于频繁，请稍后重试",
+        "server": "🔧 AI 服务暂时不可用，请稍后重试",
+    }
+    if error_type in presets:
+        return presets[error_type]
+    return f"❌ AI 服务调用失败: {str(message)[:200]}"
+
+
 @dataclass
 class KeywordExtractionResult:
     """
@@ -313,6 +375,29 @@ class AIProvider(ABC):
             logger.warning(f"回复脱敏处理失败（回退为原文）: {e}")
 
         logger.info(f"AI 回复完成: {len(reply)} 字符, 耗时={duration:.2f}s, metadata={metadata}")
+
+        # AI 调用失败告警：这里是 feishu/wechat/web 三个来源、
+        # Agentic/Operations/RAG 三种模式的唯一公共出口，各 Provider 在自己的
+        # except 分支里把 error 类型写进 metadata，在此单点上报，避免每个分支
+        # 各接一遍 webhook。用户侧看到的只是一句"调用失败"，不告警维护者就无感知
+        # （典型场景：token 额度耗尽后所有提问持续失败）。
+        error_type = metadata.get("error") if isinstance(metadata, dict) else None
+        if error_type:
+            try:
+                from ai_assistant.utils.ai_alert import report_ai_error
+                report_ai_error(
+                    error_type=str(error_type),
+                    # 详情取原始回复：Provider 已把上游 message 写进回复文本
+                    detail=metadata.get("error_detail") or reply,
+                    provider=provider_name,
+                    model=str(model_name),
+                    mode=str(metadata.get("mode", "unknown")),
+                    session_id=session_id or "unknown",
+                    source=source,
+                    query_preview=last_user_text,
+                )
+            except Exception as e:
+                logger.warning(f"AI 错误告警上报异常（不影响回复）: {e}")
 
         # 保存对话历史
         record_id: Optional[str] = None

@@ -60,6 +60,9 @@ class Config:
     # 兼容旧配置 feishu_docs.alert_webhook，加载时会归并到此字段
     alert_webhook: Optional[str] = None  # 飞书告警 Webhook（可选）
 
+    # AI 调用失败告警开关（额度不足、Key 失效、限流、超时等，走 alert.webhook）
+    alert_ai_error_enabled: bool = True
+
     # 安全防护配置
     security_prompt_guard_enabled: bool = True  # 输入侧提示词攻击防护开关（AI 自主判断）
 
@@ -200,6 +203,9 @@ class Config:
         # 解析统一告警通道（顶层 alert 段优先，覆盖旧的 feishu_docs.alert_webhook）
         if "alert" in data:
             config.alert_webhook = data["alert"].get("webhook", config.alert_webhook)
+            config.alert_ai_error_enabled = data["alert"].get(
+                "ai_error_enabled", config.alert_ai_error_enabled
+            )
 
         # 解析安全防护配置
         if "security" in data:

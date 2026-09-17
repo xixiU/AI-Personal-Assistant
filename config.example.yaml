@@ -110,10 +110,12 @@ feishu_docs:
     # - "C5RNwyHtWikA4LkBN9trd4u8zFd"
 
 # 统一告警通道（可选）
-# 文档同步失败、提示词攻击拦截等告警都发送到此 Webhook
+# 文档同步失败、提示词攻击拦截、AI 调用失败等告警都发送到此 Webhook
 alert:
   webhook: ""                            # 飞书告警 Webhook URL（留空则不发送告警）
                                          # 注：旧配置放在 feishu_docs.alert_webhook 下仍兼容读取
+  ai_error_enabled: true                 # AI 调用失败是否告警（额度不足/Key 失效/限流/超时/连接失败/5xx）
+                                         # 同类错误 5 分钟内只发一条，避免持续性故障刷爆告警群
 
 # 安全防护配置
 security:

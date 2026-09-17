@@ -67,6 +67,14 @@ class AIAssistant:
             alert_webhook=getattr(self.config, 'alert_webhook', None),
         )
 
+        # 配置 AI 调用失败告警：额度耗尽、API Key 失效、限流、超时等故障，
+        # 用户侧只看到一句"调用失败"，需要主动推送给维护者（复用同一个 alert.webhook）。
+        from ai_assistant.utils.ai_alert import configure_ai_alert
+        configure_ai_alert(
+            enabled=getattr(self.config, 'alert_ai_error_enabled', True),
+            webhook=getattr(self.config, 'alert_webhook', None),
+        )
+
         # 记录进程 PID（用于排查进程退出问题）
         logger.info(f"Process PID: {os.getpid()}")
 
