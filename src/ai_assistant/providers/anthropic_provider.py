@@ -395,7 +395,7 @@ class AnthropicProvider(AIProvider):
         Returns:
             是否包含显式指令
         """
-        explicit_commands = ["/code", "/排查", "/查代码"]
+        explicit_commands = ["/code", "/排查", "/查代码","查代码"]
         text_lower = text.lower()
         return any(cmd in text_lower for cmd in explicit_commands)
 
