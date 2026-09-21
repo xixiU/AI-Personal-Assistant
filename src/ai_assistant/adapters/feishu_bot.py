@@ -63,6 +63,17 @@ class FeishuBotAdapter(IMAdapter):
         # 历史消息回溯配置（支持"先发图、后发文字"场景）
         self.lookback_count = config.get("lookback_count", 5)
 
+        # 消息编辑事件开关（im.message.updated_v1）
+        self.handle_message_updated = config.get("handle_message_updated", True)
+
+        # 编辑事件去重：message_id -> 已处理过的内容指纹集合。
+        # 用户连续修改一条消息会推多个 updated_v1；飞书自身也可能重投同一事件。
+        # 只按 message_id 去重会漏掉"改了两次、两次都该答"的情况，
+        # 因此用 (message_id, content 指纹) 作为键，内容真变了才放行。
+        self._updated_msg_fingerprints: Dict[str, set] = {}
+        self._updated_lock = threading.Lock()
+        self._updated_fp_max_keys = 500  # 上限，防长跑内存增长
+
         # 日志文件管理器（由 main.py 注入；None 表示不处理文件附件）
         self.log_file_manager = config.get("log_file_manager")
 
@@ -634,11 +645,98 @@ class FeishuBotAdapter(IMAdapter):
                 # 普通文本消息，返回给主流程处理
                 return event_data
 
+            # 处理消息编辑事件：用户把提问改对了（补上版本号、改错的机器名、补关键词），
+            # 期望机器人按新内容重答，而不是让他重新发一条。
+            if event_type == "im.message.updated_v1":
+                return self._process_message_updated(event_data)
+
             return None
 
         except Exception as e:
             logger.error(f"Failed to process webhook event: {e}")
             return None
+
+    def _process_message_updated(self, event_data: dict) -> Optional[dict]:
+        """
+        处理消息编辑事件（im.message.updated_v1），归一化为 receive_v1 同构结构
+
+        用户经常发出去才发现问题写错了（漏版本号、写错机器名、少个关键词），
+        直接编辑原消息比重发一条更自然，此时应按新内容重答。
+
+        三道必要的闸门（缺任何一道都会出问题）：
+        1. 过滤机器人自己的消息：点赞/点踩会重绘回复卡片，可能触发 updated 事件，
+           若不过滤会形成"机器人改卡片→收到编辑事件→再回复→再改卡片"的自循环。
+           判据是 message_id 命中 message_cache（机器人每条回复发送成功后都会缓存）。
+        2. 内容指纹去重：连续编辑会推多个事件，飞书也可能重投同一事件。
+           只按 message_id 去重会漏掉"改两次都该答"，故用 (message_id, 内容指纹)。
+        3. 只处理有实际内容的消息类型：撤回/纯格式变更等不带可解析内容的更新直接丢弃。
+
+        Args:
+            event_data: 解密后的 v2.0 事件数据
+
+        Returns:
+            归一化后的事件（与 im.message.receive_v1 同构），不需处理时返回 None
+        """
+        if not self.handle_message_updated:
+            logger.debug("消息编辑事件处理未启用，跳过")
+            return None
+
+        event = event_data.get("event", {}) or {}
+        message = event.get("message", {}) or {}
+        message_id = message.get("message_id", "")
+        chat_id = message.get("chat_id", "")
+        message_type = message.get("message_type", "")
+        content_str = message.get("content", "") or ""
+
+        if not message_id or not chat_id:
+            logger.debug(f"编辑事件缺少 message_id/chat_id，跳过: message_id={message_id}")
+            return None
+
+        # 闸门1：机器人自己的消息（回复卡片被更新）绝不能再触发 AI，否则自循环
+        with self._cache_lock:
+            is_own_message = message_id in self.message_cache
+        if is_own_message:
+            logger.debug(f"跳过机器人自身消息的更新事件: message_id={message_id}")
+            return None
+
+        # 闸门3：没有可解析内容的更新（撤回等）直接丢弃
+        if not content_str:
+            logger.debug(f"编辑事件无 content，跳过: message_id={message_id}")
+            return None
+
+        # 闸门2：内容指纹去重
+        fingerprint = hashlib.md5(
+            f"{message_type}|{content_str}".encode("utf-8")
+        ).hexdigest()
+        with self._updated_lock:
+            seen = self._updated_msg_fingerprints.setdefault(message_id, set())
+            if fingerprint in seen:
+                logger.debug(f"编辑事件内容未变化（重复投递），跳过: message_id={message_id}")
+                return None
+            seen.add(fingerprint)
+            # 简单上限保护：超限时丢弃最早插入的键（dict 保持插入序）
+            if len(self._updated_msg_fingerprints) > self._updated_fp_max_keys:
+                oldest = next(iter(self._updated_msg_fingerprints))
+                del self._updated_msg_fingerprints[oldest]
+
+        logger.info(
+            f"✏️  消息编辑事件，按新内容重答: message_id={message_id}, "
+            f"type={message_type}, chat_id={chat_id}"
+        )
+
+        # 归一化为 receive_v1 同构结构，让下游 _parse_feishu_event 零改动复用。
+        # 关键点：
+        # - 保留 message 原字段（含 mentions/parent_id/root_id），@所有人 判定与引用链都依赖它
+        # - sender 可能缺失，缺失时给空 open_id，白名单按"无 sender"处理（不会误放行具体用户白名单）
+        # - 打上 is_updated 标记，主流程据此避免把重答混入同一轮历史
+        normalized = dict(event_data)
+        normalized_event = dict(event)
+        normalized_event["message"] = message
+        if "sender" not in normalized_event:
+            normalized_event["sender"] = {"sender_id": {"open_id": ""}}
+        normalized_event["_is_message_updated"] = True
+        normalized["event"] = normalized_event
+        return normalized
 
     def detect_active_window(self) -> bool:
         """

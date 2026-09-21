@@ -436,6 +436,14 @@ class AIAssistant:
             if not parsed:
                 logger.debug("Event parsing returned None, skipping")
                 return
+
+            # 编辑事件标记：适配器把 im.message.updated_v1 归一化成 receive_v1 同构结构时
+            # 打上此标记。在解析之后统一注入，避免在 _parse_feishu_event 的 5 个返回分支里
+            # 各写一遍（漏一个就会让该类型的编辑退化成普通新消息，重复答且污染历史）。
+            is_updated = bool(
+                (processed_event.get("event") or {}).get("_is_message_updated")
+            )
+            parsed["is_updated"] = is_updated
             # 打印解析结果时，图片只打大小+类型，不打 base64 本体（避免日志刷屏）
             _parsed_log = dict(parsed)
             _img = _parsed_log.get("image_data")
@@ -585,6 +593,14 @@ class AIAssistant:
                         "source": "feishu"
                     }
                     logger.info(f"已注入运维 metadata: {user_message.metadata}")
+                # 编辑重答（is_updated）先清掉该 key 的旧内存上下文：
+                # 编辑的是同一条消息，context_key 与首次回答时相同，若直接 append，
+                # AI 会同时看到"改错前的问题 + 上次的错答案 + 改对后的问题"，
+                # 被旧答案带偏，且同一问题在上下文里出现两遍。编辑语义是"这条消息现在
+                # 应该是这个内容"，不是追加一轮对话，所以清空后重建为唯一一轮。
+                if parsed.get("is_updated"):
+                    self.context_manager.clear_context(context_key)
+                    logger.info(f"编辑重答：已清空该 key 的旧上下文，按新内容独立回答: {context_key}")
                 # 历史入库仍写内存（保留短窗口能力，兼容无引用的极短连续追问）
                 self.context_manager.add_message(context_key, user_message)
 
@@ -594,7 +610,12 @@ class AIAssistant:
             #     截断 + 会话过期 + 重启易失三大限制，无法保证"完整历史"）。
             #   - 无引用 → 全新对话：内存该 key 必为空，context_messages 只含当前这条，零历史。
             if root_id and self.chat_history:
-                context_messages = self._rebuild_context_from_chain(context_key, user_message)
+                context_messages = self._rebuild_context_from_chain(
+                    context_key,
+                    user_message,
+                    # 编辑重答时排除被编辑消息自己的旧轮次，避免新旧两版同时进上下文
+                    exclude_message_id=message_id if parsed.get("is_updated") else "",
+                )
             else:
                 context_messages = self.context_manager.get_context(context_key)
             logger.info(f"Sending {len(context_messages)} messages to AI (context_key={context_key})")
@@ -685,7 +706,12 @@ class AIAssistant:
                     except Exception as e:
                         logger.error(f"补跑暂存提问失败: {e}", exc_info=True)
 
-    def _rebuild_context_from_chain(self, context_key: str, current_user_message) -> List[Message]:
+    def _rebuild_context_from_chain(
+        self,
+        context_key: str,
+        current_user_message,
+        exclude_message_id: str = "",
+    ) -> List[Message]:
         """
         路径 B：按引用链标识从持久化 chat_history 重建整条链的完整历史。
 
@@ -697,6 +723,9 @@ class AIAssistant:
         Args:
             context_key: 引用链标识（飞书 root_id）
             current_user_message: 当前这轮用户消息（Message 对象；内容为空时可能为 None）
+            exclude_message_id: 需要排除的飞书 message_id（编辑重答时传被编辑那条）。
+                编辑的是同一条消息，它此前那轮"旧问题+旧答案"已落盘在同一条链上，
+                若一并注入，AI 会同时看到改错前后的两个版本并被旧答案带偏。
 
         Returns:
             重建后的消息列表：[历史 user/assistant 交替...] + [当前 user 消息]
@@ -707,6 +736,18 @@ class AIAssistant:
         except Exception as e:
             logger.warning(f"按引用链重建历史失败，回退到当前消息: {e}")
             records = []
+
+        if exclude_message_id:
+            before = len(records)
+            records = [
+                r for r in records
+                if (r.get("chain_info") or {}).get("message_id") != exclude_message_id
+            ]
+            if before != len(records):
+                logger.info(
+                    f"编辑重答：已从链历史中剔除被编辑消息的旧轮次 "
+                    f"{before - len(records)} 条: message_id={exclude_message_id}"
+                )
 
         for rec in records:
             query = (rec.get("query") or "").strip()

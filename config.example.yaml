@@ -91,6 +91,10 @@ adapters:
       welcome_message: "👋 大家好！我是 AI 助手，很高兴加入这个群聊。\n\n我可以帮助大家回答问题、查询文档等。直接 @ 我或私法发送消息即可。\n\n📖 使用文档：https://example.com/docs/ai-assistant"  # 机器人入群欢迎消息（支持 HTTP 链接） 直接回复群聊消息不艾特需要开启【获取群组中所有消息】事件
       thinking_reaction: true  # 收到消息后添加"思考中"🤔表情回复（体验优化，默认开启）
       thinking_emoji: "THINKING"  # 思考表情类型（默认 🤔），可选：THINKING/OK_HAND👌/THUMBSUP👍/EYES👀/FIRE🔥，更多https://open.feishu.cn/document/server-docs/im-v1/message-reaction/emojis-introduce?lang=zh-CN
+      # 处理消息编辑事件（im.message.updated_v1）：用户把提问改对了（补版本号、改错的机器名）
+      # 就按新内容重答，不用重发一条。需要在飞书开放平台额外订阅该事件才会收到推送。
+      # 机器人自身消息的更新（点赞/点踩重绘卡片）会被过滤，不会形成自循环。
+      handle_message_updated: true
 
   - name: "wechat"
     enabled: false
