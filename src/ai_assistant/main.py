@@ -790,6 +790,14 @@ class AIAssistant:
                     logger.info(f"❌ User {sender_id} not in whitelist, skipping")
                     return None
 
+            # @所有人 判定统一收口在类型分发之前：
+            # 早期只在 text 分支里查文本中的 "@_all"，富文本(post)/图片/文件分支完全没查，
+            # 而富文本的 @所有人 是独立的 at 节点、文本里没有 @_all 痕迹，
+            # 导致"别人用富文本 @所有人"时机器人照常回复（本次修复的 bug）。
+            if self.config.trigger_ignore_mention_all and self._is_mention_all(message):
+                logger.info(f"忽略 @所有人 的消息（根据配置）: message_type={message_type}")
+                return None
+
             # 处理文本消息
             if message_type == "text":
                 content_str = message.get("content", "{}")
@@ -798,12 +806,6 @@ class AIAssistant:
 
                 if not text:
                     return None
-
-                # 检查是否包含 @所有人 并且配置了忽略（检查文本内容）
-                if self.config.trigger_ignore_mention_all:
-                    if "@_all" in text:
-                        logger.info("忽略包含 @_all 的消息（根据配置）")
-                        return None
 
                 return {
                     "chat_id": chat_id,
@@ -1006,6 +1008,80 @@ class AIAssistant:
             if current is not None and current.get("ts") == arrive_ts:
                 del self._pending_lone_images[session_id]
         logger.info(f"等待超时，未收到文字描述，按纯图片处理（AI 将主动询问）: session={session_id}")
+        return False
+
+    @staticmethod
+    def _is_mention_all(message: dict) -> bool:
+        """
+        判断一条飞书消息是否 @所有人
+
+        飞书对「@所有人」在不同消息类型下的表达完全不同，只查一种必然漏判：
+        - text:  content.text 里带字面量占位符 "@_all"
+        - post:  文本里没有任何 @_all 痕迹，@所有人 是独立的 at 节点
+                 （{"tag":"at","user_id":"all"}），且可能嵌在任意层级
+        - 两者都可能在 message.mentions 里出现 key="@_all" 的条目
+
+        因此这里三路都查，任一命中即认定为 @所有人。
+
+        Args:
+            message: 飞书事件中的 message 对象
+
+        Returns:
+            True 表示该消息 @所有人
+        """
+        import json as json_mod
+
+        # 路径1：mentions 数组（最可靠，飞书对 @所有人 给出 key="@_all"）
+        mentions = message.get("mentions") or []
+        if isinstance(mentions, list):
+            for item in mentions:
+                if not isinstance(item, dict):
+                    continue
+                if item.get("key") == "@_all":
+                    return True
+                mention_id = item.get("id")
+                if isinstance(mention_id, dict):
+                    if str(mention_id.get("open_id", "")).lower() == "all":
+                        return True
+
+        content_str = message.get("content", "") or ""
+
+        # 路径2：text 类型的字面量占位符
+        if "@_all" in content_str:
+            return True
+
+        # 路径3：post 类型的 at 节点（递归，兼容任意嵌套深度与语言包裹）
+        if message.get("message_type") == "post":
+            try:
+                content_data = json_mod.loads(content_str)
+            except (ValueError, TypeError):
+                return False
+
+            hit = False
+
+            def walk(node):
+                nonlocal hit
+                if hit:
+                    return
+                if isinstance(node, list):
+                    for item in node:
+                        walk(item)
+                    return
+                if not isinstance(node, dict):
+                    return
+                if node.get("tag") == "at":
+                    user_id = str(node.get("user_id", "")).lower()
+                    user_name = str(node.get("user_name", ""))
+                    if user_id in ("all", "@_all") or user_name in ("所有人", "all", "All"):
+                        hit = True
+                        return
+                for value in node.values():
+                    if isinstance(value, (list, dict)):
+                        walk(value)
+
+            walk(content_data)
+            return hit
+
         return False
 
     @staticmethod
