@@ -582,16 +582,22 @@ class AIAssistant:
                     content=content_parts,
                     timestamp=datetime.now()
                 )
-                # 如果是运维模式，在消息 metadata 中附加操作者信息
-                # 使用 original_text 检测（保留 @ 提及），支持 "/运维" 或 "/ops" 出现在消息任意位置
+                # 发言人身份 metadata 一律注入，不再只在带 /运维 前缀时注入。
+                # 原先用 is_operations_mode（只认当前文本里的 /运维、/ops）作为开关，
+                # 但运维模式还能由「引用链继承」触发：用户引用上一轮运维回答追问
+                # 「用你建议的方式再查一遍」时，文本里没有前缀 → 不注入 metadata →
+                # provider 侧倒序找不到身份 → user_id=unknown、chat_id=None →
+                # 即使人在授权群里也被判无权限（本次修复的 bug）。
+                # 身份是「谁在说话」这一客观事实，与本轮走哪个模式无关，故无条件注入；
+                # 鉴权仍在 provider 侧按当前发言人校验，不因此放宽任何权限。
+                user_message.metadata = {
+                    "operator_id": parsed.get("sender_id", ""),
+                    "operator_name": parsed.get("sender_name", ""),
+                    "operator_display_name": parsed.get("sender_display_name", ""),
+                    "chat_id": parsed.get("chat_id", ""),  # 群组ID用于群组白名单
+                    "source": "feishu"
+                }
                 if is_operations_mode:
-                    user_message.metadata = {
-                        "operator_id": parsed.get("sender_id", ""),
-                        "operator_name": parsed.get("sender_name", ""),
-                        "operator_display_name": parsed.get("sender_display_name", ""),
-                        "chat_id": parsed.get("chat_id", ""),  # 添加群组ID用于群组白名单
-                        "source": "feishu"
-                    }
                     logger.info(f"已注入运维 metadata: {user_message.metadata}")
                 # 编辑重答（is_updated）先清掉该 key 的旧内存上下文：
                 # 编辑的是同一条消息，context_key 与首次回答时相同，若直接 append，
