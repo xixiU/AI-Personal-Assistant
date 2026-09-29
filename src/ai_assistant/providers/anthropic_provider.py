@@ -1078,15 +1078,22 @@ class AnthropicProvider(AIProvider):
             "- get_port_info(machine_name, port) - 按端口号查询监听进程（PID、命令行、工作目录），判断端口是否有服务在运行时必须用它",
             "- get_system_metrics(machine_name) - 查看系统资源（CPU、内存、磁盘、负载）",
             "- get_logs(machine_name, log_path, lines, grep_pattern) - 查看应用日志",
+            "  · grep_pattern 按扩展正则（grep -E）解析，可直接用 | 和 ()，"
+            "如 'SQLException|Deadlock' 或 '2026-09-29.*(ERROR|WARN)'。",
+            "  · 返回 matched=false 表示命令执行成功、只是日志里确实没有匹配内容，"
+            "这是确定结论。不要用同一模式重试，应换关键词、放宽模式或增大 lines。",
             "",
             "本助手仅提供【只读查询】能力，不提供重启/停止/启动等任何有副作用的操作。"
             "如果用户要求重启、停止、启动、部署、修改配置等写操作，请礼貌说明本助手只支持查询，"
             "相关变更请运维同事手动执行。",
             "",
             "工具使用规则：",
-            "1. **machine_name 参数**：使用上面列出的机器名称或别名",
+            "1. **machine_name 参数**：每次调用都必须显式传，使用上面列出的机器名称或别名。"
+            "不会从上一次调用继承，漏传会直接报错。",
             "2. **自然语言理解**：用户说'研发环境'时，使用别名映射到对应的机器名",
-            "3. **错误处理**：如果工具返回 success=false，查看 error 字段了解原因",
+            "3. **错误处理**：如果工具返回 success=false，查看 error 字段了解原因。"
+            "禁止用完全相同的参数重复调用同一工具——参数不变结果一定不变。"
+            "要么改参数、换工具，要么向用户说明查不到并给出已掌握的结论。",
             "4. **只读约束**：只能查询配置中定义的机器和应用，不得尝试执行任何变更类命令",
             "",
             f"当前用户：{operator_info}",
@@ -1114,6 +1121,8 @@ class AnthropicProvider(AIProvider):
         import time
         start_time = time.time()
         round_num = 0
+        # (工具名, 规范化参数) -> 失败次数，用于拦截完全相同参数的重复失败调用
+        failed_calls: Dict[tuple, int] = {}
 
         while True:
             round_num += 1
@@ -1193,6 +1202,35 @@ class AnthropicProvider(AIProvider):
                     try:
                         result = self._execute_operations_tool(tool_name, tool_input, chat_id=chat_id)
                         result_str = json.dumps(result, ensure_ascii=False)
+
+                        # 完全相同的(工具, 参数)重复失败保护。
+                        # 这里只拦"同工具+同参数+又失败"，不拦同名工具连续调用——
+                        # 连续查多台机器/多个日志是正常操作（参见 commit 9a4addc
+                        # 移除"连续5次调用同一工具"误报的教训）。
+                        # 加这道闸是因为曾出现参数污染导致 AI 反复发同一个必然失败的
+                        # 调用，直到耗尽 600s 超时，用户等了 10 分钟拿到空结果。
+                        if isinstance(result, dict) and not result.get("success", True):
+                            call_key = (
+                                tool_name,
+                                json.dumps(tool_input, ensure_ascii=False, sort_keys=True)
+                            )
+                            failed_calls[call_key] = failed_calls.get(call_key, 0) + 1
+                            if failed_calls[call_key] >= 3:
+                                logger.warning(
+                                    f"运维工具 {tool_name} 以完全相同的参数连续失败 "
+                                    f"{failed_calls[call_key]} 次，提示 AI 改变策略"
+                                )
+                                result_str = json.dumps({
+                                    **result,
+                                    "repeated_failure": True,
+                                    "hint": (
+                                        f"这个调用用完全相同的参数已失败 "
+                                        f"{failed_calls[call_key]} 次，再重试结果不会变。"
+                                        "请改变参数（换机器、换路径、换过滤模式）、"
+                                        "改用其他工具，或直接向用户说明查不到并给出已有结论。"
+                                    )
+                                }, ensure_ascii=False)
+
                         tool_results.append({
                             "type": "tool_result",
                             "tool_use_id": tool_use.id,
@@ -1362,6 +1400,15 @@ class AnthropicProvider(AIProvider):
             if not method or not callable(method):
                 return {"success": False, "error": f"未知运维工具: {tool_name}", "data": None}
 
+            # 关键：必须拷贝一份再改。
+            # 传进来的 tool_input 就是 Claude 响应里 block.input 那个 dict 对象，
+            # 调用方已经把它的【引用】放进了 api_messages 的 assistant 消息里。
+            # 若在此就地 pop('machine_name') / 塞 jar_file_path，等于把 Claude
+            # 自己的调用记录改掉：下一轮回传时它看到"我上次没传 machine_name"，
+            # 与工具返回的"缺少 machine_name"互相印证，于是它永远学不会该传，
+            # 只能反复重试到超时（本次修复的死循环 bug）。
+            tool_input = dict(tool_input)
+
             # OperationsTools 的方法第一个参数是 Machine 对象
             # AI 传入的是机器名称字符串，需要转换
             # 但并非所有工具都需要 machine 参数（如 list_machines）
@@ -1375,7 +1422,18 @@ class AnthropicProvider(AIProvider):
             if 'machine' in params and self.operations_tools.operations_manager:
                 machine_name = tool_input.pop('machine_name', None)
                 if not machine_name:
-                    return {"success": False, "error": "缺少 machine_name 参数", "data": None}
+                    # 错误信息里带上可选机器名，否则 AI 只知道"缺了"但不知道该填什么
+                    available = list(
+                        self.operations_tools.operations_manager.machines.keys()
+                    )
+                    return {
+                        "success": False,
+                        "error": (
+                            f"缺少 machine_name 参数，调用 {tool_name} 必须指定目标机器。"
+                            f"可选机器：{available}"
+                        ),
+                        "data": None
+                    }
 
                 machine = self.operations_tools.operations_manager.find_machine(machine_name)
                 if not machine:

@@ -35,12 +35,16 @@ class CommandResult:
         success: bool,
         data: Any = None,
         error: Optional[str] = None,
-        raw_output: Optional[str] = None
+        raw_output: Optional[str] = None,
+        exit_code: Optional[int] = None
     ):
         self.success = success
         self.data = data
         self.error = error
         self.raw_output = raw_output
+        # 远端命令退出码。调用方需要区分「命令出错」和「命令正常但没有结果」时必须用它，
+        # 典型场景：grep 无匹配退出码是 1，属于正常结果而非错误（见 GetLogsCommand）。
+        self.exit_code = exit_code
 
     def to_dict(self) -> Dict[str, Any]:
         """转换为字典格式"""
@@ -48,7 +52,8 @@ class CommandResult:
             "success": self.success,
             "data": self.data,
             "error": self.error,
-            "raw_output": self.raw_output
+            "raw_output": self.raw_output,
+            "exit_code": self.exit_code
         }
 
 
@@ -133,13 +138,18 @@ class OperationCommand(ABC):
                 return CommandResult(
                     success=True,
                     data=output.strip(),
-                    raw_output=output
+                    raw_output=output,
+                    exit_code=exit_code
                 )
             else:
+                # stderr 为空时旧实现会产出 "Command failed with exit code 1: " 这种
+                # 完全无信息的错误（grep 无匹配就是这种情况），排查时只能靠猜。
+                detail = error.strip() or "(命令无 stderr 输出)"
                 return CommandResult(
                     success=False,
-                    error=f"Command failed with exit code {exit_code}: {error}",
-                    raw_output=error
+                    error=f"Command failed with exit code {exit_code}: {detail}",
+                    raw_output=error,
+                    exit_code=exit_code
                 )
 
         except Exception as e:
@@ -987,7 +997,14 @@ class GetLogsCommand(OperationCommand):
         try:
             # 构建命令
             if grep_pattern:
-                command = f"tail -n {lines} {shlex.quote(log_path)} | grep {shlex.quote(grep_pattern)}"
+                # 必须用 grep -E（ERE）：AI 写出的过滤模式几乎总是带 | 和 ()，
+                # 例如 "SQLException|Deadlock" 或 "2026-09-29.*(ERROR|WARN)"。
+                # 裸 grep 是 BRE，其中 | 和 () 都是字面字符，会把整个模式当成一个
+                # 字符串去找，结果必然无匹配 → exit 1 → AI 反复换模式重试直到超时。
+                command = (
+                    f"tail -n {lines} {shlex.quote(log_path)} "
+                    f"| grep -E {shlex.quote(grep_pattern)}"
+                )
             else:
                 command = f"tail -n {lines} {shlex.quote(log_path)}"
 
@@ -1002,10 +1019,33 @@ class GetLogsCommand(OperationCommand):
                         "lines_count": len(log_lines),
                         "lines": log_lines
                     },
-                    raw_output=result.raw_output
+                    raw_output=result.raw_output,
+                    exit_code=result.exit_code
                 )
-            else:
-                return result
+
+            # grep 无匹配时退出码是 1，这是「日志里确实没有这类记录」的正常结论，
+            # 不是命令失败。旧实现一律当错误返回，且 stderr 为空导致错误信息里
+            # 什么都没有，AI 无法判断是"没匹配到"还是"路径/权限有问题"，
+            # 只能不断换模式重试，最终耗尽 600s 超时（本次修复的 bug）。
+            if grep_pattern and result.exit_code == 1:
+                return CommandResult(
+                    success=True,
+                    data={
+                        "log_path": log_path,
+                        "lines_count": 0,
+                        "lines": [],
+                        "matched": False,
+                        "note": (
+                            f"日志最后 {lines} 行中没有匹配 '{grep_pattern}' 的内容。"
+                            "这是确定结论（命令执行成功，仅无匹配），"
+                            "不要用同一模式重试；可换关键词、放宽模式或增大 lines。"
+                        )
+                    },
+                    raw_output=result.raw_output,
+                    exit_code=result.exit_code
+                )
+
+            return result
 
         except Exception as e:
             logger.error(f"Get logs failed: {e}")
