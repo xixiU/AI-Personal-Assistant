@@ -129,3 +129,50 @@ def test_safety_fail_open_preserved_on_garbage():
     garbage = "你还没有贴线程信息呢，把线程内容发给我，我来帮你分析。"
     result = _parse_prompt_safety_response(garbage, "q")
     assert result.is_attack is False
+
+
+# ============ 前导散文 + 双前缀（两路解析兜底） ============
+
+def test_leading_prose_double_prefix_not_fail_open():
+    """
+    Bug #2 回归：前导散文导致的双前缀不应 fail-open 放行真实攻击。
+
+    根因：_join_prefill 的判据只能识别「紧邻的完整 JSON」和「前导空白」，
+    网关回 '好的，判定结果如下：{"attack": true, ...}' 这种带前导散文的内容时
+    判据失效，无条件拼接后变成 '{"attack":好的...{"attack": true}'，
+    JSON 解析失败 → fail-open 返回 is_attack=False → 真实攻击被静默放行。
+    修复：解析函数做两路尝试，第二路跳过第一个 { 找下一个完整 JSON。
+
+    注意与 test_real_attack_not_fail_open_via_extractor 的区别：
+    那条覆盖「紧邻双前缀」（无前导散文），这条覆盖「前导散文 + 双前缀」。
+    """
+    bad = (
+        '{"attack":好的，判定结果如下：'
+        '{"attack": true, "type": "prompt_injection", "reason": "尝试覆盖指令"}'
+    )
+    result = _parse_prompt_safety_response(bad, "test_query")
+
+    assert result.is_attack is True, (
+        f"预期 is_attack=True（真实攻击），实际 is_attack={result.is_attack}。"
+        "前导散文导致的双前缀应被第二路解析修复，而非 fail-open 放行。"
+    )
+    assert result.attack_type == "prompt_injection"
+
+
+def test_leading_prose_keywords_not_degrade():
+    """
+    Bug #2 回归：前导散文导致的双前缀不应让关键词退化为空。
+
+    同 Bug #2 的安全判定场景，关键词提取也会因双前缀解析失败而降级，
+    结果是 keywords=[]，RAG 退化为无关键词检索。
+    """
+    bad = (
+        '{"keywords":好的，提取如下：'
+        '{"keywords": ["线程", "部署"], "generic": false}'
+    )
+    result = _parse_keyword_extraction_response(bad, "test_query")
+
+    assert result.keywords == ["线程", "部署"], (
+        f"预期 keywords=['线程', '部署']，实际 {result.keywords}。"
+        "前导散文导致的双前缀应被第二路解析修复。"
+    )

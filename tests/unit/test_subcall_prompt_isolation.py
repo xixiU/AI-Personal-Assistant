@@ -261,10 +261,36 @@ def test_parse_index_empty_and_edge_args():
     assert parse_doc_index_list("1,2", candidate_count=5, max_docs=0) == []
 
 
-def test_parse_index_loose_fallback_ignores_prose_numbers():
-    """无纯编号行时走宽松兜底，越界过滤能挡掉解释里的年份等杂数字"""
+def test_parse_index_loose_fallback_removed_no_prose_numbers():
+    """
+    宽松兜底已删除：无纯编号行时返回空，不再从散文里抓数字。
+
+    背景（防回归）：
+    旧实现在找不到纯编号行时会 re.findall(r"\\d+", raw) 全文抓数字，
+    只要落在候选区间就被当成文档编号。"我选 2 号文档" 这种语义下看似正确，
+    但 "第 3 节"、"步骤 2" 同样会被抓中（见下面两条用例），
+    导致检索到完全无关的文档。现在只认纯编号行，抓不到就返回空 + WARNING。
+    """
     text = "参考 2026 版竞品分析，我选 2 号文档"
-    assert parse_doc_index_list(text, candidate_count=3, max_docs=3) == [1]
+    assert parse_doc_index_list(text, candidate_count=3, max_docs=3) == []
+
+
+def test_parse_index_chapter_numbers_not_mistaken():
+    """
+    Bug #1 回归：解释文本里的章节号不应被误判为文档编号。
+
+    根因：宽松兜底的 re.findall(r"\\d+", raw) 把所有数字都抓出来，
+    只要落在候选区间就会被选中。
+    修复：删除宽松兜底，只保留纯编号行解析。
+    """
+    text = "根据第 3 节的说明，建议查看第 5 步"
+    assert parse_doc_index_list(text, candidate_count=3, max_docs=3) == []
+
+
+def test_parse_index_step_numbers_not_mistaken():
+    """Bug #1 回归：步骤序号不应被误判为文档编号"""
+    text = "按照步骤 2 和步骤 7 的方法操作"
+    assert parse_doc_index_list(text, candidate_count=3, max_docs=3) == []
 
 
 # ============ 4. JSON 提取与解析 ============
