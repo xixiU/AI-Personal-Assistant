@@ -357,12 +357,13 @@ def parse_doc_index_list(text: str, candidate_count: int, max_docs: int) -> List
     if numbers:
         return _collect(numbers)
 
-    # 第 2 层：全文抓数字（宽松兜底，可能把解释里的年份等数字也抓进来，
-    # 但越界过滤会把它们挡掉）
-    loose = _collect(re.findall(r"\d+", raw))
-    if loose:
-        logger.debug(f"文档编号按宽松模式解析（输出含解释文字）: indices={loose}")
-    return loose
+    # 未找到纯编号行，返回空（Bug #1 修复：去掉宽松兜底，避免误判解释文本里的数字）
+    # 宽松兜底会把"根据第 3 节的说明，建议查看第 5 步"里的 3、5 当成文档编号，
+    # 导致 RAG 塞错文档进上下文。误判成本（错文档 → AI 瞎编）远高于不命中成本
+    # （返回空 → RAG 降级为纯记忆 → AI 说"文档里没找到"）。
+    logger.warning(f"文档编号解析失败（未找到纯编号行），返回空列表: text={raw[:100]!r}")
+    return []
+
 
 
 def log_subcall_degraded(subcall: str, reason: str, raw: str, query_preview: str = "") -> None:
@@ -480,30 +481,57 @@ def _parse_prompt_safety_response(text: str, query_preview: str) -> PromptSafety
     解析 AI 返回的安全判定 JSON。解析失败时【放行】（fail-open），
     避免因模型偶发格式问题误伤正常用户。
 
+    两路尝试（修复 Bug #2：前导散文导致的双前缀 fail-open）：
+    1. 先按输入文本解析（正常路径：Anthropic 原生返回 / 网关返回纯 JSON）
+    2. 失败后尝试从第一个 '{' 开始解析（网关返回完整 JSON 的情况）
+
     Args:
-        text: AI 原始输出文本
+        text: AI 原始输出文本（可能已拼接 prefill，也可能是网关返回的完整 JSON）
         query_preview: 用于日志的查询摘要
 
     Returns:
         PromptSafetyResult（解析失败时 is_attack=False）
     """
     raw = (text or "").strip()
-    candidate = extract_first_json_object(raw)
 
+    # 第一路：按当前输入解析
+    candidate = extract_first_json_object(raw)
+    result = _try_parse_safety_json(candidate)
+    if result:
+        return result
+
+    # 第二路：可能是网关返回的完整 JSON，跳过可能的 prefill 前缀找下一个 '{'
+    # 例如输入 '{"attack":好的，结果：{"attack": true, ...}' 时第一路会失败（双前缀）
+    # 从第一个 '{' 之后找下一个 '{', 能跳过 '{"attack":好的...' 这个前缀
+    first_brace = raw.find("{")
+    if first_brace >= 0:
+        second_brace = raw.find("{", first_brace + 1)
+        if second_brace > 0:
+            candidate2 = extract_first_json_object(raw[second_brace:])
+            result2 = _try_parse_safety_json(candidate2)
+            if result2:
+                return result2
+
+    # 两路都失败，fail-open
+    log_subcall_degraded("prompt_safety", "JSON 解析失败，放行本次请求", raw, query_preview)
+    return PromptSafetyResult(is_attack=False, attack_type="none", reason="")
+
+
+def _try_parse_safety_json(candidate: str) -> Optional[PromptSafetyResult]:
+    """辅助函数：尝试解析安全判定 JSON，失败返回 None"""
     try:
         data = json.loads(candidate)
         if not isinstance(data, dict):
-            raise ValueError(f"JSON 顶层不是对象: {type(data).__name__}")
+            return None
         is_attack = bool(data.get("attack", False))
         attack_type = str(data.get("type", "none")).strip() or "none"
         reason = str(data.get("reason", "")).strip()
         if not is_attack:
             attack_type = "none"
         return PromptSafetyResult(is_attack=is_attack, attack_type=attack_type, reason=reason)
-    except (json.JSONDecodeError, TypeError, ValueError) as e:
-        # fail-open：放行，优先保证正常用户不被误伤（不要改成 fail-close）
-        log_subcall_degraded("prompt_safety", f"JSON 解析失败，放行本次请求: {e}", raw, query_preview)
-        return PromptSafetyResult(is_attack=False, attack_type="none", reason="")
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return None
+
 
 
 # 关键词提取的统一提示词（Anthropic / OpenAI 兼容接口通用）
@@ -623,6 +651,10 @@ def _parse_keyword_extraction_response(text: str, query_preview: str) -> Keyword
     """
     解析 AI 返回的关键词提取 JSON，失败时返回保守降级值。
 
+    两路尝试（修复 Bug #2：前导散文导致的双前缀降级）：
+    1. 先按输入文本解析（正常路径）
+    2. 失败后尝试从第一个 '{' 开始解析（网关返回完整 JSON 的情况）
+
     Args:
         text: AI 原始输出文本
         query_preview: 用于日志的查询摘要（不超过 50 字符）
@@ -631,13 +663,36 @@ def _parse_keyword_extraction_response(text: str, query_preview: str) -> Keyword
         KeywordExtractionResult（解析失败时 keywords=[], is_generic_tech=False）
     """
     raw = (text or "").strip()
-    # 提取 JSON 块（部分模型会加 ```json 围栏或在 JSON 前后加说明文字）
-    candidate = extract_first_json_object(raw)
 
+    # 第一路：按当前输入解析
+    candidate = extract_first_json_object(raw)
+    result = _try_parse_keyword_json(candidate)
+    if result:
+        return result
+
+    # 第二路：可能是网关返回的完整 JSON，跳过可能的 prefill 前缀找下一个 '{'
+    # 例如输入 '{"keywords":好的，关键词：["线程", ...]' 时第一路会失败（双前缀）
+    # 从第一个 '{' 之后找下一个 '{', 能跳过 '{"keywords":好的...' 这个前缀
+    first_brace = raw.find("{")
+    if first_brace >= 0:
+        second_brace = raw.find("{", first_brace + 1)
+        if second_brace > 0:
+            candidate2 = extract_first_json_object(raw[second_brace:])
+            result2 = _try_parse_keyword_json(candidate2)
+            if result2:
+                return result2
+
+    # 两路都失败，降级
+    log_subcall_degraded("keyword_extraction", "JSON 解析失败，降级到无关键词", raw, query_preview)
+    return KeywordExtractionResult(keywords=[], is_generic_tech=False)
+
+
+def _try_parse_keyword_json(candidate: str) -> Optional[KeywordExtractionResult]:
+    """辅助函数：尝试解析关键词提取 JSON，失败返回 None"""
     try:
         data = json.loads(candidate)
         if not isinstance(data, dict):
-            raise ValueError(f"JSON 顶层不是对象: {type(data).__name__}")
+            return None
         kw_raw = data.get("keywords", [])
         if isinstance(kw_raw, str):
             # 模型偶尔把 keywords 写成逗号分隔字符串
@@ -647,9 +702,9 @@ def _parse_keyword_extraction_response(text: str, query_preview: str) -> Keyword
         keywords = [str(k).strip() for k in kw_raw if str(k).strip()]
         is_generic = bool(data.get("generic", False))
         return KeywordExtractionResult(keywords=keywords[:5], is_generic_tech=is_generic)
-    except (json.JSONDecodeError, TypeError, ValueError) as e:
-        log_subcall_degraded("keyword_extraction", f"JSON 解析失败，降级到无关键词: {e}", raw, query_preview)
-        return KeywordExtractionResult(keywords=[], is_generic_tech=False)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return None
+
 
 
 class AIProvider(ABC):
