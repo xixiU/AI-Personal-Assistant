@@ -339,6 +339,55 @@
             justify-content: center;
         }
 
+        /* 日志文件待发送预览（与图片预览同一行距与风格） */
+        .file-preview {
+            display: none;
+            flex-wrap: wrap;
+            gap: 8px;
+            margin-bottom: 10px;
+        }
+
+        .file-preview.active { display: flex; }
+
+        .file-chip {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            max-width: 100%;
+            padding: 6px 10px;
+            background: var(--ai-bubble);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            font-size: 13px;
+            color: var(--text-secondary);
+        }
+
+        .file-chip .file-name {
+            max-width: 220px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            color: var(--text);
+        }
+
+        .file-chip .file-size { flex-shrink: 0; font-size: 12px; }
+
+        .file-chip .remove-btn {
+            width: 18px;
+            height: 18px;
+            flex-shrink: 0;
+            border-radius: 50%;
+            border: none;
+            background: #ef4444;
+            color: white;
+            font-size: 11px;
+            line-height: 1;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
         .input-box {
             display: flex;
             align-items: flex-end;
@@ -526,18 +575,19 @@
                     <img id="previewImg" src="" alt="">
                     <button class="remove-btn" id="removeImage">&times;</button>
                 </div>
+                <div class="file-preview" id="filePreview"></div>
                 <div class="input-box">
                     <div class="input-actions">
-                        <button class="icon-btn" id="uploadBtn" title="上传图片">
+                        <button class="icon-btn" id="uploadBtn" title="上传图片或日志文件（.log/.txt/.out/.err/.zip）">
                             <svg viewBox="0 0 24 24"><path d="M21 19V5c0-1.1-.9-2-2-2H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2zM8.5 13.5l2.5 3.01L14.5 12l4.5 6H5l3.5-4.5z"/></svg>
                         </button>
                     </div>
-                    <textarea id="chatInput" placeholder="输入您的问题..." rows="1"></textarea>
+                    <textarea id="chatInput" placeholder="输入您的问题，可附带截图或日志文件..." rows="1"></textarea>
                     <button class="send-btn" id="sendBtn" title="发送">
                         <svg viewBox="0 0 24 24"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
                     </button>
                 </div>
-                <input type="file" id="imageInput" accept="image/*" hidden>
+                <input type="file" id="imageInput" accept="image/*,.log,.txt,.out,.err,.zip" multiple hidden>
             </div>
         </div>
     </main>
@@ -554,13 +604,116 @@
         const imagePreview = document.getElementById('imagePreview');
         const previewImg = document.getElementById('previewImg');
         const removeImage = document.getElementById('removeImage');
+        const filePreview = document.getElementById('filePreview');
         const welcomeArea = document.getElementById('welcomeArea');
         const errorToast = document.getElementById('errorToast');
         const newChatBtn = document.getElementById('newChatBtn');
         const convList = document.getElementById('convList');
 
         let pendingImage = null;
+        let pendingFiles = [];   // [{name, size, data}] 待发送的日志文件
         let isFirstMessage = true;
+
+        // ---- 日志文件上传约束（与后端 LogFileManager 保持一致）----
+        const LOG_FILE_EXTS = ['.log', '.txt', '.out', '.err', '.zip'];
+        const MAX_FILE_SIZE = 20 * 1024 * 1024;   // 单文件 20MB
+        const MAX_FILE_COUNT = 5;                 // 单次最多 5 个
+
+        function isLogFileName(name) {
+            const lower = (name || '').toLowerCase();
+            return LOG_FILE_EXTS.some(ext => lower.endsWith(ext));
+        }
+
+        function formatSize(bytes) {
+            if (bytes >= 1024 * 1024) return (bytes / 1024 / 1024).toFixed(1) + 'MB';
+            if (bytes >= 1024) return (bytes / 1024).toFixed(1) + 'KB';
+            return bytes + 'B';
+        }
+
+        // 渲染日志文件 chip 列表（文件名用 textContent 写入，避免 XSS）
+        function renderFilePreview() {
+            filePreview.innerHTML = '';
+            if (pendingFiles.length === 0) {
+                filePreview.classList.remove('active');
+                return;
+            }
+            pendingFiles.forEach((f, idx) => {
+                const chip = document.createElement('div');
+                chip.className = 'file-chip';
+
+                const nameEl = document.createElement('span');
+                nameEl.className = 'file-name';
+                nameEl.textContent = '📄 ' + f.name;
+                nameEl.title = f.name;
+
+                const sizeEl = document.createElement('span');
+                sizeEl.className = 'file-size';
+                sizeEl.textContent = formatSize(f.size);
+
+                const removeBtn = document.createElement('button');
+                removeBtn.className = 'remove-btn';
+                removeBtn.innerHTML = '&times;';
+                removeBtn.title = '移除';
+                removeBtn.addEventListener('click', () => {
+                    pendingFiles.splice(idx, 1);
+                    renderFilePreview();
+                });
+
+                chip.appendChild(nameEl);
+                chip.appendChild(sizeEl);
+                chip.appendChild(removeBtn);
+                filePreview.appendChild(chip);
+            });
+            filePreview.classList.add('active');
+        }
+
+        // 读取图片为待发送附件（base64）
+        function acceptImageFile(file) {
+            if (file.size > 10 * 1024 * 1024) { showError('图片不能超过 10MB'); return; }
+            const reader = new FileReader();
+            reader.onload = (ev) => {
+                pendingImage = { data: ev.target.result.split(',')[1], media_type: file.type };
+                previewImg.src = ev.target.result;
+                imagePreview.classList.add('active');
+            };
+            reader.readAsDataURL(file);
+        }
+
+        // 读取日志文件为待发送附件（base64，zip 等二进制同样适用）
+        function acceptLogFile(file) {
+            if (pendingFiles.length >= MAX_FILE_COUNT) {
+                showError(`一次最多上传 ${MAX_FILE_COUNT} 个文件`);
+                return;
+            }
+            if (file.size > MAX_FILE_SIZE) {
+                showError(`文件 ${file.name} 超过 20MB 上限`);
+                return;
+            }
+            if (file.size === 0) { showError(`文件 ${file.name} 为空`); return; }
+            const reader = new FileReader();
+            reader.onload = (ev) => {
+                pendingFiles.push({
+                    name: file.name,
+                    size: file.size,
+                    data: String(ev.target.result).split(',')[1] || ''
+                });
+                renderFilePreview();
+            };
+            reader.onerror = () => showError(`读取文件失败：${file.name}`);
+            reader.readAsDataURL(file);
+        }
+
+        // 统一分流：图片走 pendingImage，日志文件走 pendingFiles，其他类型拒绝
+        function acceptFile(file) {
+            if (!file) return;
+            if (file.type && file.type.startsWith('image/')) {
+                acceptImageFile(file);
+            } else if (isLogFileName(file.name)) {
+                acceptLogFile(file);
+            } else {
+                showError('仅支持图片或 .log/.txt/.out/.err/.zip 文件');
+            }
+        }
 
         // ---- 对话存储（localStorage）----
         const STORAGE_KEY = 'ai_chat_conversations';
@@ -774,21 +927,11 @@
         // 新建对话
         newChatBtn.addEventListener('click', () => createNewConversation());
 
-        // 图片上传
+        // 附件上传（图片 + 日志文件）
         uploadBtn.addEventListener('click', () => imageInput.click());
 
         imageInput.addEventListener('change', (e) => {
-            const file = e.target.files[0];
-            if (!file) return;
-            if (!file.type.startsWith('image/')) { showError('请选择图片文件'); return; }
-            if (file.size > 10 * 1024 * 1024) { showError('图片不能超过 10MB'); return; }
-            const reader = new FileReader();
-            reader.onload = (ev) => {
-                pendingImage = { data: ev.target.result.split(',')[1], media_type: file.type };
-                previewImg.src = ev.target.result;
-                imagePreview.classList.add('active');
-            };
-            reader.readAsDataURL(file);
+            Array.from(e.target.files || []).forEach(acceptFile);
             imageInput.value = '';
         });
 
@@ -797,35 +940,28 @@
             imagePreview.classList.remove('active');
         });
 
-        // 拖拽上传
+        // 拖拽上传（图片与日志文件都支持，可多选）
         document.querySelector('.main').addEventListener('dragover', (e) => { e.preventDefault(); });
         document.querySelector('.main').addEventListener('drop', (e) => {
             e.preventDefault();
-            const file = e.dataTransfer.files[0];
-            if (file && file.type.startsWith('image/')) {
-                const reader = new FileReader();
-                reader.onload = (ev) => {
-                    pendingImage = { data: ev.target.result.split(',')[1], media_type: file.type };
-                    previewImg.src = ev.target.result;
-                    imagePreview.classList.add('active');
-                };
-                reader.readAsDataURL(file);
-            }
+            Array.from(e.dataTransfer.files || []).forEach(acceptFile);
         });
 
-        // 粘贴上传
+        // 粘贴上传（截图走图片，粘贴文件走日志文件）
         document.addEventListener('paste', (e) => {
+            if (!e.clipboardData) return;
             for (let item of e.clipboardData.items) {
+                if (item.kind !== 'file') continue;
+                const file = item.getAsFile();
+                if (!file) continue;
                 if (item.type.startsWith('image/')) {
                     e.preventDefault();
-                    const file = item.getAsFile();
-                    const reader = new FileReader();
-                    reader.onload = (ev) => {
-                        pendingImage = { data: ev.target.result.split(',')[1], media_type: file.type };
-                        previewImg.src = ev.target.result;
-                        imagePreview.classList.add('active');
-                    };
-                    reader.readAsDataURL(file);
+                    acceptImageFile(file);
+                    break;
+                }
+                if (isLogFileName(file.name)) {
+                    e.preventDefault();
+                    acceptLogFile(file);
                     break;
                 }
             }
@@ -862,23 +998,52 @@
             sendMessage();
         }
 
+        // 文件名要进 markdown 渲染，先转义尖括号与 & ，避免 XSS
+        function escapeHtml(s) {
+            return String(s || '')
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;');
+        }
+
         async function sendMessage() {
             const message = chatInput.value.trim();
-            if (!message && !pendingImage) return;
+            if (!message && !pendingImage && pendingFiles.length === 0) return;
 
             chatInput.disabled = true;
             sendBtn.disabled = true;
 
             const imageUrl = pendingImage ? `data:${pendingImage.media_type};base64,${pendingImage.data}` : null;
-            addMessage('user', message || '[图片]', imageUrl);
+
+            // 气泡里显示本轮带了哪些附件（图片沿用 [图片] 占位）
+            const filePlaceholder = pendingFiles.length > 0
+                ? '[日志文件: ' + pendingFiles.map(f => escapeHtml(f.name)).join('、') + ']'
+                : '';
+            const bubbleParts = [];
+            if (filePlaceholder) bubbleParts.push(filePlaceholder);
+            if (message) {
+                bubbleParts.push(message);
+            } else if (!filePlaceholder) {
+                bubbleParts.push('[图片]');
+            }
+            addMessage('user', bubbleParts.join('\n'), imageUrl);
             chatInput.value = '';
             chatInput.style.height = 'auto';
 
-            const reqBody = { message: message || '请描述这张图片', session_id: currentConvId };
+            // 没写文字时按附件类型补一句默认提问（文件优先，由后端再兜底一次）
+            let defaultQuestion = '请描述这张图片';
+            if (pendingFiles.length > 0) defaultQuestion = '请分析这个日志文件中的问题。';
+            const reqBody = { message: message || defaultQuestion, session_id: currentConvId };
             if (pendingImage) reqBody.image = { data: pendingImage.data, media_type: pendingImage.media_type };
+            if (pendingFiles.length > 0) {
+                reqBody.files = pendingFiles.map(f => ({ name: f.name, data: f.data }));
+            }
 
             pendingImage = null;
             imagePreview.classList.remove('active');
+            pendingFiles = [];
+            renderFilePreview();
 
             showTyping();
 

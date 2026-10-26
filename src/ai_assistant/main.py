@@ -33,6 +33,10 @@ from ai_assistant.core.ai_provider import DocIndexingInProgressError
 class AIAssistant:
     """AI 自动回复助手主类"""
 
+    # 附件消息无文字说明时的兜底提问。只在延迟等待窗口超时后使用——
+    # 解析阶段不要补，否则延迟判断的 `not text` 恒为假（见 _process_event）。
+    _DEFAULT_ATTACHMENT_QUESTION = "请分析这个日志文件中的问题。"
+
     def __init__(self, config_path: str = "config.yaml"):
         """
         初始化 AI 助手
@@ -363,7 +367,11 @@ class AIAssistant:
             self.webhook_server.set_feishu_adapter(feishu_adapter)
             self.webhook_server.set_event_queue(self.event_queue)
             # 注入 AI 组件用于 Web 聊天接口（仅在前端启用时实际生效）
-            self.webhook_server.set_ai_components(self.ai_provider, self.context_manager)
+            # 同时注入日志文件管理器：Web 端上传 .log/.zip 附件依赖它落地与读取，
+            # 不注入时带 files 的请求会被明确拒绝（而非静默丢附件）。
+            self.webhook_server.set_ai_components(
+                self.ai_provider, self.context_manager, self.log_file_manager
+            )
 
             # 在后台线程启动服务器（使用生产级服务器）
             server_thread = threading.Thread(
@@ -452,6 +460,14 @@ class AIAssistant:
                 _parsed_log["image_data"] = (
                     f"<image {_img.get('media_type', '?')}, ~{int(len(_b64) * 3 / 4)}B>"
                 )
+            # 日志文件同样必须脱敏（防回归）：Content 是 dataclass，默认 repr 会把
+            # data["text"] 整段打出来——用户传一份几万字的 app.log，DEBUG 级别下
+            # 整份日志原文就落进了日志文件，既违反「不得记录完整用户消息」也会刷屏。
+            _logs = _parsed_log.get("log_contents")
+            if _logs:
+                _parsed_log["log_contents"] = [
+                    c.summary() if hasattr(c, "summary") else str(c) for c in _logs
+                ]
             logger.debug("parsed message:{}", _parsed_log)
 
             session_id = parsed["chat_id"]
@@ -483,18 +499,33 @@ class AIAssistant:
             # 一起并入 content_parts（归到当前 context_key），从根上避免"写入键=session_id、
             # 读取键=context_key"不一致导致的丢图（488fac5 统一读取键后引入的回归）。
             pending_image = None
+            pending_logs = []
             with self._processing_lock:
                 popped = self._pending_lone_images.pop(session_id, None)
             if popped is not None:
                 pending_image = popped.get("image")
+                pending_logs = popped.get("log_contents") or []
 
-            # 纯图片无文字：用户很可能正在分两条发（先图后文），
-            # 立即调 AI 只能反问。这里短暂等待后续文字消息合并处理。
-            if image_data and not text and self._lone_image_wait > 0:
-                if self._defer_lone_image(session_id, image_data, message_id):
-                    # 等待期内收到后续消息，图片已被该消息取走一并处理
+            # 本条自带的日志文件附件（解析阶段已下载落地）
+            own_logs = parsed.get("log_contents") or []
+
+            # 纯附件无文字：用户几乎总是分两条发（先发截图/日志文件 → 再描述问题），
+            # 飞书客户端拖入文件即发送，根本没法把文件和文字拼成一条消息。
+            # 立即调 AI 只能反问，这里短暂等待后续文字消息合并处理。
+            if (image_data or own_logs) and not text and self._lone_image_wait > 0:
+                if self._defer_lone_attachment(
+                    session_id, image_data, own_logs, message_id
+                ):
+                    # 等待期内收到后续消息，附件已被该消息取走一并处理
                     return
-                # 等待超时仍无文字：按纯图片正常处理（image_data 仍在手，下方会加入）
+                # 等待超时仍无文字：按纯附件正常处理（image_data / own_logs 仍在手，下方会加入）
+
+            # 等待窗口已过（或未启用等待）仍无文字说明时，给日志文件补一句默认提问，
+            # 避免 text 为空导致 AI 无从下手。必须放在延迟判断之后：解析阶段就补会让
+            # 上面的 `not text` 恒为假，"先发文件后发问题"直接失效（本次修复的回归）。
+            if not text and (own_logs or pending_logs):
+                text = self._DEFAULT_ATTACHMENT_QUESTION
+                logger.info("附件消息无文字说明，使用默认提问")
 
             # 防重复：同一 session 已有请求在处理中，将消息加入上下文
             # 注意：不能无条件丢弃，否则用户"先发图、AI 处理中再发文字"时，
@@ -503,12 +534,14 @@ class AIAssistant:
                 if session_id in self._processing_sessions:
                     # 构建消息内容
                     content_parts = []
-                    # 先图后文场景：先并入暂存的纯图片，再并入当前消息自带的图/文
+                    # 先附件后文场景：先并入暂存的图片/日志文件，再并入当前消息自带的图/文
                     if pending_image is not None:
                         content_parts.append(Content(type="image", data=pending_image))
                     if image_data:
                         content_parts.append(Content(type="image", data=image_data))
-                    for _lc in parsed.get("log_contents") or []:
+                    for _lc in pending_logs:
+                        content_parts.append(_lc)
+                    for _lc in own_logs:
                         content_parts.append(_lc)
                     if text:
                         content_parts.append(Content(type="text", data=text))
@@ -562,8 +595,12 @@ class AIAssistant:
                 content_parts.append(Content(type="image", data=pending_image))
             if image_data:
                 content_parts.append(Content(type="image", data=image_data))
-            # 日志文件附件（已在解析阶段下载落地），与图片同样触发代码排查模式
-            for _lc in parsed.get("log_contents") or []:
+            # 日志文件附件（已在解析阶段下载落地），与图片同样触发代码排查模式。
+            # pending_logs 来自上一条纯文件消息的暂存（先发文件、紧接着发问题），
+            # own_logs 是本条消息自带的附件，两者都要并入。
+            for _lc in pending_logs:
+                content_parts.append(_lc)
+            for _lc in own_logs:
                 content_parts.append(_lc)
 
             # 在构建消息前，先用原始 text 检测运维模式，然后再清理 @ 提及
@@ -888,6 +925,9 @@ class AIAssistant:
                     "chat_type": message.get("chat_type", "p2p"),
                     "text": "",  # 图片消息无文本
                     "message_id": message_id,
+                    # 引用链字段必须带上，否则"引用上一轮 + 发截图"追问会退化成全新对话
+                    "parent_id": parent_id,
+                    "root_id": root_id,
                     "sender_id": sender_id,
                     "sender_name": sender_name,
                     "sender_display_name": sender_display_name,
@@ -899,10 +939,10 @@ class AIAssistant:
                 content_str = message.get("content", "{}")
                 content_data = json_mod.loads(content_str)
 
-                text, image_keys = self._parse_post_content(content_data)
+                text, image_keys, files = self._parse_post_content(content_data)
 
                 # 解析不出任何内容时，跳过 AI 调用（否则会发出空消息，触发 400）
-                if not text and not image_keys:
+                if not text and not image_keys and not files:
                     logger.error(
                         f"富文本消息解析为空，跳过 AI 调用。"
                         f"顶层字段={list(content_data.keys())}, content 预览={content_str[:200]}"
@@ -926,26 +966,86 @@ class AIAssistant:
                                 f"（不会进入代码排查模式）: image_key={image_keys[0]}"
                             )
 
-                # 图片下载失败且无文本时无内容可发，跳过
-                if not text and not image_data:
-                    logger.error("富文本消息仅含图片且下载失败，跳过 AI 调用")
+                # 下载富文本内嵌的日志文件附件（用户常"文件 + 文字说明"一起发，
+                # 飞书会打包成 post 消息，附件以 media/file 标签内嵌）
+                log_contents = []
+                # 附件未能处理时，往上下文里补一句说明，让 AI 能明确告知用户，
+                # 而不是基于"只有文字"作答（项目原则：不静默丢弃附件）
+                attachment_notice = ""
+                if files:
+                    manager = getattr(self, "log_file_manager", None)
+                    if not adapter:
+                        logger.error("富文本消息含文件但 adapter 为空，无法下载")
+                        attachment_notice = f"（用户发送了 {len(files)} 个附件，但服务端无法下载）"
+                    elif not manager or not manager.enabled:
+                        logger.info(f"日志文件处理未启用，跳过富文本中的 {len(files)} 个附件")
+                        attachment_notice = (
+                            f"（用户发送了 {len(files)} 个附件，但服务端未启用日志文件处理，无法读取）"
+                        )
+                    else:
+                        allowed_files = [
+                            item for item in files
+                            if manager.is_allowed(item.get("file_name") or "attachment")
+                        ]
+                        skipped = len(files) - len(allowed_files)
+                        if skipped:
+                            logger.info(f"富文本中跳过 {skipped} 个非日志类附件")
+                            attachment_notice = (
+                                f"（用户发送了 {skipped} 个附件，类型不在支持范围内"
+                                f"——仅支持 .log/.txt/.out/.err/.zip）"
+                            )
+                        if allowed_files:
+                            log_contents = adapter._collect_log_files(
+                                message_id, allowed_files, chat_id
+                            )
+                            if not log_contents:
+                                logger.error(
+                                    f"富文本中 {len(allowed_files)} 个日志文件处理失败，"
+                                    f"本轮将不带日志内容"
+                                )
+                                attachment_notice = (
+                                    f"（用户发送了 {len(allowed_files)} 个日志文件，"
+                                    f"但服务端读取失败）"
+                                )
+
+                # 附件读不到时把说明并进文本，让 AI 能据实告知用户
+                if attachment_notice:
+                    text = f"{text} {attachment_notice}".strip() if text else attachment_notice
+
+                # 图片下载失败且无文本、无日志文件时无内容可发，跳过
+                if not text and not image_data and not log_contents:
+                    logger.error("富文本消息的图片/文件均不可用且无文本，跳过 AI 调用")
                     return None
+
+                # 注意（防回归）：这里**不要**给无文字的附件消息补默认提问。
+                # 补了 text 就非空，_process_event 的延迟等待判断 `not text` 永远为假，
+                # "先发文件、紧接着发问题"这条主要用法会直接失效（第一条立即拿默认提问
+                # 去问 AI，第二条问题另起一轮且手里没有日志）。
+                # 默认提问统一由 _process_event 在延迟窗口超时后补（见 _DEFAULT_ATTACHMENT_QUESTION）。
 
                 logger.info(
                     f"解析富文本消息: text_len={len(text)}, images={len(image_keys)}, "
-                    f"image_ready={image_data is not None}"
+                    f"image_ready={image_data is not None}, files={len(files)}, "
+                    f"log_blocks={len(log_contents)}"
                 )
 
-                return {
+                result = {
                     "chat_id": chat_id,
                     "chat_type": message.get("chat_type", "p2p"),
                     "text": text,
                     "message_id": message_id,
+                    # 引用链字段必须带上：缺了这两个，带截图/日志的引用追问会被
+                    # 下游判成「无引用→全新对话」，整条引用链历史全丢（本次修复的 bug）
+                    "parent_id": parent_id,
+                    "root_id": root_id,
                     "sender_id": sender_id,
                     "sender_name": sender_name,
                     "sender_display_name": sender_display_name,
                     "image_data": image_data  # 可能为 None
                 }
+                if log_contents:
+                    result["log_contents"] = log_contents
+                return result
 
             # 处理文件消息（用户上传日志 .log/.txt 或 zip 日志包）
             elif message_type == "file":
@@ -958,27 +1058,41 @@ class AIAssistant:
                     logger.warning("文件消息但无 file_key 或 adapter")
                     return None
 
+                # 附件读不到时不静默沉默：群聊只接收 @机器人 的消息、纯文件消息到不了
+                # 这里，所以走到此处基本都是私聊——用户明确在跟机器人说话，一声不响
+                # 会让人以为服务挂了。给 AI 一句说明，让它据实回复。
                 manager = getattr(self, "log_file_manager", None)
+                notice = ""
+                log_contents = []
                 if not manager or not manager.enabled:
                     logger.info(f"日志文件处理未启用，跳过文件消息: {file_name}")
-                    return None
-                if not manager.is_allowed(file_name):
+                    notice = "（用户发送了一个附件，但服务端未启用日志文件处理，无法读取）"
+                elif not manager.is_allowed(file_name):
                     logger.info(f"跳过非日志类附件: {file_name}")
-                    return None
+                    notice = (
+                        "（用户发送了一个附件，类型不在支持范围内"
+                        "——仅支持 .log/.txt/.out/.err/.zip）"
+                    )
+                else:
+                    log_contents = adapter._collect_log_files(
+                        message_id, [{"file_key": file_key, "file_name": file_name}], chat_id
+                    )
+                    if not log_contents:
+                        logger.error(f"日志文件处理失败: {file_name}")
+                        notice = "（用户发送了一个日志文件，但服务端读取失败）"
 
-                log_contents = adapter._collect_log_files(
-                    message_id, [{"file_key": file_key, "file_name": file_name}], chat_id
+                logger.info(
+                    f"解析文件消息: name={file_name}, 内容块={len(log_contents)}, "
+                    f"notice={'有' if notice else '无'}"
                 )
-                if not log_contents:
-                    logger.error(f"日志文件处理失败，跳过: {file_name}")
-                    return None
-
-                logger.info(f"解析文件消息: name={file_name}, 内容块={len(log_contents)}")
-                return {
+                result = {
                     "chat_id": chat_id,
                     "chat_type": message.get("chat_type", "p2p"),
-                    # 文件消息通常无文字说明，给一句默认提问，避免 text 为空
-                    "text": "请分析这个日志文件中的问题。",
+                    # 附件可读时 text 保持空：补默认提问会让延迟等待的 `not text`
+                    # 判断失效，"先发文件后发问题"就走不通。默认提问在延迟窗口
+                    # 超时后由主流程统一补上。
+                    # 附件读不到时带上 notice，让 AI 能据实告知用户而不是沉默。
+                    "text": notice,
                     "message_id": message_id,
                     "parent_id": parent_id,
                     "root_id": root_id,
@@ -986,8 +1100,10 @@ class AIAssistant:
                     "sender_name": sender_name,
                     "sender_display_name": sender_display_name,
                     "image_data": None,
-                    "log_contents": log_contents,
                 }
+                if log_contents:
+                    result["log_contents"] = log_contents
+                return result
 
             else:
                 content_preview = str(message.get("content", ""))[:200]
@@ -1000,61 +1116,89 @@ class AIAssistant:
             logger.error(f"Failed to parse feishu event: {e}")
             return None
 
-    def _defer_lone_image(self, session_id: str, image_data: dict, message_id: str) -> bool:
+    def _defer_lone_attachment(
+        self,
+        session_id: str,
+        image_data: Optional[dict],
+        log_contents: Optional[List[Content]],
+        message_id: str,
+    ) -> bool:
         """
-        纯图片消息延迟处理：等待用户紧随其后发送的文字描述
+        纯附件消息延迟处理：等待用户紧随其后发送的文字描述
 
-        用户经常分两条发送："先发日志截图 → 再发问题描述"。
-        如果收到图片就立即调用 AI，AI 手里没有任何问题描述，只能反问，
-        既慢又答不到点上。这里把图片本体暂存到 _pending_lone_images，等待一个短窗口：
-        - 窗口内收到了文字消息 → 主流程 pop 出暂存图片，随那条文字消息一并注入
-          content_parts（归到当前 context_key，_should_use_agentic_mode 因图片进入排查模式）
-        - 窗口内没有文字 → 返回 False，调用方用手里的 image_data 按纯图片正常处理
+        用户几乎总是分两条发送："先发日志截图/日志文件 → 再描述问题"。
+        图片可以和文字拼成一条消息，但**飞书客户端拖入文件即刻发送**，
+        文件根本没法和文字凑成一条，所以"先文件后文字"是文件场景的主要用法。
+        如果收到附件就立即调用 AI，AI 手里没有任何问题描述，只能反问，
+        既慢又答不到点上。这里把附件暂存到 _pending_lone_images，等待一个短窗口：
+        - 窗口内收到了文字消息 → 主流程 pop 出暂存附件，随那条文字消息一并注入
+          content_parts（归到当前 context_key，_should_use_agentic_mode 因附件进入排查模式）
+        - 窗口内没有文字 → 返回 False，调用方用手里的附件按纯附件正常处理
 
-        注意（防回归）：不要在这里把图片写进 context_manager。图片与文字是两条独立
+        注意（防回归）：不要在这里把附件写进 context_manager。附件与文字是两条独立
         飞书消息、context_key 不同，若在此用 session_id 写上下文，会与主流程用 context_key
-        读取上下文不一致，导致图片读不到（历史回归 bug）。暂存 image 本体、由文字消息
+        读取上下文不一致，导致附件读不到（历史回归 bug）。暂存附件本体、由文字消息
         取走并入是唯一稳定路径。
 
         Args:
-            session_id: 会话 ID（群 chat_id，纯图片与后续文字唯一稳定的共享桥）
-            image_data: 已下载的图片数据（dict: {"data": base64, "media_type": ...}）
+            session_id: 会话 ID（群 chat_id，纯附件与后续文字唯一稳定的共享桥）
+            image_data: 已下载的图片数据（dict: {"data": base64, "media_type": ...}），可为 None
+            log_contents: 已落地的日志文件内容块列表，可为空
             message_id: 飞书消息 ID
 
         Returns:
             True 表示已交给后续文字消息处理，本次应直接返回；
-            False 表示等待超时，调用方应继续按纯图片处理
+            False 表示等待超时，调用方应继续按纯附件处理
         """
         import time as time_mod
 
+        logs = list(log_contents or [])
         arrive_ts = time_mod.time()
-        # 暂存图片本体（不写上下文）：值为 dict，含图片与到达时间戳。
+        # 暂存附件本体（不写上下文）：值为 dict，含图片、日志文件与到达时间戳。
         # 等待循环靠比对 ts 判断是否被后续消息接管。
+        #
+        # 必须**合并**而不是覆盖赋值（防回归）：飞书客户端拖入多个文件会发出
+        # 多条独立的 file 消息，覆盖会让先到的附件被静默丢弃——两条消息的等待
+        # 线程都会因为 ts 变化而认为"已被接管"直接返回，谁都不去处理第一个文件，
+        # 而"拖多个日志文件再提问"正是日志排查的典型用法。
         with self._processing_lock:
-            self._pending_lone_images[session_id] = {"image": image_data, "ts": arrive_ts}
+            existing = self._pending_lone_images.get(session_id)
+            if existing:
+                logs = (existing.get("log_contents") or []) + logs
+                image_data = image_data or existing.get("image")
+            self._pending_lone_images[session_id] = {
+                "image": image_data,
+                "log_contents": logs,
+                "ts": arrive_ts,
+            }
 
+        kinds = []
+        if image_data:
+            kinds.append("图片")
+        if logs:
+            kinds.append(f"日志文件x{len(logs)}")
         logger.info(
-            f"收到纯图片消息，图片已暂存，等待 {self._lone_image_wait}s 看是否有后续文字描述: "
-            f"session={session_id}"
+            f"收到纯附件消息（{'+'.join(kinds)}），已暂存，"
+            f"等待 {self._lone_image_wait}s 看是否有后续文字描述: session={session_id}"
         )
 
-        # 轮询等待：一旦有新消息进入该 session，标记会被 pop 走或被新图片覆盖
+        # 轮询等待：一旦有新消息进入该 session，标记会被 pop 走或被新附件覆盖
         deadline = arrive_ts + self._lone_image_wait
         while time_mod.time() < deadline:
             time_mod.sleep(0.3)
             with self._processing_lock:
                 current = self._pending_lone_images.get(session_id)
-            # 标记被后续消息取走(None)或被新图片更新(ts 变化)，说明已有新消息接管
+            # 标记被后续消息取走(None)或被新附件更新(ts 变化)，说明已有新消息接管
             if current is None or current.get("ts") != arrive_ts:
-                logger.info(f"等待期内收到后续消息，纯图片交由后续消息一并处理: session={session_id}")
+                logger.info(f"等待期内收到后续消息，纯附件交由后续消息一并处理: session={session_id}")
                 return True
 
-        # 超时：清除标记，按纯图片继续处理（image_data 仍在调用方手中）
+        # 超时：清除标记，按纯附件继续处理（附件仍在调用方手中）
         with self._processing_lock:
             current = self._pending_lone_images.get(session_id)
             if current is not None and current.get("ts") == arrive_ts:
                 del self._pending_lone_images[session_id]
-        logger.info(f"等待超时，未收到文字描述，按纯图片处理（AI 将主动询问）: session={session_id}")
+        logger.info(f"等待超时，未收到文字描述，按纯附件处理（AI 将主动询问）: session={session_id}")
         return False
 
     @staticmethod
@@ -1134,18 +1278,24 @@ class AIAssistant:
     @staticmethod
     def _parse_post_content(content_data: dict) -> tuple:
         """
-        解析飞书富文本（post）消息内容，提取文字和图片 key
+        解析飞书富文本（post）消息内容，提取文字、图片 key 和文件附件
 
         兼容多种结构差异：
         - 语言包裹：{"zh_cn": {"content": [...]}}、{"en_us": ...}，或私有化部署下无语言包裹
         - 文字标签：text / md / a（链接）
+        - 图片标签：img
+        - 文件标签：media / file（飞书对富文本内嵌附件两种 tag 都用过）
         - 嵌套层级：content 可能是二维数组，也可能出现更深的嵌套
+
+        注意（防回归）：早期版本只返回 (text, image_keys)，file/media 标签完全没解析，
+        导致用户"文件 + 文字说明"一起发（飞书会打包成 post 消息）时日志附件被静默丢弃，
+        机器人读不到日志内容。新增标签时务必同步 feishu_bot._parse_message_content。
 
         Args:
             content_data: message.content 反序列化后的字典
 
         Returns:
-            (text, image_keys) 元组
+            (text, image_keys, files) 三元组；files 为 [{"file_key","file_name"}]
         """
         import re
 
@@ -1169,13 +1319,16 @@ class AIAssistant:
                         break
 
         if post_content is None:
-            return "", []
+            return "", [], []
 
         text_parts = []
         image_keys = []
+        files = []
 
         # 文字类标签：text 用 text 字段，a（超链接）取显示文字，md 取原始 markdown
         text_tags = {"text", "md", "a"}
+        # 文件类标签：飞书富文本内嵌附件在不同版本/场景下 tag 为 media 或 file
+        file_tags = {"media", "file"}
 
         def walk(node):
             """递归遍历，兼容任意嵌套深度的 content 结构"""
@@ -1195,6 +1348,13 @@ class AIAssistant:
                 img_key = node.get("image_key", "")
                 if img_key:
                     image_keys.append(img_key)
+            elif tag in file_tags:
+                file_key = node.get("file_key", "")
+                if file_key:
+                    files.append({
+                        "file_key": file_key,
+                        "file_name": node.get("file_name") or "attachment",
+                    })
 
             # at 标签不取文字（避免把 @机器人 名字混入问题），但继续递归其子节点
             children = node.get("content")
@@ -1210,7 +1370,7 @@ class AIAssistant:
         # 去掉飞书 @ 占位符（如 @_user_1），避免污染检索关键词
         text = re.sub(r"@_user_\d+\s*", "", text).strip()
 
-        return text, image_keys
+        return text, image_keys, files
 
     def _send_feishu_reply(
         self,
