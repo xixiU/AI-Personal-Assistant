@@ -20,9 +20,19 @@ from ai_assistant.core.ai_provider import (
     classify_api_error,
     friendly_api_error_message,
     _KEYWORD_EXTRACTION_SYSTEM_PROMPT,
+    _KEYWORD_EXTRACTION_PREFILL,
     _parse_keyword_extraction_response,
     _PROMPT_SAFETY_SYSTEM_PROMPT,
+    _PROMPT_SAFETY_PREFILL,
     _parse_prompt_safety_response,
+    _DOC_FILTER_SYSTEM_PROMPT,
+    _DOC_FILTER_PREFILL,
+    build_keyword_extraction_messages,
+    build_prompt_safety_messages,
+    build_doc_filter_messages,
+    parse_doc_index_list,
+    log_subcall_degraded,
+    _join_prefill,
 )
 from ai_assistant.core.models import Message
 
@@ -122,18 +132,79 @@ class AnthropicProvider(AIProvider):
         self.operations_enabled = enabled
         logger.info(f"运维工具已{'启用' if enabled else '禁用'}")
 
-    def extract_keywords(self, query_text: str) -> KeywordExtractionResult:
+    def _call_subcall(
+        self,
+        system_prompt: str,
+        messages: List[Dict[str, Any]],
+        max_tokens: int,
+        prefill: str,
+        subcall: str,
+    ) -> str:
         """
-        使用 Claude 从用户查询中提取搜索关键词 + 判断是否通用技术问题
+        执行一次"AI 子调用"（关键词提取 / 标题过滤 / 安全判定）并返回完整输出文本。
+
+        messages 末尾是 assistant prefill（强制输出格式起手）。prefill 内容不会出现在
+        响应里，这里拼回去再交给解析器。部分 OpenAI 兼容网关不接受"以 assistant 结尾"
+        的消息数组，因此首次失败时去掉 prefill 重试一次，避免整个子调用静默降级。
+
+        temperature=0：结构化抽取任务不需要随机性。
+
+        Args:
+            system_prompt: system prompt（钉死角色与输出契约）
+            messages: 由 build_*_messages 构造的消息列表（末项为 prefill）
+            max_tokens: 输出上限（结构化输出不需要大值，顺手掐断长篇解释）
+            prefill: assistant 预填文本
+            subcall: 子调用标识（仅用于日志）
+
+        Returns:
+            完整输出文本（含 prefill 前缀）
+
+        Raises:
+            Exception: 两次调用均失败时向上抛出，由各子调用自行降级
         """
         try:
             response = self.client.messages.create(
                 model=self.model,
-                max_tokens=150,
-                messages=[{"role": "user", "content": query_text}],
-                system=_KEYWORD_EXTRACTION_SYSTEM_PROMPT,
+                max_tokens=max_tokens,
+                temperature=0,
+                messages=messages,
+                system=system_prompt,
             )
-            text = response.content[0].text.strip()
+            return _join_prefill(prefill, response.content[0].text)
+        except Exception as e:
+            if not prefill or len(messages) < 2:
+                raise
+            logger.debug(f"子调用 prefill 方式失败，去掉 prefill 重试一次: subcall={subcall}, error={e}")
+            response = self.client.messages.create(
+                model=self.model,
+                max_tokens=max_tokens,
+                temperature=0,
+                messages=messages[:-1],
+                system=system_prompt,
+            )
+            return response.content[0].text
+
+    def extract_keywords(self, query_text: str) -> KeywordExtractionResult:
+        """
+        使用 Claude 从用户查询中提取搜索关键词 + 判断是否通用技术问题
+
+        用户原话用 XML 定界标签包成"待处理数据"（build_keyword_extraction_messages），
+        并用 assistant prefill 预填 JSON 起手，防止模型把用户的提问当成指令转去作答。
+
+        Args:
+            query_text: 用户查询文本
+
+        Returns:
+            KeywordExtractionResult（调用或解析失败时为保守降级值）
+        """
+        try:
+            text = self._call_subcall(
+                system_prompt=_KEYWORD_EXTRACTION_SYSTEM_PROMPT,
+                messages=build_keyword_extraction_messages(query_text),
+                max_tokens=200,
+                prefill=_KEYWORD_EXTRACTION_PREFILL,
+                subcall="keyword_extraction",
+            )
             result = _parse_keyword_extraction_response(text, query_text[:50])
             logger.info(
                 f"Claude 关键词提取: keywords={result.keywords}, "
@@ -141,22 +212,36 @@ class AnthropicProvider(AIProvider):
             )
             return result
         except Exception as e:
-            logger.warning(f"Claude 关键词提取失败，返回降级值: {e}")
+            log_subcall_degraded("keyword_extraction", f"API 调用失败，返回降级值: {e}", "", query_text[:50])
             return KeywordExtractionResult(keywords=[], is_generic_tech=False)
 
     def classify_prompt_safety(self, query_text: str) -> PromptSafetyResult:
         """
         使用 Claude 判断用户输入是否为提示词攻击 / 敏感信息窃取。
+
+        待判定文本用 XML 定界标签包成"待审计素材"，配合 assistant prefill 预填 JSON
+        起手，防止模型把素材当成提问转去作答（真实故障：模型回了"你还没贴线程信息呢"，
+        导致安全判定 JSON 解析失败、全量 fail-open）。
+
         判定失败时 fail-open（返回放行值），避免误伤正常用户。
+
+        Args:
+            query_text: 用户查询文本
+
+        Returns:
+            PromptSafetyResult（调用或解析失败时 is_attack=False）
         """
         try:
-            response = self.client.messages.create(
-                model=self.model,
-                max_tokens=150,
-                messages=[{"role": "user", "content": query_text}],
-                system=_PROMPT_SAFETY_SYSTEM_PROMPT,
+            text = self._call_subcall(
+                system_prompt=_PROMPT_SAFETY_SYSTEM_PROMPT,
+                messages=build_prompt_safety_messages(query_text),
+                # 300 而非 200：判定为攻击时 reason 偏长，撞上限会让 JSON 截断、
+                # 解析失败后 fail-open 放行真实攻击。system prompt 已限 reason 30 字，
+                # 这里留出余量做第二道保险（截断仍可由 _close_truncated_json 兜底）。
+                max_tokens=300,
+                prefill=_PROMPT_SAFETY_PREFILL,
+                subcall="prompt_safety",
             )
-            text = response.content[0].text.strip()
             result = _parse_prompt_safety_response(text, query_text[:50])
             if result.is_attack:
                 logger.info(
@@ -165,7 +250,8 @@ class AnthropicProvider(AIProvider):
                 )
             return result
         except Exception as e:
-            logger.warning(f"Claude 安全判定失败，放行本次请求: {e}")
+            # fail-open：判定链路异常不阻断正常用户
+            log_subcall_degraded("prompt_safety", f"API 调用失败，放行本次请求: {e}", "", query_text[:50])
             return PromptSafetyResult(is_attack=False, attack_type="none", reason="")
 
     @staticmethod
@@ -1690,41 +1776,41 @@ class AnthropicProvider(AIProvider):
         return "\n".join(lines)
 
     def filter_docs_by_relevance(self, query: str, candidates: List[Dict[str, Any]], max_docs: int = 3) -> List[int]:
-        """用 Claude 判断候选文档标题与 query 的相关性，返回 0-based 下标列表"""
+        """
+        用 Claude 判断候选文档标题与 query 的相关性，返回 0-based 下标列表。
+
+        prompt 结构见 build_doc_filter_messages：候选列表在前、用户查询用 XML 定界标签
+        包成"待匹配素材"、任务指令复述在后，再用 assistant prefill 强制从编号起手。
+        否则模型会把用户查询当成提问，转而索要日志内容并拒绝给编号（真实故障，
+        导致 RAG 退化成纯融合排序、注入一堆无关文档）。
+
+        Args:
+            query: 用户查询文本
+            candidates: 候选文档列表，每项需有 "path" 或 "title" 字段
+            max_docs: 最多返回的文档数
+
+        Returns:
+            选中文档的 0-based 下标列表（按相关性排序，失败时为空列表）
+        """
         if not candidates:
             return []
         try:
-            candidates_lines = []
-            for i, doc in enumerate(candidates, 1):
-                path = doc.get("path", doc.get("title", ""))
-                candidates_lines.append(f"{i}. {path}")
-            candidates_text = "\n".join(candidates_lines)
-
-            prompt = f"""用户查询: {query}
-
-以下是候选文档列表（含完整父目录路径）：
-{candidates_text}
-
-请判断哪些文档标题与用户查询相关，返回相关文档的编号，用逗号分隔。只输出编号，不要其他内容。"""
-
-            response = self.client.messages.create(
-                model=self.model,
-                max_tokens=100,
-                messages=[{"role": "user", "content": prompt}],
+            text = self._call_subcall(
+                system_prompt=_DOC_FILTER_SYSTEM_PROMPT,
+                messages=build_doc_filter_messages(query, candidates),
+                max_tokens=120,
+                prefill=_DOC_FILTER_PREFILL,
+                subcall="doc_title_filter",
             )
-            text = response.content[0].text.strip()
-            logger.info(f"Claude 标题过滤输出: {text}")
+            logger.info(f"Claude 标题过滤输出: {text.strip()[:200]}")
 
-            selected_indices = []
-            for part in text.replace('，', ',').split(','):
-                try:
-                    idx = int(part.strip())
-                    if 1 <= idx <= len(candidates):
-                        selected_indices.append(idx - 1)  # 转为 0-based
-                except ValueError:
-                    continue
-            return selected_indices[:max_docs]
+            selected_indices = parse_doc_index_list(text, len(candidates), max_docs)
+            if not selected_indices:
+                log_subcall_degraded(
+                    "doc_title_filter", "未能从输出中解析出有效文档编号", text, query[:50]
+                )
+            return selected_indices
         except Exception as e:
-            logger.warning(f"Claude 标题过滤失败: {e}")
+            log_subcall_degraded("doc_title_filter", f"API 调用失败: {e}", "", query[:50])
             return []
 
