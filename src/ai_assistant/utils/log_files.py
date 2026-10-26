@@ -30,24 +30,102 @@ _DEFAULT_ALLOWED_EXT = [".log", ".txt", ".out", ".err", ".zip"]
 _ZIP_MAX_ENTRIES = 200
 _ZIP_MAX_TOTAL_BYTES = 200 * 1024 * 1024  # 解压后总量上限 200MB，防解压炸弹
 
-# 文件名清洗：只保留常见安全字符，避免路径穿越与命令注入风险
-_SAFE_NAME_RE = re.compile(r"[^A-Za-z0-9._\-一-龥]")
+# 文件名清洗改用黑名单：原先的白名单 [^A-Za-z0-9._\-一-龥] 只覆盖 CJK 统一汉字区
+# （U+4E00-U+9FA5），平假名/片假名、西里尔、谚文乃至 U+9FA6 之后的汉字全被替换成
+# 下划线，再被 strip("._") 连带吃掉分隔点，导致 ログ.log → "log"：扩展名退化成名字
+# 主体，is_allowed 判定为空后缀而拒收合法日志。枚举 Unicode 区段是打不完的地鼠，
+# 因此只剔除真正危险的字符，其余 Unicode 一律保留。
+#
+# 黑名单内容：ASCII 控制字符与 DEL（文件名里不可见，易被用来伪装）、路径分隔符
+# / \、Windows 保留字符 < > : " | ? *（其中 : 同时是 NTFS 数据流与盘符分隔符）。
+_UNSAFE_NAME_RE = re.compile(r'[\x00-\x1f\x7f<>:"/\\|?*]')
+
+# 路径分隔符：os.path.basename 只认当前平台的分隔符，Linux 上取不出
+# "..\\..\\windows\\cfg" 的主体，必须两种分隔符都切。
+_PATH_SEP_RE = re.compile(r"[/\\]")
+
+# 合法扩展名形态：点 + 1~16 位字母数字。更复杂的形态（含横线、下划线、多段）
+# 一律当作名字主体的一部分，避免把 "a.b-c_1" 这类会话 ID 误切成扩展名。
+_EXT_RE = re.compile(r"^\.[A-Za-z0-9]{1,16}$")
+
+# 首尾一律剔除的字符：点与空格在 Windows 上会被静默去掉，留着会让写入的文件名
+# 与磁盘上的实际名字不一致；下划线是清洗的产物，留在首尾没有意义。
+_STRIP_CHARS = " ._"
+
+# Windows 保留设备名：字符过滤完全挡不住它们，必须整名比对。带任意扩展名同样保留
+# （CON.log 仍指向设备），因此只比对名字主体。
+_WINDOWS_RESERVED = frozenset(
+    ["CON", "PRN", "AUX", "NUL"]
+    + [f"COM{i}" for i in range(1, 10)]
+    + [f"LPT{i}" for i in range(1, 10)]
+)
+
+# 文件名总长上限（保持原有行为）
+_MAX_NAME_LEN = 120
+
+
+def split_name_ext(name: str) -> Tuple[str, str]:
+    """
+    从原始文件名中切出（名字主体, 扩展名），扩展名判定不受主体净化影响。
+
+    先剥目录与 NTFS 数据流后缀，再切扩展名。这样即使主体被整体改写，扩展名也
+    原样保留——这是 ログ.log 被误拒的直接成因（主体变下划线后扩展名被 strip 吞掉）。
+
+    Args:
+        name: 原始文件名（可能带路径、盘符或 ":stream" 后缀）
+
+    Returns:
+        (名字主体, 扩展名)；扩展名含前导点且形态不合法时返回空串
+    """
+    # 两种分隔符都切，取最后一段，挡住 ../../etc/passwd 与 ..\..\windows\cfg
+    base = _PATH_SEP_RE.split(name or "")[-1]
+    # NTFS 数据流 / 盘符：在冒号处截断而不是替换。替换成下划线会把
+    # "app.log:evil.exe" 变成 "app.log_evil.exe"，扩展名反而变成 .exe。
+    # 取冒号前半段的代价：盘符相对路径 "C:a.log"（无分隔符）会被截成 "C"，
+    # 进而因无扩展名被 is_allowed 拒收。这是有意的取舍——浏览器 file input
+    # 只会给出裸文件名，带盘符的形态必然带分隔符（C:\x 或 C:/x）而被上面切掉；
+    # 反过来若把单字母当盘符跳过，"a:evil.exe" 就能洗成 "evil.exe"，是 fail-open。
+    base = base.split(":", 1)[0]
+
+    stem, ext = os.path.splitext(base)
+    if not _EXT_RE.match(ext):
+        # 形态不合法（含横线、过长、或根本没有点）时整体当主体
+        return base, ""
+    return stem, ext
 
 
 def sanitize_filename(name: str, fallback: str = "attachment") -> str:
     """
-    清洗文件名：去掉目录分隔符与特殊字符，仅保留字母数字中文点横线下划线。
+    清洗文件名：剔除危险字符并规避保留设备名，保留任意语言的可读名字。
+
+    与旧实现的差别：不再用字符白名单，日文假名、西里尔、谚文等不会被替换成
+    下划线；扩展名在净化主体之前切出，主体被改写也不影响后缀识别。
 
     Args:
         name: 原始文件名
-        fallback: 清洗后为空时使用的兜底名
+        fallback: 清洗后主体为空时使用的兜底名
 
     Returns:
-        安全的文件名（不含路径分隔符）
+        安全的文件名（不含路径分隔符与控制字符）
     """
-    base = os.path.basename(name or "")
-    cleaned = _SAFE_NAME_RE.sub("_", base).strip("._") or fallback
-    return cleaned[:120]
+    stem, ext = split_name_ext(name)
+    cleaned = _UNSAFE_NAME_RE.sub("_", stem).strip(_STRIP_CHARS)
+
+    if not cleaned:
+        if not ext:
+            # 整个名字都没救（空串、纯分隔符、纯非法字符）时原样用兜底名，
+            # 保持 sanitize_filename("", fallback="attachment") == "attachment"
+            return fallback[:_MAX_NAME_LEN]
+        # 主体没了但扩展名合法：借用兜底名的主体，保住后缀
+        cleaned = _UNSAFE_NAME_RE.sub("_", split_name_ext(fallback)[0]).strip(_STRIP_CHARS)
+        cleaned = cleaned or "attachment"
+
+    # 保留设备名加前缀规避（在 strip 之后做，否则前缀会被当首部下划线剥掉）
+    if cleaned.upper() in _WINDOWS_RESERVED:
+        cleaned = f"_{cleaned}"
+
+    # 截断只动主体，扩展名必须完整保留，否则后续 is_allowed 判定会失效
+    return cleaned[: max(1, _MAX_NAME_LEN - len(ext))] + ext
 
 
 class LogFileManager:
@@ -96,9 +174,14 @@ class LogFileManager:
     # ============ 扩展名与大小校验 ============
 
     def is_allowed(self, file_name: str) -> bool:
-        """判断扩展名是否在白名单内"""
-        ext = os.path.splitext(file_name or "")[1].lower()
-        return ext in self.allowed_ext
+        """
+        判断扩展名是否在白名单内。
+
+        用 split_name_ext 而非 os.path.splitext：后者对被净化过的名字会取错后缀
+        （"log" 取不到 ".log"），且不剥 NTFS 数据流后缀。调用方既可以传原始名
+        也可以传清洗后的名字，判定结果一致。
+        """
+        return split_name_ext(file_name or "")[1].lower() in self.allowed_ext
 
     # ============ 落地 ============
 

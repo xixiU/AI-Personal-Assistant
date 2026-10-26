@@ -7,6 +7,10 @@ Web 端日志文件上传的安全加固测试
 2. session_id 格式白名单：它是落地子目录名，路径穿越虽已由 sanitize_filename 挡住，
    但不限制格式就能在落地目录下无限创建子目录。
 3. MAX_CONTENT_LENGTH：不设上限时 request.get_json() 会把整个 body 读进内存。
+4. 文件名清洗必须保留非 ASCII：旧实现的字符白名单只覆盖 CJK 统一汉字区，日文
+   假名/西里尔/谚文被替换成下划线后，strip("._") 连带吃掉分隔点，"ログ.log"
+   变成 "log"，扩展名退化导致合法日志被 400 拒收。放宽字符集的同时，路径穿越、
+   NTFS 数据流、Windows 保留设备名这些安全属性一条都不能退化。
 """
 import os
 import shutil
@@ -20,7 +24,7 @@ from ai_assistant.webhook_server import (
     _MAX_CONTENT_LENGTH,
     _SESSION_ID_RE,
 )
-from ai_assistant.utils.log_files import LogFileManager
+from ai_assistant.utils.log_files import LogFileManager, sanitize_filename
 
 
 @pytest.fixture
@@ -142,6 +146,162 @@ def test_valid_session_ids(sid):
 ])
 def test_invalid_session_ids(sid):
     assert not _SESSION_ID_RE.match(sid)
+
+
+# ============ 文件名清洗：非 ASCII 不得被拒收 ============
+#
+# 回归背景：旧实现用字符白名单 [^A-Za-z0-9._\-一-龥]，只覆盖 CJK 统一汉字区
+# （U+4E00-U+9FA5）。日文假名、西里尔、谚文被整体替换成下划线后，紧跟的
+# strip("._") 会把下划线连同分隔点一起剥掉，于是 "ログ.log" 变成 "log"——
+# 扩展名退化成名字主体，is_allowed 取到空后缀，合法日志被 400 拒收。
+# 两个缺陷叠加：区段不全决定哪些语言受害，strip 跨点决定后果是拒收而非改名。
+
+@pytest.mark.parametrize("raw, expect_stem", [
+    ("ログ.log", "ログ"),          # 片假名 U+30ED U+30B0
+    ("лог.log", "лог"),           # 西里尔 U+043B U+043E U+0433
+    ("로그.log", "로그"),          # 谚文 U+B85C U+ADF8
+    ("日志.log", "日志"),          # 中文（旧实现唯一能过的非 ASCII）
+    ("龦.log", "龦"),             # U+9FA6，旧白名单上界 U+9FA5 之外的汉字
+    ("app.log", "app"),           # 纯 ASCII
+])
+def test_sanitize_preserves_non_ascii_names_and_ext(raw, expect_stem):
+    """各语言文件名的主体与扩展名都必须原样保留"""
+    assert sanitize_filename(raw, fallback="attachment.log") == f"{expect_stem}.log"
+
+
+@pytest.mark.parametrize("raw", [
+    "ログ.log", "лог.log", "로그.log", "日志.log", "龦.log", "app.log",
+])
+def test_non_ascii_names_pass_extension_whitelist(raw):
+    """清洗后的名字必须仍能通过扩展名白名单——这是原 bug 的直接表现"""
+    manager = LogFileManager(enabled=False, base_dir="/tmp/unused")
+    assert manager.is_allowed(sanitize_filename(raw, fallback="attachment.log"))
+
+
+def test_non_ascii_upload_is_accepted_end_to_end(server_with_manager):
+    """端到端：日文名日志文件必须被接收并落地，而不是返回 400"""
+    srv, _manager, tmp = server_with_manager
+
+    contents, error = srv._collect_web_log_files("sess1", [
+        {"name": "ログ.log", "data": _b64("ERROR 障害発生")},
+    ])
+
+    assert error is None, f"合法的日文名日志被拒收: {error}"
+    assert len(contents) == 1
+    assert contents[0].data["name"] == "ログ.log"
+    assert _count_files(tmp) == 1
+
+
+# ============ 文件名清洗：扩展名判定独立于主体净化 ============
+
+def test_extension_survives_full_stem_rewrite():
+    """主体被整体改写时扩展名仍须保留（原 bug 的核心机制）"""
+    # 控制字符会被替换成下划线，但 .log 不能跟着消失
+    assert sanitize_filename("\x01\x02.log", fallback="attachment.log").endswith(".log")
+
+
+def test_split_name_ext_independent_of_stem():
+    """split_name_ext 对主体不做任何净化，只负责切分"""
+    # 延迟导入：该辅助函数是本次修复新增的。放在模块顶层 import 会让旧实现下
+    # 整个文件收集失败（ImportError），把其余行为断言的红/绿信号一起掩盖掉。
+    from ai_assistant.utils.log_files import split_name_ext
+
+    assert split_name_ext("ログ.log") == ("ログ", ".log")
+    assert split_name_ext("logfile") == ("logfile", "")
+    assert split_name_ext("a.log.txt") == ("a.log", ".txt")
+
+
+def test_double_extension_uses_last_segment():
+    """双扩展名按最后一段判定，a.log.txt 的后缀是 .txt"""
+    manager = LogFileManager(enabled=False, base_dir="/tmp/unused")
+    assert sanitize_filename("a.log.txt", fallback="attachment.log") == "a.log.txt"
+    assert manager.is_allowed("a.log.txt")
+    # .exe 结尾不得因为中间有 .log 就被放过
+    assert not manager.is_allowed("a.log.exe")
+
+
+def test_no_extension_still_rejected():
+    """无扩展名必须仍被白名单拒绝——修复不能放宽扩展名校验"""
+    manager = LogFileManager(enabled=False, base_dir="/tmp/unused")
+    assert not manager.is_allowed(sanitize_filename("logfile", fallback="attachment.log"))
+    assert not manager.is_allowed("noext")
+
+
+# ============ 文件名清洗：安全属性不得因放宽字符集而退化 ============
+
+@pytest.mark.parametrize("raw", [
+    "../../etc/passwd.log",
+    r"..\..\windows\system32\cfg.log",
+    "/absolute/path/app.log",
+    "C:/tmp/app.log",
+])
+def test_sanitize_strips_path_traversal(raw):
+    """黑名单放宽了字符集，但路径穿越必须照旧挡住"""
+    safe = sanitize_filename(raw, fallback="attachment.log")
+    assert "/" not in safe and "\\" not in safe
+    assert ".." not in safe
+    assert not os.path.isabs(safe)
+
+
+@pytest.mark.parametrize("raw", [
+    "CON.log", "con.log", "NUL.txt", "prn.log", "AUX.log", "COM1.log", "lpt9.txt",
+])
+def test_windows_reserved_names_are_escaped(raw):
+    """Windows 保留设备名字符过滤挡不住，必须整名比对后加前缀规避"""
+    safe = sanitize_filename(raw, fallback="attachment.log")
+    stem = safe.rsplit(".", 1)[0]
+    assert stem.upper() not in {
+        "CON", "PRN", "AUX", "NUL", "COM1", "LPT9",
+    }, f"保留设备名未被规避: {safe}"
+    # 规避后扩展名仍须完整，否则文件会被拒收
+    assert safe.endswith(raw[raw.rindex("."):])
+
+
+def test_ntfs_stream_suffix_is_dropped():
+    """NTFS 数据流后缀必须被截断，且不得把 .exe 洗成合法扩展名"""
+    manager = LogFileManager(enabled=False, base_dir="/tmp/unused")
+    safe = sanitize_filename("app.log:evil.exe", fallback="attachment.log")
+    assert ":" not in safe
+    assert safe == "app.log"
+    assert manager.is_allowed(safe)
+    # 冒号前是非法扩展名时不得被洗成合法的
+    assert not manager.is_allowed(sanitize_filename("a:evil.exe", fallback="attachment.log"))
+
+
+def test_control_characters_are_removed():
+    """控制字符在文件名里不可见，易被用来伪装，必须剔除"""
+    safe = sanitize_filename("a\x00b\x1fc.log", fallback="attachment.log")
+    assert not any(ord(c) < 0x20 or ord(c) == 0x7f for c in safe)
+    assert safe.endswith(".log")
+
+
+def test_long_filename_is_truncated_keeping_extension():
+    """超长文件名截断后扩展名必须完整，否则 is_allowed 会失效"""
+    manager = LogFileManager(enabled=False, base_dir="/tmp/unused")
+    safe = sanitize_filename("x" * 300 + ".log", fallback="attachment.log")
+    assert len(safe) <= 120
+    assert safe.endswith(".log")
+    assert manager.is_allowed(safe)
+
+
+def test_empty_and_dot_only_names_use_fallback():
+    """空串与纯点号用兜底名，且兜底名本身要能过白名单"""
+    manager = LogFileManager(enabled=False, base_dir="/tmp/unused")
+    for raw in ["", "...", "   ", "/", "\\", "../.."]:
+        safe = sanitize_filename(raw, fallback="attachment.log")
+        assert safe == "attachment.log", f"{raw!r} -> {safe!r}"
+        assert manager.is_allowed(safe)
+
+
+def test_fallback_without_extension_preserved():
+    """兜底名不带扩展名时原样返回，保持旧有调用方的行为"""
+    assert sanitize_filename("", fallback="attachment") == "attachment"
+
+
+def test_trailing_dots_and_spaces_stripped():
+    """Windows 会静默去掉首尾点与空格，清洗阶段就得去掉以免名字对不上"""
+    assert sanitize_filename("app.log ", fallback="attachment.log") == "app.log"
+    assert sanitize_filename(" app.log", fallback="attachment.log") == "app.log"
 
 
 # ============ 请求体上限 ============
