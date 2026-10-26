@@ -9,7 +9,6 @@ import json
 import time
 import base64
 import hashlib
-import hmac
 import threading
 import requests
 from typing import List, Optional, Dict, Any
@@ -491,30 +490,6 @@ class FeishuBotAdapter(IMAdapter):
         except Exception as e:
             logger.warning(f"调用飞书用户信息 API 异常（不影响反馈保存）: {e}")
             return ""
-
-    def verify_webhook_signature(self, timestamp: str, nonce: str, encrypt: str, signature: str) -> bool:
-        """
-        验证 webhook 签名
-
-        Args:
-            timestamp: 时间戳
-            nonce: 随机数
-            encrypt: 加密数据
-            signature: 签名
-
-        Returns:
-            验证是否通过
-        """
-        if not self.encrypt_key:
-            return True  # 如果没有配置加密密钥，跳过验证
-
-        # 拼接字符串
-        sign_str = f"{timestamp}{nonce}{encrypt}{self.encrypt_key}"
-
-        # 计算 SHA256
-        calculated_signature = hashlib.sha256(sign_str.encode()).hexdigest()
-
-        return calculated_signature == signature
 
     def _decrypt(self, encrypt_str: str) -> Dict[str, Any]:
         """
