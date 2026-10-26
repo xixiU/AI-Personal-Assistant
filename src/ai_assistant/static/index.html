@@ -654,9 +654,26 @@
                 removeBtn.className = 'remove-btn';
                 removeBtn.innerHTML = '&times;';
                 removeBtn.title = '移除';
+                // Bug #3 修复：闭包捕获文件对象而非索引，避免快速点击时索引失效
+                // 【测试步骤】
+                // 1. 添加 3 个文件 A、B、C
+                // 2. 快速双击"删除 A"按钮（间隔 < 100ms）
+                // 3. 预期：A 被删除，B 和 C 保留；实际修复前：可能删错或删不掉
+                // 4. 边界测试：删最后一个、删第一个、删中间、空列表时不显示删除按钮
+
+                // 【临时还原验证 - 已确认 bug 重现】旧代码（有 bug）：
+                // removeBtn.addEventListener('click', () => {
+                //     pendingFiles.splice(idx, 1);
+                //     renderFilePreview();
+                // });
+
+                // 修复后代码（无 bug）：
                 removeBtn.addEventListener('click', () => {
-                    pendingFiles.splice(idx, 1);
-                    renderFilePreview();
+                    const i = pendingFiles.indexOf(f);
+                    if (i >= 0) {
+                        pendingFiles.splice(i, 1);
+                        renderFilePreview();
+                    }
                 });
 
                 chip.appendChild(nameEl);
@@ -692,6 +709,26 @@
             if (file.size === 0) { showError(`文件 ${file.name} 为空`); return; }
             const reader = new FileReader();
             reader.onload = (ev) => {
+                // Bug #4 修复：异步回调里再次检查数量，防止并发读取导致超限
+                // 【测试步骤】
+                // 1. 拖入 10 个 .log 文件（或选择 10 个文件）
+                // 2. 预期：前端只显示前 5 个 chip，后 5 个被拒绝；修复前：全部显示 10 个
+                // 3. 点发送，预期：正常发送 5 个文件；修复前：后端返回 400 错误
+                // 4. 边界测试：已有 4 个文件时再拖 2 个，应只接受 1 个
+
+                // 【临时还原验证 - 已确认 bug 重现】旧代码（有 bug）：
+                // pendingFiles.push({
+                //     name: file.name,
+                //     size: file.size,
+                //     data: String(ev.target.result).split(',')[1] || ''
+                // });
+                // renderFilePreview();
+
+                // 修复后代码（无 bug）：
+                if (pendingFiles.length >= MAX_FILE_COUNT) {
+                    showError(`已达到 ${MAX_FILE_COUNT} 个文件上限，无法添加 ${file.name}`);
+                    return;
+                }
                 pendingFiles.push({
                     name: file.name,
                     size: file.size,
