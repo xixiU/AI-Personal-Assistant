@@ -35,6 +35,669 @@ from ai_assistant.core.ai_provider import (
     _join_prefill,
 )
 from ai_assistant.core.models import Message
+from ai_assistant.utils.log_summary import summarize_obj, summarize_text
+
+
+# ============================================================================
+# 工具调用请求体的结构自检与诊断日志
+#
+# === 背景（2026-10-27 10:38 线上故障）===
+# Agentic 排查第 3 轮被上游拒绝，日志里只有这一行：
+#   ERROR Anthropic API 错误: status=400, message=Error code: 400 -
+#   {'error': {'type': '<nil>', 'message': 'Invalid tool use format. |
+#   REQUEST_BODY_INVALID (request id: 2026...iT2rjM5r) (request id: 2026...JXABB)'}}
+# 请求体一个字节都没打，所以无法判断「是哪一轮、哪条消息、哪个字段不合法」，
+# 只能靠猜。本节的函数就是为了让下一次同样的 400 可以被直接定位。
+#
+# === 设计取舍 ===
+# 1. 只打【结构骨架】，不打内容。这类 400 几乎都是结构问题（空 text block、
+#    tool_use/tool_result 配不上、content 类型不对），知道 role 序列 +
+#    content block 类型序列 + 各 block 长度 + tool_use_id 配对关系就够定位；
+#    而把 3442 字符的用户堆栈或 6677 字符的 Java 源码倒进日志既违反
+#    CLAUDE.md「不得记录完整用户消息」，也会把真正有用的那几行冲掉。
+# 2. 自检（audit_api_messages）在【发请求前】就能跑，所以它既是日志素材，
+#    也是容错决策依据：自检有发现 → 请求体真的坏了，重试同一份没意义，
+#    直接裁掉最后一轮；自检无发现 → 大概率是上游瞬时失败，原样重试一次。
+# 3. 网关返回的 request id 必须留着。它是找网关方对账的唯一凭据，而且
+#    一次 400 里嵌了两个不同格式的 id，说明请求穿过了多级代理。
+# ============================================================================
+
+# 骨架日志最多展开的消息条数（超长对话只打前 N 条，避免一行日志撑爆终端）
+_SKELETON_MAX_MSGS = 40
+
+# tool_use_id 在骨架里的展示长度（Anthropic 的 id 形如 toolu_01Abc...，
+# 只需要能在同一条日志里区分和配对，不需要全长）
+_TOOL_ID_CHARS = 14
+
+# error_detail（会进飞书告警）里上游错误文案的摘要窗口。
+#
+# 为什么是 200 而不是默认值（80）：实测现场那条文案，错误分类的关键短语
+# 落在第 58~105 字符 —— 前缀 `Error code: 400 - {'error': {'type': '<nil>',
+# 'message': '` 本身就占掉 58 字符，默认窗口会把 "Invalid tool use format"
+# 和 "REQUEST_BODY_INVALID" 两个短语全切掉，告警里只剩一句 "Error code: 400"。
+# 换几种文案形态实测，关键短语的位置分别是 58 / 55 / 86（网关 type 字段越长
+# 越靠后），200 能把三种都覆盖进去。
+#
+# 为什么不是 600：limit 同时抬高"整段原样显示"的门槛（见 log_summary 的
+# PREVIEW_HEAD_CHARS 注释），600 会让任何 ≤600 字符的文案原样打全。若网关
+# 把用户请求片段回显进 400 文案，那就是用户正文整段进告警。实测一条 582
+# 字符的回显文案：limit=600 整段落盘，limit=200 被压成摘要。
+# 200 是"够判断错误类型"和"不足以整段回显用户正文"之间的取值。
+_ALERT_MSG_CHARS = 200
+
+# 上游错误文案里出现这些词，判定为"工具调用格式类 400"
+_TOOL_FORMAT_400_HINTS = (
+    "tool_result",
+    "tool_use",
+    "tool use",
+    "tool_calls",
+    "invalid tool",
+    "request_body_invalid",
+)
+
+
+def _short_id(value: Any) -> str:
+    """tool_use_id 的短形式（仅用于日志配对，不是业务标识）"""
+    s = "" if value is None else str(value)
+    if not s:
+        return "<缺失>"
+    return s if len(s) <= _TOOL_ID_CHARS else s[:_TOOL_ID_CHARS] + ".."
+
+
+def _describe_block(block: Any) -> str:
+    """
+    描述单个 content block 的"结构骨架"：类型 + 规模 + 配对标识，不含正文。
+
+    text 块特意区分 EMPTY / BLANK：Anthropic 会以 400 拒绝空的或纯空白的
+    text block，而这种块只有在它被回传到【下一轮】请求里时才会触发报错，
+    光看当轮响应是发现不了的。
+    """
+    if not isinstance(block, dict):
+        return f"<{type(block).__name__}>"
+
+    btype = block.get("type", "<无 type>")
+
+    if btype == "text":
+        text = block.get("text")
+        if text is None:
+            return "text(NONE)"
+        if not isinstance(text, str):
+            return f"text(<{type(text).__name__}>)"
+        if not text:
+            return "text(EMPTY)"
+        if not text.strip():
+            return f"text(BLANK:{len(text)})"
+        return f"text({len(text)})"
+
+    if btype == "tool_use":
+        tool_input = block.get("input")
+        if isinstance(tool_input, dict):
+            # 参数名后面带上【值类型】。这不是凑数：现场第 1、2 轮的 tool_use
+            # 参数全是字符串且通过，第 3 轮首次出现整数参数
+            # （read_file 的 start_line/end_line）就被拒。若上游网关把 input
+            # 当成 map[string]string 转换，故障点正好落在类型上，而只打参数名
+            # 是看不出来的。
+            keys = "+".join(
+                f"{k}:{type(v).__name__}" for k, v in tool_input.items()
+            ) or "无参数"
+        else:
+            keys = f"<{type(tool_input).__name__}>"
+        return f"tool_use(id={_short_id(block.get('id'))},name={block.get('name')},keys={keys})"
+
+    if btype == "tool_result":
+        content = block.get("content")
+        if content is None:
+            kind = "NONE"
+        elif isinstance(content, str):
+            kind = f"str,{len(content)}" if content else "str,EMPTY"
+        elif isinstance(content, list):
+            kind = f"list,{len(content)}块"
+        else:
+            kind = f"<{type(content).__name__}>"
+        flag = ",is_error" if block.get("is_error") else ""
+        return f"tool_result(id={_short_id(block.get('tool_use_id'))},{kind}{flag})"
+
+    if btype == "image":
+        source = block.get("source") or {}
+        data = source.get("data") if isinstance(source, dict) else None
+        media = source.get("media_type") if isinstance(source, dict) else "?"
+        return f"image({media},b64={len(data) if isinstance(data, str) else '?'})"
+
+    return f"{btype}(?)"
+
+
+def _describe_content(content: Any) -> str:
+    """描述一条消息的 content（字符串形态 / block 数组形态都支持）"""
+    if content is None:
+        return "<None>"
+    if isinstance(content, str):
+        return f"str({len(content)})" if content else "str(EMPTY)"
+    if isinstance(content, list):
+        if not content:
+            return "<空数组>"
+        return ",".join(_describe_block(b) for b in content)
+    return f"<{type(content).__name__}>"
+
+
+def describe_api_messages(api_messages: Any) -> str:
+    """
+    把即将发给上游的 messages 渲染成单行"结构骨架"，用于诊断 400。
+
+    形如：
+        msgs=5 | [0]user:text(3442) | [1]assistant:text(57),tool_use(id=toolu_01Abc..,
+        name=find_files,keys=name_pattern) | [2]user:tool_result(id=toolu_01Abc..,str,142) | ...
+
+    刻意压成一行：loguru 一条记录一行，日志采集按行切分，多行会被拆散。
+
+    Args:
+        api_messages: 传给 client.messages.create(messages=...) 的那个列表
+
+    Returns:
+        单行骨架描述（绝不包含消息正文）
+    """
+    try:
+        if not isinstance(api_messages, list):
+            return f"<非列表:{type(api_messages).__name__}>"
+
+        parts = [f"msgs={len(api_messages)}"]
+        for i, msg in enumerate(api_messages):
+            if i >= _SKELETON_MAX_MSGS:
+                parts.append(f"…(+{len(api_messages) - _SKELETON_MAX_MSGS} msgs 未展开)")
+                break
+            if not isinstance(msg, dict):
+                parts.append(f"[{i}]<{type(msg).__name__}>")
+                continue
+            parts.append(f"[{i}]{msg.get('role', '<无 role>')}:{_describe_content(msg.get('content'))}")
+        return " | ".join(parts)
+    except Exception as e:  # pragma: no cover - 纯兜底，诊断日志不许影响主流程
+        return f"<骨架生成失败:{type(e).__name__}>"
+
+
+def _iter_blocks(msg: Any) -> List[Dict[str, Any]]:
+    """取出一条消息里的 dict 形态 block（content 为字符串时返回空列表）"""
+    if not isinstance(msg, dict):
+        return []
+    content = msg.get("content")
+    if not isinstance(content, list):
+        return []
+    return [b for b in content if isinstance(b, dict)]
+
+
+def audit_api_messages(api_messages: Any, *, expects_prefill: bool = False) -> List[str]:
+    """
+    发请求前自检 messages 结构，返回"会被上游以 400 拒绝"的问题清单。
+
+    检查项都来自 Anthropic messages API 的硬约束，以及工具调用多轮回传时
+    实际踩过/可能踩到的坑：
+      - 消息序列：非空、首条为 user、末条为 user、同角色不得相邻
+      - content：不得为空数组 / 空字符串
+      - text block：不得为空或纯空白（最隐蔽的一条，详见 _describe_block）
+      - tool_use：必须有 id / name，input 必须是对象
+      - tool_result：必须有 tool_use_id，content 不得为空
+      - 配对：assistant 里每个 tool_use 都要在【紧随其后那条 user 消息】里
+        有同 id 的 tool_result；反向也不能有找不到 tool_use 的孤立 tool_result
+      - 位置：tool_use 只能在 assistant、tool_result 只能在 user
+
+    本函数只报【按 Anthropic 规范确定非法】的项，因为返回值会参与调用方的
+    裁剪决策（`(tool_format_hit or post_issues)` 非空即裁）。"合法但可疑"
+    的观察（如并行工具导致的 tool_result 顺序不一致）一律放在
+    audit_api_messages_advisory 里，只打日志不参与决策 —— 混在一起会让
+    与工具格式无关的 400 稳定误触发裁剪，详见那个函数的 docstring。
+
+    === 为什么 expects_prefill 必须显式传，且默认 False ===
+    本项目有两类消息列表，对"末条角色"的要求正好相反：
+      1. 工具循环（Agentic / Operations）：必须以 user 结尾。末条是 assistant
+         意味着拼装逻辑漏了 tool_result，是真实畸形体。
+      2. AI 子调用（关键词提取 / 标题过滤 / 安全判定，见 core/ai_provider.py
+         的 build_*_messages）：**故意**以 `{"role":"assistant", "content": PREFILL}`
+         结尾，用 assistant prefill 钉死输出格式。
+    若不区分，把本函数接到子调用路径上会稳定产生一条假的
+    "末条消息 role='assistant'"。这不只是脏日志——调用方的裁剪条件是
+    `(tool_format_hit or post_issues)`，一个假阳性就足以触发
+    `api_messages[:-2]`，把本来正常的 prefill 请求剪坏。
+    所以这里用**显式入参 + 默认 False**：工具循环保持最严，
+    只有明确知道自己在走 prefill 路径的调用方才放宽，
+    不会因为"默认宽松"让真实畸形体悄悄漏过去。
+
+    注意：即使 expects_prefill=True，"末条 assistant 里带 tool_use"仍会被
+    下面的配对检查抓出来（报"后面没有任何消息，缺少 tool_result"），
+    所以放宽的只是"角色"这一点，不是整条尾部约束。
+
+    Args:
+        api_messages: 传给 client.messages.create(messages=...) 的那个列表
+        expects_prefill: 该列表是否刻意以 assistant prefill 结尾。
+                         工具循环传 False（默认），子调用路径传 True。
+
+    Returns:
+        问题描述列表（中文，带 msg 下标）。空列表表示未发现结构问题。
+    """
+    issues: List[str] = []
+    try:
+        if not isinstance(api_messages, list):
+            return [f"messages 不是列表而是 {type(api_messages).__name__}"]
+        if not api_messages:
+            return ["messages 为空数组"]
+
+        first_role = api_messages[0].get("role") if isinstance(api_messages[0], dict) else None
+        if first_role != "user":
+            issues.append(f"首条消息 role={first_role!r}，Anthropic 要求首条必须是 user")
+
+        last_role = api_messages[-1].get("role") if isinstance(api_messages[-1], dict) else None
+        if last_role != "user" and not (expects_prefill and last_role == "assistant"):
+            issues.append(f"末条消息 role={last_role!r}，请求必须以 user 消息结尾")
+
+        prev_role = None
+        for i, msg in enumerate(api_messages):
+            if not isinstance(msg, dict):
+                issues.append(f"msg[{i}] 不是 dict 而是 {type(msg).__name__}")
+                prev_role = None
+                continue
+
+            role = msg.get("role")
+            if role not in ("user", "assistant"):
+                issues.append(f"msg[{i}] role={role!r} 非法（只能是 user / assistant）")
+            if role is not None and role == prev_role:
+                issues.append(f"msg[{i}] 与 msg[{i-1}] 同为 {role}，角色必须交替")
+            prev_role = role
+
+            content = msg.get("content")
+            if content is None:
+                issues.append(f"msg[{i}]({role}) content 为 None")
+                continue
+            if isinstance(content, str):
+                if not content.strip():
+                    issues.append(f"msg[{i}]({role}) content 为空字符串")
+                continue
+            if not isinstance(content, list):
+                issues.append(f"msg[{i}]({role}) content 类型为 {type(content).__name__}，应为字符串或数组")
+                continue
+            if not content:
+                issues.append(f"msg[{i}]({role}) content 为空数组，上游会拒绝")
+                continue
+
+            for j, block in enumerate(content):
+                if not isinstance(block, dict):
+                    issues.append(f"msg[{i}].block[{j}] 不是 dict 而是 {type(block).__name__}")
+                    continue
+                btype = block.get("type")
+
+                if btype == "text":
+                    text = block.get("text")
+                    if not isinstance(text, str):
+                        issues.append(
+                            f"msg[{i}]({role}).block[{j}] text 类型为 "
+                            f"{type(text).__name__}，应为字符串"
+                        )
+                    elif not text:
+                        issues.append(f"msg[{i}]({role}).block[{j}] 是空 text block，上游会以 400 拒绝")
+                    elif not text.strip():
+                        issues.append(
+                            f"msg[{i}]({role}).block[{j}] 是纯空白 text block"
+                            f"({len(text)} 字符)，上游会以 400 拒绝"
+                        )
+
+                elif btype == "tool_use":
+                    if not block.get("id"):
+                        issues.append(f"msg[{i}].block[{j}] tool_use 缺少 id")
+                    if not block.get("name"):
+                        issues.append(f"msg[{i}].block[{j}] tool_use 缺少 name")
+                    if not isinstance(block.get("input"), dict):
+                        issues.append(
+                            f"msg[{i}].block[{j}] tool_use(id={_short_id(block.get('id'))}) 的 input "
+                            f"类型为 {type(block.get('input')).__name__}，必须是对象"
+                        )
+                    if role != "assistant":
+                        issues.append(f"msg[{i}] role={role} 里出现 tool_use，只能出现在 assistant 消息")
+
+                elif btype == "tool_result":
+                    if not block.get("tool_use_id"):
+                        issues.append(f"msg[{i}].block[{j}] tool_result 缺少 tool_use_id")
+                    rc = block.get("content")
+                    if rc is None or (isinstance(rc, str) and not rc) or (isinstance(rc, list) and not rc):
+                        issues.append(
+                            f"msg[{i}].block[{j}] tool_result"
+                            f"(id={_short_id(block.get('tool_use_id'))}) 的 content 为空"
+                        )
+                    if role != "user":
+                        issues.append(f"msg[{i}] role={role} 里出现 tool_result，只能出现在 user 消息")
+
+                elif btype is None:
+                    issues.append(f"msg[{i}].block[{j}] 缺少 type 字段")
+
+        # 配对检查：tool_use 必须在紧随其后的 user 消息里拿到同 id 的 tool_result
+        for i, msg in enumerate(api_messages):
+            if not isinstance(msg, dict) or msg.get("role") != "assistant":
+                continue
+            use_ids = [b.get("id") for b in _iter_blocks(msg) if b.get("type") == "tool_use"]
+            if not use_ids:
+                continue
+
+            nxt = api_messages[i + 1] if i + 1 < len(api_messages) else None
+            if nxt is None:
+                issues.append(
+                    f"msg[{i}] 的 tool_use({','.join(_short_id(x) for x in use_ids)}) "
+                    f"后面没有任何消息，缺少 tool_result"
+                )
+                continue
+            if not isinstance(nxt, dict) or nxt.get("role") != "user":
+                issues.append(
+                    f"msg[{i}] 的 tool_use 之后不是 user 消息"
+                    f"（msg[{i+1}] role={nxt.get('role') if isinstance(nxt, dict) else '?'}），"
+                    f"tool_result 必须紧跟在后"
+                )
+                continue
+
+            result_ids = [
+                b.get("tool_use_id") for b in _iter_blocks(nxt) if b.get("type") == "tool_result"
+            ]
+            missing = [x for x in use_ids if x not in result_ids]
+            orphan = [x for x in result_ids if x not in use_ids]
+            if missing:
+                issues.append(
+                    f"msg[{i}] 的 tool_use({','.join(_short_id(x) for x in missing)}) "
+                    f"在 msg[{i+1}] 中没有对应的 tool_result"
+                )
+            if orphan:
+                issues.append(
+                    f"msg[{i+1}] 的 tool_result({','.join(_short_id(x) for x in orphan)}) "
+                    f"在 msg[{i}] 中找不到对应的 tool_use"
+                )
+        return issues
+    except Exception as e:  # pragma: no cover - 纯兜底
+        return [f"<自检失败:{type(e).__name__}: {e}>"]
+
+
+def audit_api_messages_advisory(api_messages: Any) -> List[str]:
+    """
+    收集"合法但可疑"的结构观察，**仅供日志**，绝不参与任何决策。
+
+    === 为什么必须和 audit_api_messages 分开 ===
+    本函数的观察项按 Anthropic 规范都是**允许**的，所以它们不是"请求体坏了"
+    的证据。而调用方的裁剪条件是 `(tool_format_hit or post_issues)` —— 列表
+    非空即成立。一旦把这类观察混进 audit_api_messages 的返回值，任何一个
+    【与工具格式无关】的 400（max_tokens 超限、模型名写错、网关额度耗尽回
+    成 400）都会被判成"本地自检发现结构问题"，于是白扔一轮正常的工具交互、
+    扣掉一份重试预算，还在日志里写下一个把排查方向带偏的结论。
+
+    而触发条件是常态不是边角：并行工具用 `concurrent.futures.as_completed`
+    收集结果（见 _send_with_context_agentic 的并行分支），tool_result 的顺序
+    按完成先后排列，和 tool_use 的调用顺序天然不一致。模型一轮要两三个只读
+    查询太常见，也就是说"顺序不一致"几乎每次并行都会出现。
+
+    诊断价值保留（严格校验的中间网关可能按位置配对，排查时值得知道），
+    决策权剥离。
+
+    Args:
+        api_messages: 传给 client.messages.create(messages=...) 的那个列表
+
+    Returns:
+        观察描述列表（中文，带 msg 下标）。空列表表示没有可疑之处。
+    """
+    notes: List[str] = []
+    try:
+        if not isinstance(api_messages, list):
+            return []
+
+        for i, msg in enumerate(api_messages):
+            if not isinstance(msg, dict) or msg.get("role") != "assistant":
+                continue
+            use_ids = [b.get("id") for b in _iter_blocks(msg) if b.get("type") == "tool_use"]
+            if not use_ids:
+                continue
+
+            nxt = api_messages[i + 1] if i + 1 < len(api_messages) else None
+            if not isinstance(nxt, dict) or nxt.get("role") != "user":
+                # 这些情况 audit_api_messages 已经当作真问题报了，不重复
+                continue
+
+            result_ids = [
+                b.get("tool_use_id") for b in _iter_blocks(nxt) if b.get("type") == "tool_result"
+            ]
+            # 只在"配对齐全、仅顺序不同"时才算可疑；缺失/孤立由 audit 负责
+            if sorted(map(str, use_ids)) != sorted(map(str, result_ids)):
+                continue
+            if use_ids != result_ids:
+                notes.append(
+                    f"msg[{i+1}] 的 tool_result 顺序与 msg[{i}] 的 tool_use 不一致"
+                    f"（Anthropic 允许，并行工具按完成顺序收集时属正常；"
+                    f"严格按位置配对的中间网关可能拒绝）"
+                )
+
+        return notes
+    except Exception as e:  # pragma: no cover - 纯兜底
+        return [f"<可疑项收集失败:{type(e).__name__}: {e}>"]
+
+
+def extract_upstream_request_ids(text: Any) -> List[str]:
+    """
+    从上游错误文案里抠出所有 `request id: xxx`。
+
+    现场那条 400 里嵌了两个不同格式、不同时区时间戳的 id，说明请求穿过了
+    多级代理。这些 id 是找网关方对账的唯一凭据，必须单独成列打出来，
+    不能埋在一长串报文里。
+    """
+    try:
+        return re.findall(r"request[\s_-]?id[:=]\s*([A-Za-z0-9_\-]+)", str(text or ""), re.I)
+    except Exception:  # pragma: no cover - 纯兜底
+        return []
+
+
+def is_tool_format_400(message: Any) -> bool:
+    """
+    判断一条 400 错误文案是否属于"工具调用格式类"。
+
+    旧实现只匹配 `tool_result` 子串，而现场真正收到的文案是
+    "Invalid tool use format. | REQUEST_BODY_INVALID"，不含 `tool_result`，
+    于是整段 400 容错分支根本没进去，一次失败就直接放弃了。
+    这里按一组同义词判定，覆盖 Anthropic 原生文案和网关自造文案。
+    """
+    text = str(message or "").lower()
+    return any(hint in text for hint in _TOOL_FORMAT_400_HINTS)
+
+
+def log_api_status_error(
+    *,
+    mode: str,
+    round_num: int,
+    error: Any,
+    api_messages: Any,
+    base_url: Any,
+    model: Any,
+    audit_issues: Optional[List[str]] = None,
+) -> None:
+    """
+    统一打印上游 APIStatusError 的可定位诊断信息。
+
+    原来只有一行 `status=... message=...`，请求体零信息，排查无从下手。
+    现在固定打五条，每条解决一个具体问题：
+      1. 是哪种模式的第几轮失败（现场日志里"轮次"和"报错"之间隔了几十行）
+      2. 走的是哪个端点、哪个模型 + 上游 request id（判断是网关还是 Anthropic）
+      3. 上游响应体原文（截断）—— 错误码和细节往往只在这里
+      4. 请求体结构骨架 —— 定位到具体哪条消息、哪个 block
+      5. 请求体自检结果 —— 直接给出"哪个字段不合法"的结论
+
+    Args:
+        mode: 调用模式标识，当前接线的三处为 agentic / operations / rag。
+              若要接到 AI 子调用（关键词提取 / 标题过滤 / 安全判定）路径上，
+              必须同时自己算好 audit_issues 并传
+              `audit_api_messages(msgs, expects_prefill=True)`：
+              那三条路径刻意以 assistant prefill 结尾，用默认的严格自检会
+              稳定产生一条假的"末条消息 role='assistant'"（详见
+              audit_api_messages 的 docstring）。
+        round_num: 工具循环轮次（非循环模式传 0）
+        error: anthropic.APIStatusError 实例
+        api_messages: 本次发出的 messages
+        base_url: 客户端 base_url（用于区分官方端点和兼容网关）
+        model: 模型名
+        audit_issues: 已算好的自检结果；为 None 时按【工具循环】的严格规则
+                      现场重算（即 expects_prefill=False）
+    """
+    status = getattr(error, "status_code", "?")
+    message = getattr(error, "message", None) or str(error)
+
+    # === 这里和下面"上游响应体"的 limit=600 是刻意放宽的窗口，有已知风险 ===
+    # limit 不只是截断长度，它同时抬高"整段原样显示"的门槛（见 log_summary
+    # 的 PREVIEW_HEAD_CHARS），所以 600 意味着任何 ≤600 字符的上游文案会原样
+    # 落进日志。
+    #
+    # 已知风险：本项目跑在兼容网关（config.example.yaml 说明 base_url 填了就
+    # 走代理/兼容服务），现场那条 "Invalid tool use format. |
+    # REQUEST_BODY_INVALID (request id: ...)" 是网关自造格式而非 Anthropic
+    # 原生。网关在 400 响应体里是否回显请求片段**无法假设** —— 若回显，
+    # 用户提问正文就会连带进日志。
+    #
+    # 为什么仍然接受：
+    #   1. 这两行是专门用来诊断故障的，600 有真实排查价值。降到默认 80 会把
+    #      关键短语切掉（实测现场文案的 "Invalid tool use format" 起始于第 58
+    #      字符、"REQUEST_BODY_INVALID" 在第 85~105），下次 400 又变成看不清。
+    #   2. 400 响应体不是常态路径，只在上游拒绝请求时才打。
+    #   3. 日志留在本机，而进飞书告警的 error_detail 走的是更紧的
+    #      _ALERT_MSG_CHARS（200），已在源头收口。
+    # 若将来实证该网关确实回显请求片段，这里应改成默认 limit 并靠 sha1 指纹
+    # 跨日志串联，而不是继续放宽。
+    logger.error(
+        f"上游 API 错误: mode={mode}, round={round_num}, status={status}, "
+        f"message={summarize_text(message, limit=600, label='upstream_msg')}"
+    )
+
+    # SDK 从响应头拿到的 request id（官方端点有，网关可能没有）
+    sdk_request_id = getattr(error, "request_id", None)
+    # 报文里内嵌的 request id（网关风格，可能有多个，代表穿过了多级代理）
+    embedded_ids = extract_upstream_request_ids(message)
+    body_text = ""
+    try:
+        response = getattr(error, "response", None)
+        body_text = getattr(response, "text", "") or ""
+    except Exception:
+        body_text = "<响应体读取失败>"
+    embedded_ids += [x for x in extract_upstream_request_ids(body_text) if x not in embedded_ids]
+
+    logger.error(
+        f"上游标识: base_url={base_url}, model={model}, "
+        f"sdk_request_id={sdk_request_id}, 报文内嵌 request_id={embedded_ids or '无'}"
+    )
+    # limit=600 的取舍与风险见上面那段注释（同一个决定，不要只改一处）
+    logger.error(f"上游响应体: {summarize_text(body_text, limit=600, label='resp_body')}")
+    logger.error(f"请求体骨架(mode={mode},round={round_num}): {describe_api_messages(api_messages)}")
+
+    issues = audit_api_messages(api_messages) if audit_issues is None else audit_issues
+    if issues:
+        logger.error(f"请求体自检: 发现 {len(issues)} 处问题 -> " + "; ".join(issues))
+    else:
+        logger.error(
+            "请求体自检: 未发现结构问题（请求体符合 Anthropic messages API 约束，"
+            "问题更可能在上游网关的转换/校验环节，请拿上面的 request_id 找网关方核对）"
+        )
+
+    # 合法但可疑的观察单独一行，并明确标注"不作为判据"：排查时有价值
+    # （严格网关可能按位置配对），但它不能让人误以为请求体坏了。
+    advisory = audit_api_messages_advisory(api_messages)
+    if advisory:
+        logger.warning(
+            f"请求体可疑项（合法，不作为 400 判据）-> " + "; ".join(advisory)
+        )
+
+
+def try_trim_last_tool_round(api_messages: List[Dict[str, Any]]) -> tuple:
+    """
+    为 400 自救裁掉最后一轮工具交互，并**验证裁剪结果**后才允许重试。
+
+    Returns:
+        (trimmed, reject_reason)
+        - 成功：(裁剪后的新列表, None)
+        - 放弃：(None, 中文原因)  调用方必须不再重试
+
+    === 为什么必须验证，不能闭眼裁 ===
+    `[:-2]` 隐含假设"末两条正好是 assistant(tool_use) + user(tool_result)、
+    且裁完剩下的仍然合法"。历史不交替时这个假设就不成立，实测两个反例：
+
+        [user, assistant, assistant(tool_use), user(tool_result)]
+            --[:-2]--> [user, assistant]        末条是 assistant
+        [user, user, assistant(tool_use), user(tool_result)]
+            --[:-2]--> [user, user]             连续两条 user
+
+    两者 len 都是 4，`>= 3` 的长度门槛放行了它们 —— 那个门槛只管长度不管角色。
+    前者在引用链历史重建路径下完全可能（历史末条是 assistant），后者在
+    main.py 的 deferred / pending_lone_images 合并路径下可能产出。
+
+    裁出畸形体比不裁更糟：裁完必然再 400，而自检非空又会再触发一次裁剪、
+    吃掉第二份预算 —— 两份预算全废，还多烧两轮超时时间。
+
+    注意上面两个反例裁剪【前】自检就已经报问题了，且问题位置在列表**头部**
+    （msg[0..1] 角色不交替），而 `[:-2]` 只动尾部，对头部缺陷无能为力。这正是
+    "验证后再重试"而不是"换一种裁法"的理由：这类请求体不是裁得对不对的问题，
+    是自救动作根本救不了，该如实放弃并把结论写进告警。
+    """
+    if not isinstance(api_messages, list) or len(api_messages) < 3:
+        return None, f"消息数不足（{len(api_messages) if isinstance(api_messages, list) else '非列表'}），无可裁空间"
+
+    trimmed = api_messages[:-2]
+    if not trimmed:
+        return None, "裁剪后为空列表"
+
+    residual = audit_api_messages(trimmed)
+    if residual:
+        return None, "裁剪后仍不合法 -> " + "; ".join(residual)
+    return trimmed, None
+
+
+def collect_assistant_content(response_content: Any) -> tuple:
+    """
+    收集一轮响应里的 assistant content，并剔除会让【下一轮】请求 400 的块。
+
+    关键点：空的或纯空白的 text block 在【当轮】是无害的（SDK 不校验响应），
+    它只在被回传进下一轮请求时才触发 400 "Invalid tool use format"/
+    "text content blocks must be non-empty"。所以这里是唯一能拦住它的位置，
+    而不是等到发请求时才发现。
+
+    Args:
+        response_content: response.content（block 列表）
+
+    Returns:
+        (assistant_content, tool_uses, notes) 三元组
+        - assistant_content: 可安全回传的 content block 列表
+        - tool_uses: 需要执行的 tool_use 原始 block 列表
+        - notes: 被丢弃/可疑块的中文说明（调用方打 WARNING）
+    """
+    assistant_content: List[Dict[str, Any]] = []
+    tool_uses: List[Any] = []
+    notes: List[str] = []
+
+    for idx, block in enumerate(response_content or []):
+        btype = getattr(block, "type", None)
+
+        if btype == "text":
+            text = getattr(block, "text", None)
+            if not isinstance(text, str) or not text.strip():
+                shown = 0 if not isinstance(text, str) else len(text)
+                notes.append(
+                    f"block[{idx}] 是空/纯空白 text block({shown} 字符)，已丢弃"
+                    f"（原样回传会让下一轮请求被 400 拒绝）"
+                )
+                continue
+            assistant_content.append({"type": "text", "text": text})
+
+        elif btype == "tool_use":
+            tool_input = getattr(block, "input", None)
+            if not isinstance(tool_input, dict):
+                # 不改写：改写等于伪造模型意图，工具会拿着空参数去执行。
+                # 只留痕，让自检日志把它报出来。
+                notes.append(
+                    f"block[{idx}] tool_use(id={_short_id(getattr(block, 'id', None))}) 的 input "
+                    f"类型为 {type(tool_input).__name__} 而非对象，上游返回格式异常"
+                )
+            assistant_content.append({
+                "type": "tool_use",
+                "id": getattr(block, "id", None),
+                "name": getattr(block, "name", None),
+                "input": tool_input,
+            })
+            tool_uses.append(block)
+
+        elif btype is not None:
+            notes.append(f"block[{idx}] 类型 {btype} 未被处理，不回传")
+
+    return assistant_content, tool_uses, notes
 
 
 class AnthropicProvider(AIProvider):
@@ -148,6 +811,15 @@ class AnthropicProvider(AIProvider):
         的消息数组，因此首次失败时去掉 prefill 重试一次，避免整个子调用静默降级。
 
         temperature=0：结构化抽取任务不需要随机性。
+
+        === 本路径刻意不接 audit_api_messages / log_api_status_error ===
+        将来若要给子调用补上 400 诊断，**必须**传 `expects_prefill=True`，
+        并且绝不能把结果接进任何裁剪/重试决策。原因：这里的 messages 故意
+        以 assistant prefill 结尾，默认（严格）自检会稳定报一条假的
+        "末条消息 role='assistant'"；而工具循环里的裁剪条件是
+        `(tool_format_hit or post_issues)` 非空即成立，照默认值调一次就会
+        按假阳性稳定误裁。目前 expects_prefill=True 在 src/ 下零调用点，
+        就是因为这条路径还没接诊断 —— 不是忘了传。
 
         Args:
             system_prompt: system prompt（钉死角色与输出契约）
@@ -749,6 +1421,13 @@ class AnthropicProvider(AIProvider):
         search_fail_count = 0
         repo_switch_count = 0
 
+        # 400 容错预算：请求体被拒时允许"裁掉最后一轮再继续"的次数。
+        # 必须有上限 —— 否则一个持续返回 400 的上游会让循环一路裁到只剩首条
+        # user 消息，白跑满 600s 超时，用户等 10 分钟拿到空结论。
+        body_retry_budget = 2
+        # 裁剪自救被拒的原因，会带进最终告警（为空表示没走到那一步）
+        trim_reject_reason = None
+
         while True:
             round_num += 1
 
@@ -767,6 +1446,18 @@ class AnthropicProvider(AIProvider):
             else:
                 logger.info(f"Agentic 轮次 {round_num}")
 
+            # 发请求前自检：请求体真坏了要立刻知道是哪个字段，而不是等上游
+            # 回一句抽象的 400 再去猜。第 2 轮起才有工具回传结构，才值得打骨架。
+            pre_issues = audit_api_messages(api_messages)
+            if pre_issues:
+                logger.warning(
+                    f"请求体自检发现 {len(pre_issues)} 处问题（第 {round_num} 轮，仍将尝试发送）-> "
+                    + "; ".join(pre_issues)
+                )
+                logger.warning(f"请求体骨架(round={round_num}): {describe_api_messages(api_messages)}")
+            elif round_num > 1:
+                logger.debug(f"请求体骨架(round={round_num}): {describe_api_messages(api_messages)}")
+
             try:
                 response = self.client.messages.create(
                     model=self.model,
@@ -776,28 +1467,30 @@ class AnthropicProvider(AIProvider):
                     tools=tools_schema,
                 )
 
+                # input_tokens 必须跟着打：兼容网关常把它回成 0 或固定小值
+                # （现场 3442 字符提问 + 长 system prompt 却报 input:4），
+                # 这时 token 数不可信，排查要改看请求体骨架里的字符数。
                 logger.info(
                     f"Claude 响应: stop_reason={response.stop_reason}, "
                     f"tokens(input:{response.usage.input_tokens}, output:{response.usage.output_tokens})"
                 )
 
-                # 收集本轮的 assistant 消息内容
-                assistant_content = []
-                tool_uses = []
+                # 收集本轮的 assistant 消息内容（顺带剔除会让下一轮 400 的空 text block）
+                assistant_content, tool_uses, collect_notes = collect_assistant_content(response.content)
+                for note in collect_notes:
+                    logger.warning(f"第 {round_num} 轮响应内容异常: {note}")
 
-                for block in response.content:
-                    if block.type == "text":
-                        assistant_content.append({"type": "text", "text": block.text})
-                    elif block.type == "tool_use":
-                        assistant_content.append({
-                            "type": "tool_use",
-                            "id": block.id,
-                            "name": block.name,
-                            "input": block.input
-                        })
-                        tool_uses.append(block)
-
-                # 将 assistant 消息加入对话历史
+                # 将 assistant 消息加入对话历史。
+                # content 为空数组会被上游以 400 拒绝，所以必须兜一个占位 text：
+                # 模型可能只回了一个空 text block（已被上面剔除），若原样 append
+                # 一个空数组，下一轮请求必挂，且错误文案完全看不出是这里的问题。
+                # 这里不必再分 tool_uses 是否为空：collect_assistant_content 对
+                # tool_use 是无条件 append 的（input 不是 dict 时也只记 note 不跳过），
+                # 所以 tool_uses 非空 ⇒ assistant_content 必非空。能走到这里只有
+                # "模型什么都没回 / 只回了空 text block"一种情况。
+                if not assistant_content:
+                    logger.warning(f"第 {round_num} 轮响应 content 为空，补占位文本以免下一轮请求 400")
+                    assistant_content = [{"type": "text", "text": "（本轮无输出）"}]
                 api_messages.append({"role": "assistant", "content": assistant_content})
 
                 # 如果没有工具调用,返回最终文本
@@ -844,6 +1537,10 @@ class AnthropicProvider(AIProvider):
                                 result_str = json.dumps(result, ensure_ascii=False)
                                 if self.repo_manager and len(self.repo_manager.list_repos()) > 1:
                                     result_str = f"[当前仓库: {self.repo_manager.current_repo_name}] {result_str}"
+                                # 空 content 的 tool_result 会被上游以 400 拒绝
+                                if not result_str.strip():
+                                    logger.warning(f"工具 {tool_name} 结果序列化为空，补占位文本")
+                                    result_str = "（工具无返回内容）"
                                 tool_results.append({
                                     "type": "tool_result",
                                     "tool_use_id": tool_use.id,
@@ -871,12 +1568,20 @@ class AnthropicProvider(AIProvider):
                             # 多仓库模式下，工具结果前缀加当前仓库名
                             if self.repo_manager and len(self.repo_manager.list_repos()) > 1:
                                 result_str = f"[当前仓库: {self.repo_manager.current_repo_name}] {result_str}"
+                            # 空 content 的 tool_result 会被上游以 400 拒绝
+                            if not result_str.strip():
+                                logger.warning(f"工具 {tool_name} 结果序列化为空，补占位文本")
+                                result_str = "（工具无返回内容）"
                             tool_results.append({
                                 "type": "tool_result",
                                 "tool_use_id": tool_use.id,
                                 "content": result_str
                             })
-                            logger.debug(f"工具 {tool_name} 结果: {result}")
+                            # 只打规模和摘要：这里曾把 6677 字符的 Java 源码整段
+                            # 打进日志，既违反「不记录完整内容」，也把流程日志冲没了。
+                            # 与并行分支保持一致（原先并行只打长度、串行打全文）。
+                            logger.info(f"工具 {tool_name} 完成: {len(result_str)} 字符")
+                            logger.debug("工具 {} 结果: {}", tool_name, summarize_obj(result))
 
                             # === 智能检测逻辑（仅监控，不注入额外消息避免API错误）===
                             # 1. 检测连续搜索失败
@@ -920,21 +1625,82 @@ class AnthropicProvider(AIProvider):
                     "error_detail": f"APIConnectionError: {e}",
                 }
             except anthropic.APIStatusError as e:
-                logger.error(f"Anthropic API 错误: status={e.status_code}, message={e.message}")
+                post_issues = audit_api_messages(api_messages)
+                log_api_status_error(
+                    mode="agentic",
+                    round_num=round_num,
+                    error=e,
+                    api_messages=api_messages,
+                    base_url=self.client.base_url,
+                    model=self.model,
+                    audit_issues=post_issues,
+                )
 
-                # 400错误通常是请求格式问题，可能是tool_result错误，尝试移除最后一轮并继续
-                if e.status_code == 400 and "tool_result" in str(e.message).lower() and round_num > 1:
-                    logger.warning(f"检测到tool_result错误，回退到上一轮并继续（当前轮次: {round_num}）")
-                    # 移除最后一轮的assistant+user消息（tool_use和tool_result）
-                    if len(api_messages) >= 2:
-                        api_messages = api_messages[:-2]
-                        logger.info(f"已回退，当前消息数: {len(api_messages)}")
-                        continue  # 重试当前轮次
+                # 400 = 请求体被拒。工具多轮回传是本项目唯一会动态拼请求体的地方，
+                # 所以裁掉最后一轮（assistant 的 tool_use + user 的 tool_result）
+                # 再继续，是唯一可能自救的动作。
+                #
+                # 旧判定是 `"tool_result" in message.lower()`，而现场真正收到的
+                # 文案是 "Invalid tool use format. | REQUEST_BODY_INVALID"，
+                # 不含 tool_result 子串 → 回退分支从未进入，一次 400 直接放弃。
+                # 现在改为：工具格式类文案命中，或自检本身就发现了结构问题，
+                # 二者任一成立即回退。自检命中这条很重要——上游文案可以任意含糊，
+                # 但我们自己能确认请求体坏了，就不该把判断权交给对方的文案措辞。
+                if e.status_code == 400 and round_num > 1 and len(api_messages) >= 3:
+                    tool_format_hit = is_tool_format_400(e.message)
+                    if (tool_format_hit or post_issues) and body_retry_budget > 0:
+                        reason = "上游文案指向工具格式" if tool_format_hit else "本地自检发现结构问题"
+                        # 裁剪结果必须先过自检：裁出畸形体比不裁更糟
+                        # （详见 try_trim_last_tool_round 的 docstring）
+                        trimmed, reject = try_trim_last_tool_round(api_messages)
+                        if trimmed is not None:
+                            body_retry_budget -= 1
+                            api_messages = trimmed
+                            logger.warning(
+                                f"400 请求体被拒（{reason}），裁掉最后一轮工具交互后重试："
+                                f"轮次={round_num}, 剩余消息数={len(api_messages)}, "
+                                f"剩余重试预算={body_retry_budget}"
+                            )
+                            logger.warning(f"裁剪后请求体骨架: {describe_api_messages(api_messages)}")
+                            # continue 会回到循环头执行 round_num += 1，所以轮次号
+                            # 会递进（不是"重试当前轮次"）。这是刻意接受的：
+                            # 裁剪重试确实消耗一次上游调用，让它占一个轮次号，
+                            # rounds 模式下才不会因为反复裁剪而绕过 max_rounds。
+                            # 已核两处受 round_num 影响的判断都不会被推到意外分支：
+                            # 裁剪前置条件是 `round_num > 1`（单调递增，只会更成立），
+                            # 超时检查看的是 elapsed / round_num > max_rounds（同样单调）。
+                            # 唯一副作用是 metadata.tool_rounds 会把裁剪轮计入。
+                            continue
+                        # 自救动作本身验证不通过：不消耗预算（没真的重试），
+                        # 如实放弃并把原因带进告警，否则维护者只看到一句 400。
+                        logger.error(f"400 无法通过裁剪自救（{reason}），放弃本次排查：{reject}")
+                        trim_reject_reason = reject
+                    elif body_retry_budget <= 0:
+                        logger.error("400 请求体重试预算已耗尽，放弃本次排查")
 
                 error_type = classify_api_error(e.status_code, str(e.message))
+                # error_detail 会进告警（见 ai_provider.call 的单点上报），把自检
+                # 结论和 request_id 一起带上，维护者收到告警即可判断该找谁。
+                #
+                # 上游文案必须在【源头】过摘要，不能指望下游兜：ai_alert 那边是
+                # `redact(detail)[:500]`，redact 走的是形态匹配（IP / AK-SK /
+                # token），挡不住被网关回显进错误文案的用户提问正文。
+                detail_parts = [
+                    f"status={e.status_code}",
+                    f"round={round_num}",
+                    f"message={summarize_text(e.message, limit=_ALERT_MSG_CHARS, label='upstream_msg')}",
+                ]
+                request_ids = extract_upstream_request_ids(e.message)
+                if request_ids:
+                    detail_parts.append(f"upstream_request_ids={','.join(request_ids)}")
+                detail_parts.append(
+                    f"body_audit={'; '.join(post_issues)}" if post_issues else "body_audit=未发现结构问题"
+                )
+                if trim_reject_reason:
+                    detail_parts.append(f"trim_rejected={trim_reject_reason}")
                 return friendly_api_error_message(error_type, e.message), {
                     "mode": "agentic", "error": error_type,
-                    "error_detail": f"status={e.status_code}, message={e.message}",
+                    "error_detail": ", ".join(detail_parts),
                 }
             except Exception as e:
                 logger.error(f"Agentic 循环异常: {e}", exc_info=True)
@@ -1217,6 +1983,9 @@ class AnthropicProvider(AIProvider):
         round_num = 0
         # (工具名, 规范化参数) -> 失败次数，用于拦截完全相同参数的重复失败调用
         failed_calls: Dict[tuple, int] = {}
+        # 400 容错预算，语义同 Agentic 循环（见 _send_with_context_agentic）
+        body_retry_budget = 2
+        trim_reject_reason = None
 
         while True:
             round_num += 1
@@ -1236,6 +2005,17 @@ class AnthropicProvider(AIProvider):
             else:
                 logger.info(f"Operations 轮次 {round_num}")
 
+            # 发请求前自检（与 Agentic 循环同一套逻辑，运维侧同样会多轮回传工具结果）
+            pre_issues = audit_api_messages(api_messages)
+            if pre_issues:
+                logger.warning(
+                    f"请求体自检发现 {len(pre_issues)} 处问题（运维第 {round_num} 轮，仍将尝试发送）-> "
+                    + "; ".join(pre_issues)
+                )
+                logger.warning(f"请求体骨架(round={round_num}): {describe_api_messages(api_messages)}")
+            elif round_num > 1:
+                logger.debug(f"请求体骨架(round={round_num}): {describe_api_messages(api_messages)}")
+
             try:
                 response = self.client.messages.create(
                     model=self.model,
@@ -1250,23 +2030,21 @@ class AnthropicProvider(AIProvider):
                     f"tokens(input:{response.usage.input_tokens}, output:{response.usage.output_tokens})"
                 )
 
-                # 收集本轮的 assistant 消息内容
-                assistant_content = []
-                tool_uses = []
+                # 收集本轮的 assistant 消息内容（同时剔除会让下一轮 400 的空 text block）
+                assistant_content, tool_uses, collect_notes = collect_assistant_content(response.content)
+                for note in collect_notes:
+                    logger.warning(f"运维第 {round_num} 轮响应内容异常: {note}")
 
-                for block in response.content:
-                    if block.type == "text":
-                        assistant_content.append({"type": "text", "text": block.text})
-                    elif block.type == "tool_use":
-                        assistant_content.append({
-                            "type": "tool_use",
-                            "id": block.id,
-                            "name": block.name,
-                            "input": block.input
-                        })
-                        tool_uses.append(block)
-
-                # 将 assistant 消息加入对话历史
+                # content 为空数组会被上游 400 拒绝，补占位文本（详见 Agentic 循环同处注释）
+                if not assistant_content:
+                    if tool_uses:
+                        logger.error(
+                            f"运维第 {round_num} 轮响应有 {len(tool_uses)} 个 tool_use 但 content 收集为空，"
+                            f"响应结构异常"
+                        )
+                    else:
+                        logger.warning(f"运维第 {round_num} 轮响应 content 为空，补占位文本以免下一轮请求 400")
+                        assistant_content = [{"type": "text", "text": "（本轮无输出）"}]
                 api_messages.append({"role": "assistant", "content": assistant_content})
 
                 # 如果没有工具调用，返回最终文本
@@ -1325,12 +2103,18 @@ class AnthropicProvider(AIProvider):
                                     )
                                 }, ensure_ascii=False)
 
+                        # 空 content 的 tool_result 会被上游以 400 拒绝
+                        if not result_str.strip():
+                            logger.warning(f"运维工具 {tool_name} 结果序列化为空，补占位文本")
+                            result_str = "（工具无返回内容）"
                         tool_results.append({
                             "type": "tool_result",
                             "tool_use_id": tool_use.id,
                             "content": result_str
                         })
-                        logger.debug(f"运维工具 {tool_name} 结果: {result}")
+                        # 只打规模和摘要，不打全文（运维工具会回传整段远端日志）
+                        logger.info(f"运维工具 {tool_name} 完成: {len(result_str)} 字符")
+                        logger.debug("运维工具 {} 结果: {}", tool_name, summarize_obj(result))
 
                     except Exception as e:
                         logger.error(f"运维工具 {tool_name} 执行失败: {e}")
@@ -1357,11 +2141,58 @@ class AnthropicProvider(AIProvider):
                     "error_detail": f"APIConnectionError: {e}",
                 }
             except anthropic.APIStatusError as e:
-                logger.error(f"Anthropic API 错误: status={e.status_code}, message={e.message}")
+                post_issues = audit_api_messages(api_messages)
+                log_api_status_error(
+                    mode="operations",
+                    round_num=round_num,
+                    error=e,
+                    api_messages=api_messages,
+                    base_url=self.client.base_url,
+                    model=self.model,
+                    audit_issues=post_issues,
+                )
+
+                # 运维循环此前完全没有 400 容错：请求体一旦被拒就整次放弃。
+                # 它和 Agentic 一样是多轮动态拼请求体，同样的缺陷必须同样补上。
+                if e.status_code == 400 and round_num > 1 and len(api_messages) >= 3:
+                    tool_format_hit = is_tool_format_400(e.message)
+                    if (tool_format_hit or post_issues) and body_retry_budget > 0:
+                        reason = "上游文案指向工具格式" if tool_format_hit else "本地自检发现结构问题"
+                        # 与 Agentic 分支同款：裁剪结果必须先过自检
+                        trimmed, reject = try_trim_last_tool_round(api_messages)
+                        if trimmed is not None:
+                            body_retry_budget -= 1
+                            api_messages = trimmed
+                            logger.warning(
+                                f"400 请求体被拒（{reason}），裁掉最后一轮工具交互后重试："
+                                f"轮次={round_num}, 剩余消息数={len(api_messages)}, "
+                                f"剩余重试预算={body_retry_budget}"
+                            )
+                            logger.warning(f"裁剪后请求体骨架: {describe_api_messages(api_messages)}")
+                            continue
+                        logger.error(f"400 无法通过裁剪自救（{reason}），放弃本次运维操作：{reject}")
+                        trim_reject_reason = reject
+                    elif body_retry_budget <= 0:
+                        logger.error("400 请求体重试预算已耗尽，放弃本次运维操作")
+
                 error_type = classify_api_error(e.status_code, str(e.message))
+                # 源头摘要，理由同 Agentic 分支（下游 redact 挡不住用户正文）
+                detail_parts = [
+                    f"status={e.status_code}",
+                    f"round={round_num}",
+                    f"message={summarize_text(e.message, limit=_ALERT_MSG_CHARS, label='upstream_msg')}",
+                ]
+                request_ids = extract_upstream_request_ids(e.message)
+                if request_ids:
+                    detail_parts.append(f"upstream_request_ids={','.join(request_ids)}")
+                detail_parts.append(
+                    f"body_audit={'; '.join(post_issues)}" if post_issues else "body_audit=未发现结构问题"
+                )
+                if trim_reject_reason:
+                    detail_parts.append(f"trim_rejected={trim_reject_reason}")
                 return friendly_api_error_message(error_type, e.message), {
                     "mode": "operations", "error": error_type,
-                    "error_detail": f"status={e.status_code}, message={e.message}",
+                    "error_detail": ", ".join(detail_parts),
                 }
             except Exception as e:
                 logger.error(f"Operations 循环异常: {e}", exc_info=True)
@@ -1620,9 +2451,11 @@ class AnthropicProvider(AIProvider):
             (reply_text, metadata) 元组
             metadata 包含 doc_count（检索到的文档数）等
         """
+        # 在 try 之外初始化：except 分支要拿它打请求体骨架，
+        # 若定义在 try 内部，转换阶段就抛异常时这个名字还不存在。
+        api_messages: List[Dict[str, Any]] = []
         try:
             # 转换消息格式
-            api_messages = []
             for msg in messages:
                 content_parts = []
                 for content in msg.content:
@@ -1701,15 +2534,30 @@ class AnthropicProvider(AIProvider):
             }
         except anthropic.APIStatusError as e:
             status_code = e.status_code
-            logger.error(f"Anthropic API 错误: status={status_code}, message={e.message}")
-            logger.error(f"请求详情: base_url={self.client.base_url}, model={self.model}")
-            logger.error(f"响应体: {e.response.text if hasattr(e.response, 'text') else 'N/A'}")
+            # 原来这里把响应体原样打出来（可能回显用户提问），改用统一诊断函数：
+            # 响应体截断 + 骨架代替正文，三种模式的错误日志形态也就一致了。
+            log_api_status_error(
+                mode="rag",
+                round_num=0,
+                error=e,
+                api_messages=api_messages,
+                base_url=self.client.base_url,
+                model=self.model,
+            )
 
             # 错误分类同时看状态码和错误文案：网关常把额度耗尽返回 403 而非 402
             error_type = classify_api_error(status_code, str(e.message))
+            # 源头摘要，理由同 Agentic 分支（下游 redact 挡不住用户正文）
+            detail_parts = [
+                f"status={status_code}",
+                f"message={summarize_text(e.message, limit=_ALERT_MSG_CHARS, label='upstream_msg')}",
+            ]
+            request_ids = extract_upstream_request_ids(e.message)
+            if request_ids:
+                detail_parts.append(f"upstream_request_ids={','.join(request_ids)}")
             return friendly_api_error_message(error_type, e.message), {
                 "mode": "rag", "error": error_type,
-                "error_detail": f"status={status_code}, message={e.message}",
+                "error_detail": ", ".join(detail_parts),
             }
 
     def check_health(self) -> bool:
