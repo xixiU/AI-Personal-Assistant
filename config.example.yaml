@@ -37,7 +37,7 @@ log_files:
 # AI配置
 ai:
   primary:
-    provider: "openai"  # AI 提供商: "openai" (OpenAI 兼容接口), "dify" (Dify 平台), "anthropic" (Anthropic Claude)
+    provider: "openai"  # AI 提供商: "openai" (OpenAI 兼容接口), "anthropic" (Anthropic Claude)
     base_url: "http://localhost:11434"  # 示例：Ollama 本地服务
     api_key: ""  # 本地服务留空，云服务填写 API Key
     model: "llama2"  # 示例：Ollama 模型名称
@@ -48,11 +48,6 @@ ai:
   #   base_url: ""  # 可选，留空使用官方 API；填写则使用代理或兼容服务
   #   api_key: "sk-ant-xxx"  # Anthropic API Key
   #   model: "claude-sonnet-4-20250514"
-
-  # Dify 特定配置（当 provider 为 "dify" 时使用）
-  dify:
-    app_type: "chat"  # 应用类型: "chat" (对话型) 或 "completion" (完成型)
-    user: "default-user"  # 用户标识，用于区分不同用户
 
   timeout: 90  # 超时时间（秒），文档获取可能较慢，建议设置较大值
   multimodal: false
@@ -84,8 +79,14 @@ adapters:
       base_url: "https://open.feishu.cn"  # 飞书开放平台地址（私有化部署时修改）
       app_id: ""           # 飞书应用 App ID
       app_secret: ""       # 飞书应用 App Secret
-      verification_token: ""  # 事件订阅验证 Token
-      encrypt_key: ""      # 事件加密 Key（可选）
+      # ===== Webhook 鉴权（两项至少配一项，否则任何人都能投递伪造事件）=====
+      # 回调地址一旦暴露，不鉴权就等于让任何人以任意身份给机器人发消息
+      # （可伪造 sender_id / chat_id / 消息正文）。两项都为空时服务启动会打 WARNING。
+      #
+      # 优先级：配了 encrypt_key 就**必须**加密推送，明文报文一律被拒（403）；
+      # 只配 verification_token 时走明文模式，比对报文里的 token 字段。
+      verification_token: ""  # 事件订阅验证 Token（明文模式下的身份凭据）
+      encrypt_key: ""      # 事件加密 Key（推荐配置；配了就必须在飞书后台同时开启加密推送）
       allowed_chats: []    # 允许的群聊 ID 白名单（为空则允许所有）
       allowed_users: []    # 允许的用户 ID 白名单（为空则允许所有）
       welcome_message: "👋 大家好！我是 AI 助手，很高兴加入这个群聊。\n\n我可以帮助大家回答问题、查询文档等。直接 @ 我或私法发送消息即可。\n\n📖 使用文档：https://example.com/docs/ai-assistant"  # 机器人入群欢迎消息（支持 HTTP 链接） 直接回复群聊消息不艾特需要开启【获取群组中所有消息】事件

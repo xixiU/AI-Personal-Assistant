@@ -257,14 +257,22 @@ def test_windows_reserved_names_are_escaped(raw):
     assert safe.endswith(raw[raw.rindex("."):])
 
 
-def test_ntfs_stream_suffix_is_dropped():
-    """NTFS 数据流后缀必须被截断，且不得把 .exe 洗成合法扩展名"""
+def test_ntfs_stream_colon_is_neutralized():
+    """
+    NTFS 数据流/盘符的冒号必须失效，且不得把 .exe 洗成合法扩展名。
+
+    行为变更（有意）：冒号从"截断"改为"替换成下划线"。截断会把
+    "app-2026-10-23 11:18:03.log" 砍成 "app-2026-10-23 11" 而丢掉扩展名，
+    导致合法日志被拒收（见下方 test_timestamped_log_names_accepted）。
+    改成替换后 "app.log:evil.exe" → "app.log_evil.exe"，后缀是 .exe 被拒收——
+    这比旧行为（截成 "app.log" 后放行）更保守，而不是更宽松。
+    """
     manager = LogFileManager(enabled=False, base_dir="/tmp/unused")
     safe = sanitize_filename("app.log:evil.exe", fallback="attachment.log")
-    assert ":" not in safe
-    assert safe == "app.log"
-    assert manager.is_allowed(safe)
-    # 冒号前是非法扩展名时不得被洗成合法的
+    assert ":" not in safe, "冒号必须失效，否则会在磁盘上创建 NTFS 数据流"
+    assert safe == "app.log_evil.exe"
+    assert not manager.is_allowed(safe), "落盘名以 .exe 结尾，不得放行"
+    # 冒号前是非法扩展名时同样不得被洗成合法的
     assert not manager.is_allowed(sanitize_filename("a:evil.exe", fallback="attachment.log"))
 
 
@@ -302,6 +310,138 @@ def test_trailing_dots_and_spaces_stripped():
     """Windows 会静默去掉首尾点与空格，清洗阶段就得去掉以免名字对不上"""
     assert sanitize_filename("app.log ", fallback="attachment.log") == "app.log"
     assert sanitize_filename(" app.log", fallback="attachment.log") == "app.log"
+
+
+# ============ 校验顺序：先按原始名判白名单，再清洗落地 ============
+#
+# 回归背景：原实现是「先 sanitize_filename 清洗、再 is_allowed 查白名单」。
+# sanitize_filename 在主体清空且无合法后缀时会返回兜底名 "attachment.log"，
+# 于是 "_"、"..."、"app.log."、""、"/" 这类根本没有合法扩展名的输入全都被清洗
+# **变成** .log，然后顺利通过白名单写进磁盘。白名单成了可构造绕过的装饰。
+# 修复把判定挪到清洗之前：准入只看原始名，兜底名只用于已通过白名单的落地路径。
+
+@pytest.mark.parametrize("raw", [
+    "_",            # 纯下划线：主体被 strip 清空 → 旧实现洗成 attachment.log
+    "...",          # 纯点号：同上
+    "app.log.",     # 尾随点：splitext 取到 ext="." 形态不合法 → 主体整体保留后被 strip
+    "",             # 空名
+    "   ",          # 纯空格
+    "/",            # 纯分隔符
+    "\\",
+    "../..",
+    "..",
+    "._",
+    "attachment",   # 兜底名本身不带扩展名，也不该被放行
+])
+def test_names_without_valid_ext_cannot_be_laundered_into_whitelist(server_with_manager, raw):
+    """无合法扩展名的输入不得被清洗"洗进"白名单，且不得落地任何文件"""
+    srv, _manager, tmp = server_with_manager
+
+    contents, error = srv._collect_web_log_files("sess1", [
+        {"name": raw, "data": _b64("payload")},
+    ])
+
+    assert error is not None, f"{raw!r} 绕过了扩展名白名单"
+    assert "不支持的文件类型" in error
+    assert contents == []
+    assert _count_files(tmp) == 0, f"{raw!r} 被写进了磁盘"
+
+
+@pytest.mark.parametrize("name", [
+    "app.log", "trace.txt", "stdout.out", "stderr.err", "bundle.zip",
+    "APP.LOG", "ログ.log", "日志.txt", "a.log.txt",
+])
+def test_legitimate_extensions_still_accepted(server_with_manager, name):
+    """修复不能把合法扩展名连带挡掉——.log/.txt/.out/.err/.zip 必须照旧能进"""
+    srv, _manager, tmp = server_with_manager
+
+    contents, error = srv._collect_web_log_files("sess1", [
+        {"name": name, "data": _b64("ERROR boom")},
+    ])
+
+    assert error is None, f"合法文件 {name!r} 被拒收: {error}"
+    assert len(contents) == 1
+    assert _count_files(tmp) == 1
+
+
+@pytest.mark.parametrize("name", [
+    "setup.exe", "report.docx", "a.log.exe", "payload.sh", "lib.dll",
+    "a:evil.exe",        # NTFS 数据流：冒号被替换而非截断，后缀仍是 .exe
+    "app.log:evil.exe",  # 落盘名确实以 .exe 结尾，必须拒收
+])
+def test_disallowed_extensions_still_rejected(server_with_manager, name):
+    """非白名单扩展名必须照旧被拒，且不得落地"""
+    srv, _manager, tmp = server_with_manager
+
+    contents, error = srv._collect_web_log_files("sess1", [
+        {"name": name, "data": _b64("MZ")},
+    ])
+
+    assert error is not None, f"{name!r} 通过了白名单"
+    assert _count_files(tmp) == 0
+
+
+def test_whitelist_verdict_matches_landed_extension(server_with_manager):
+    """
+    不变式：按原始名判定通过的后缀，必须等于落盘名字的后缀。
+
+    save_bytes 内部会再 sanitize_filename 一次，两处判定不一致就会出现
+    「校验通过但落地名字的扩展名变了」。split_name_ext 在替换危险字符之后才切
+    扩展名，正是为了保证这一点。
+    """
+    srv, _manager, tmp = server_with_manager
+
+    contents, error = srv._collect_web_log_files("sess1", [
+        {"name": "app-2026-10-23 11:18:03.log", "data": _b64("ERROR ts")},
+    ])
+
+    assert error is None
+    landed = contents[0].data["path"]
+    assert landed.lower().endswith(".log"), f"落地名的后缀与判定不一致: {landed}"
+    assert os.path.isfile(landed)
+
+
+# ============ 带时间戳的日志名不得被误拒（原 P2） ============
+#
+# split_name_ext 过去在冒号处**截断**（取冒号前半段），目的是防 "a:evil.exe"
+# 被洗成 "evil.exe" 的 fail-open。但截断误伤了带时间戳的真实日志名：
+# "app-2026-10-23 11:18:03.log" 被截成 "app-2026-10-23 11"，扩展名整段丢失，
+# is_allowed 判为空后缀 → 用户上传的合法日志被 400 拒收。
+# 改成替换成下划线后两头都顾：替换不会移除结尾的扩展名，所以 .log 仍判为 .log，
+# 而 "a:evil.exe" 变成 "a_evil.exe"、后缀仍是 .exe，照旧被拒收。
+
+@pytest.mark.parametrize("raw, expect", [
+    ("app-2026-10-23 11:18:03.log", "app-2026-10-23 11_18_03.log"),
+    ("2026-01-02 03:04:05.txt", "2026-01-02 03_04_05.txt"),
+])
+def test_timestamped_log_names_accepted(server_with_manager, raw, expect):
+    """带冒号时间戳的日志名必须被接收，冒号替换成下划线且扩展名保留"""
+    srv, _manager, tmp = server_with_manager
+
+    contents, error = srv._collect_web_log_files("sess1", [
+        {"name": raw, "data": _b64("ERROR 2026")},
+    ])
+
+    assert error is None, f"带时间戳的合法日志被拒收: {error}"
+    assert contents[0].data["name"] == expect
+    assert ":" not in contents[0].data["name"]
+    assert _count_files(tmp) == 1
+
+
+def test_colon_replacement_does_not_reopen_fail_open():
+    """
+    把冒号从"截断"改成"替换"之后，原先那层 fail-open 防护不能退化。
+
+    关键点：替换**不会移除结尾的扩展名**，所以冒号后面的 .exe 仍然是判定依据。
+    """
+    manager = LogFileManager(enabled=False, base_dir="/tmp/unused")
+
+    # 冒号后是非法扩展名 → 照旧拒收（这是原注释里担心的 fail-open）
+    assert not manager.is_allowed("a:evil.exe")
+    assert not manager.is_allowed("app.log:evil.exe")
+    assert not manager.is_allowed(sanitize_filename("a:evil.exe", fallback="attachment.log"))
+    # 冒号本身不得出现在落地名字里（否则会创建 NTFS 数据流）
+    assert ":" not in sanitize_filename("app.log:evil.exe", fallback="attachment.log")
 
 
 # ============ 请求体上限 ============

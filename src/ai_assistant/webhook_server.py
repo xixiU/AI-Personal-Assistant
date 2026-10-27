@@ -5,6 +5,7 @@ Webhook 服务器
 """
 import base64
 import binascii
+import hmac
 import queue
 import re
 from flask import Flask, request, jsonify, send_from_directory
@@ -31,6 +32,12 @@ _MAX_CONTENT_LENGTH = int(_MAX_WEB_LOG_FILES * 20 * 1024 * 1024 * 1.5)
 # session_id 会作为日志文件的落地子目录名（sanitize_filename 已挡住路径穿越），
 # 但前端可传任意字符串，不限制格式就能在落地目录下无限创建子目录。
 _SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_.\-]{1,64}$")
+
+# 鉴权失败的响应码：用 403 而非本文件其他分支惯用的 200。
+# 伪造请求不存在"飞书会重试"的顾虑；反过来，如果是部署配置错位（配了 encrypt_key
+# 但飞书控制台推的是明文），403 会直接出现在飞书开放平台的推送失败统计里，
+# 比只在本地日志写一行更容易被发现。代价是飞书会对该事件重试若干次。
+_AUTH_FAILED_STATUS = 403
 
 
 class WebhookServer:
@@ -133,8 +140,18 @@ class WebhookServer:
             return jsonify({"error": "index.html not found"}), 404
 
     def set_feishu_adapter(self, adapter):
-        """设置飞书适配器"""
+        """
+        设置飞书适配器，并立即检查 webhook 鉴权配置。
+
+        在这里而不是在 main.py 里做鉴权告警：适配器注入是服务端第一次拿到
+        encrypt_key / verification_token 的时刻，也是启动流程的一部分，
+        放在此处可以保证任何接线方式都会被检查到，不依赖调用方记得调。
+
+        Args:
+            adapter: FeishuBotAdapter 实例
+        """
         self.feishu_adapter = adapter
+        self.warn_if_webhook_unauthenticated()
 
     def set_event_queue(self, event_queue: queue.Queue):
         """
@@ -199,15 +216,13 @@ class WebhookServer:
                 logger.info("📨 Webhook received: encrypted=no")
             logger.debug(f"📨 Raw payload(截断): {str(data)[:_RAW_PAYLOAD_DEBUG_CHARS]}")
 
-            # 如果是加密数据，先解密以判断事件类型（URL 验证必须同步返回，不能走异步队列）
-            decrypted_data = data
-            if "encrypt" in data and self.feishu_adapter and self.feishu_adapter.encrypt_key:
-                try:
-                    decrypted_data = self.feishu_adapter._decrypt(data["encrypt"])
-                except Exception as e:
-                    logger.error(f"Failed to decrypt webhook for type check: {e}")
-                    # 解密失败也要返回 200 避免飞书重试
-                    return jsonify({}), 200
+            # 强制鉴权门禁：校验不通过的报文一律拒绝，绝不入队。
+            # 必须在读取任何事件字段之前完成——包括 url_verification 与
+            # card.action.trigger 这两条同步返回的路径，否则伪造报文仍能驱动它们。
+            decrypted_data, auth_error = self._authenticate_feishu_payload(data)
+            if auth_error:
+                logger.error(f"🚫 Webhook 鉴权失败，已拒绝: {auth_error}")
+                return jsonify({"error": "unauthorized"}), _AUTH_FAILED_STATUS
 
             # 解密后（或本就明文）的报文才是信息源，打一条可读摘要
             logger.info(f"📨 {self._summarize_event(decrypted_data)}")
@@ -236,7 +251,9 @@ class WebhookServer:
                     self.event_queue.put_nowait({
                         "trace_id": trace_id,
                         "adapter": self.feishu_adapter,
-                        "raw_data": data  # 存储原始数据，不预处理
+                        # 存储原始数据，不预处理：加密模式下适配器会自行解密。
+                        # 入队的报文已经过上面的鉴权门禁，不再是未校验的 payload。
+                        "raw_data": data
                     })
                     logger.info(f"✅ Event enqueued, queue size: {self.event_queue.qsize()}/{self.event_queue.maxsize}")
                 except queue.Full:
@@ -250,6 +267,124 @@ class WebhookServer:
             logger.error(f"Error handling webhook: {e}")
             # 即使出错也返回 200，避免飞书重试
             return jsonify({}), 200
+
+    def _authenticate_feishu_payload(self, data: Any) -> Tuple[Optional[dict], Optional[str]]:
+        """
+        校验飞书回调报文的真实性，并返回可信的（解密后）报文。
+
+        这是**强制门禁**而不是条件分支——这一点是本函数存在的全部理由。
+        原实现写的是 `if "encrypt" in data and ...encrypt_key:`，解密只在报文自带
+        encrypt 字段时才发生。于是任何知道 webhook URL 的人 POST 一个不带 encrypt
+        字段的明文 JSON，就能跳过全部校验让机器人处理伪造事件：伪造 sender_id、
+        chat_id、消息正文都可以。「报文里没有 encrypt 字段」反而成了攻击者的免费
+        通道。防回归：判定顺序必须是「先看服务端配了什么」，而不是「先看报文带了什么」。
+
+        校验链（按配置强度从高到低）：
+        1. 配了 encrypt_key：**必须**解密成功才放行。报文不带 encrypt 字段 → 拒绝。
+        2. 未配 encrypt_key 但配了 verification_token：比对报文里的 token 字段
+           （飞书明文模式下 v1.0 在顶层 token，v2.0 在 header.token）。
+        3. 两者都没配：放行（部署方的选择），启动时已打 WARNING。
+
+        Args:
+            data: request.get_json() 得到的原始报文
+
+        Returns:
+            (可信报文, 拒绝原因)；拒绝原因非空时调用方必须拒绝请求，不得入队
+        """
+        if not isinstance(data, dict):
+            return None, "payload 不是 JSON 对象"
+
+        adapter = self.feishu_adapter
+        encrypt_key = getattr(adapter, "encrypt_key", "") if adapter else ""
+        verification_token = getattr(adapter, "verification_token", "") if adapter else ""
+
+        if encrypt_key:
+            encrypted = data.get("encrypt")
+            if not isinstance(encrypted, str) or not encrypted:
+                # 核心修复点：配了加密就不接受明文。这正是原来的绕过入口。
+                return None, "服务端已配置 encrypt_key，但报文未加密（缺少 encrypt 字段）"
+            try:
+                decrypted = adapter._decrypt(encrypted)
+            except Exception as e:
+                # 解密失败 = 签名对不上 = 报文不可信，连事件类型都不该读
+                return None, f"报文解密失败: {e}"
+            if not isinstance(decrypted, dict):
+                return None, "解密后的报文不是 JSON 对象"
+            # 加密模式下 token 字段也在密文里。解密成功已经证明对方持有 encrypt_key，
+            # 这里再比对 token 只是加一道；token 缺失不拒绝（飞书不同版本行为不一致）。
+            if verification_token:
+                payload_token = self._extract_payload_token(decrypted)
+                if payload_token and not hmac.compare_digest(payload_token, verification_token):
+                    return None, "解密成功但 verification_token 不匹配"
+            return decrypted, None
+
+        if verification_token:
+            # 明文模式：verification_token 是唯一的身份凭据。
+            # 原实现读了 config 的 verification_token 存成属性，但全仓库从来没有
+            # 任何一处比较过它——配了等于只是个假的安全感。这里是第一次真正使用。
+            payload_token = self._extract_payload_token(data)
+            if not payload_token:
+                return None, "明文报文缺少 token 字段，无法校验来源"
+            # compare_digest：避免按字节短路比较泄露 token 前缀（时序侧信道）
+            if not hmac.compare_digest(payload_token, verification_token):
+                return None, "verification_token 不匹配"
+            return data, None
+
+        # 两者都没配：裸奔模式，启动时已告警，此处放行以保持向后兼容
+        return data, None
+
+    @staticmethod
+    def _extract_payload_token(data: dict) -> str:
+        """
+        取报文里的 verification token，兼容飞书两种报文格式。
+
+        v1.0（type=event_callback）在顶层 token；v2.0 在 header.token。
+        两处都取不到时返回空串，由调用方决定如何处理。
+
+        Args:
+            data: 报文 dict（明文，或已解密）
+
+        Returns:
+            token 字符串；不存在时返回空串
+        """
+        top = data.get("token")
+        if isinstance(top, str) and top:
+            return top
+        header = data.get("header")
+        if isinstance(header, dict):
+            nested = header.get("token")
+            if isinstance(nested, str) and nested:
+                return nested
+        return ""
+
+    def warn_if_webhook_unauthenticated(self) -> bool:
+        """
+        启动时检查 webhook 是否处于无鉴权状态，是则打醒目 WARNING。
+
+        既没有 encrypt_key 也没有 verification_token 时，/webhook/feishu 对公网
+        完全开放——任何人都能投递伪造事件。这是部署方的选择（例如只在内网监听），
+        但不能默默裸奔，必须在日志开头就能看见。
+
+        Returns:
+            True 表示当前处于无鉴权状态（已打 WARNING）
+        """
+        adapter = self.feishu_adapter
+        encrypt_key = getattr(adapter, "encrypt_key", "") if adapter else ""
+        verification_token = getattr(adapter, "verification_token", "") if adapter else ""
+
+        if encrypt_key:
+            logger.info("Webhook 鉴权：已启用事件加密（encrypt_key），明文报文将被拒绝")
+            return False
+        if verification_token:
+            logger.info("Webhook 鉴权：已启用 verification_token 校验（明文模式）")
+            return False
+
+        logger.warning(
+            "⚠️ Webhook 处于无鉴权状态：未配置 encrypt_key 也未配置 verification_token。"
+            "任何知道回调地址的人都能投递伪造事件（可伪造发送者、群聊与消息内容）。"
+            "请在 config.yaml 的 adapters[feishu].bot_api 中至少配置一项。"
+        )
+        return True
 
     @staticmethod
     def _detect_attachment(message_type: str, content_str: Any) -> str:
@@ -412,11 +547,27 @@ class WebhookServer:
                 return [], "files 元素格式错误：应为 {name, data} 对象"
 
             raw_name = item.get("name") or "attachment"
-            # 日志与回显一律用清洗后的名字，不直接拼原始名
-            safe_name = sanitize_filename(raw_name, fallback="attachment.log")
 
-            if not manager.is_allowed(safe_name):
-                return [], f"不支持的文件类型：{safe_name}（仅支持 .log/.txt/.out/.err/.zip）"
+            # 先按【原始文件名】判白名单，再清洗落地。顺序不能反（防回归）。
+            #
+            # 原实现是「先 sanitize 再 is_allowed」，于是清洗的兜底逻辑成了白名单
+            # 绕过通道：sanitize_filename 在主体清空且无合法后缀时返回兜底名
+            # "attachment.log"，所以 "_"、"..."、"app.log."、""、"/" 这类根本没有
+            # 合法扩展名的输入全都被洗成 .log，然后顺利通过白名单写进磁盘。
+            # 攻击者只要构造这类名字就能绕过"仅支持 .log/.txt/.out/.err/.zip"。
+            #
+            # 改成按原始名判定后，这些输入取到空后缀被直接拒收；
+            # 兜底名只在"已经通过白名单"的路径上用于落地，不再影响准入判定。
+            if not manager.is_allowed(raw_name):
+                # 回显清洗后的名字：原始名可能带控制字符/路径分隔符，不直接拼进响应
+                shown = sanitize_filename(raw_name, fallback="attachment")
+                return [], f"不支持的文件类型：{shown}（仅支持 .log/.txt/.out/.err/.zip）"
+
+            # 日志与回显一律用清洗后的名字，不直接拼原始名。
+            # split_name_ext 保证清洗不改变扩展名（见其 docstring 的"核心不变式"），
+            # 因此此处 safe_name 的后缀必然与上面判定通过的后缀一致，
+            # 不会出现"校验通过但落地名字的扩展名变了"。
+            safe_name = sanitize_filename(raw_name, fallback="attachment.log")
 
             data = self._decode_base64_payload(item.get("data"))
             if data is None:
@@ -598,14 +749,14 @@ class WebhookServer:
                 logger.info("📨 Card action received: encrypted=no")
             logger.debug(f"📨 Card raw payload(截断): {str(data)[:_RAW_PAYLOAD_DEBUG_CHARS]}")
 
-            # 如果配置了加密，先解密
-            if self.feishu_adapter and self.feishu_adapter.encrypt_key and "encrypt" in data:
-                try:
-                    data = self.feishu_adapter._decrypt(data["encrypt"])
-                    logger.info("Card action decrypted successfully")
-                except Exception as e:
-                    logger.error(f"Failed to decrypt card action: {e}")
-                    return jsonify({}), 200
+            # 同一道强制鉴权门禁。这个端点原本也是「带 encrypt 才解密」的条件分支，
+            # 伪造的明文卡片事件能直接驱动 process_card_action（伪造点赞/点踩、
+            # 以任意 open_id 提交反馈）。防回归：两个端点的鉴权必须共用同一个函数，
+            # 只修 /webhook/feishu 会把绕过口留在这里。
+            data, auth_error = self._authenticate_feishu_payload(data)
+            if auth_error:
+                logger.error(f"🚫 Card action 鉴权失败，已拒绝: {auth_error}")
+                return jsonify({"error": "unauthorized"}), _AUTH_FAILED_STATUS
 
             # 验证事件类型
             event_type = data.get("header", {}).get("event_type", "")

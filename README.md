@@ -6,7 +6,7 @@
 
 ### 核心能力
 - **多 IM 平台支持**：飞书（Bot API + Webhook）、微信（UI 自动化）
-- **智能回复**：基于 Claude/GPT/Dify 等大模型的上下文感知回复
+- **智能回复**：基于 Claude/GPT 等大模型的上下文感知回复
 - **RAG 知识库检索**：混合检索（向量语义 + BM25 关键词）+ AI 标题过滤
 - **Agentic 代码排查**：Claude 自主调用 Git 工具，分析日志截图/日志文件并定位代码问题
 - **运维操作助手**：通过 `/运维` 指令远程管理服务器，查看状态、重启应用、分析日志（支持审批流程）
@@ -388,14 +388,10 @@ trigger:
 ```yaml
 ai:
   primary:
-    provider: "anthropic"     # openai / anthropic / dify
+    provider: "anthropic"     # openai / anthropic
     base_url: "https://api.anthropic.com"
     api_key: "sk-ant-xxx"     # 必填，从环境变量或直接填写
     model: "claude-3-5-sonnet-20241022"
-  
-  dify:                       # Dify 专用配置（如使用 dify provider）
-    app_type: "chatbot"       # chatbot / agent / workflow
-    user: "default-user"
   
   timeout: 90                 # API 超时（秒）
   multimodal: false           # 是否启用多模态（图片输入）
@@ -408,8 +404,8 @@ adapters:
     mode: "bot_api"           # bot_api（推荐）或 ui_automation
     app_id: "cli_xxx"         # 飞书应用 ID
     app_secret: "xxx"         # 飞书应用 Secret
-    verification_token: "xxx" # Webhook 验证 Token
-    encrypt_key: "xxx"        # Webhook 加密 Key
+    verification_token: "xxx" # Webhook 验证 Token（明文模式下的身份凭据）
+    encrypt_key: "xxx"        # Webhook 加密 Key（推荐；配了就必须在飞书后台开启加密推送）
     allowed_chats: []         # 白名单群组 ID（空=全部）
     allowed_users: []         # 白名单用户 ID（空=全部）
     welcome_message: "你好，我是 AI 助手..."
@@ -549,6 +545,18 @@ log_files:
 3. 订阅事件：`im.message.receive_v1`
 
 > **注意**：飞书要求 Webhook 必须使用 HTTPS。
+
+##### Webhook 鉴权（必读）
+
+回调地址是公网可达的，不鉴权就等于让任何知道该地址的人以**任意身份**给机器人发消息（可伪造 `sender_id`、`chat_id` 与消息正文）。`verification_token` 与 `encrypt_key` 至少配一项：
+
+| 配置情况 | 服务端行为 |
+|---------|-----------|
+| 配了 `encrypt_key` | **必须**加密推送，明文报文一律拒绝（HTTP 403）。需在飞书后台「事件订阅」同时开启加密推送并填入同一个 Key |
+| 只配 `verification_token` | 明文模式，校验报文里的 `token` 字段，不匹配则拒绝（HTTP 403） |
+| 两项都为空 | 放行（兼容既有部署），启动时打 `⚠️ Webhook 处于无鉴权状态` WARNING |
+
+> **升级提示**：如果你配了 `encrypt_key` 但飞书后台没有开启加密推送，升级后机器人会收不到消息，日志里会有 `🚫 Webhook 鉴权失败` 且飞书开放平台的推送失败统计会上升。此时要么在飞书后台开启加密推送，要么清空 `encrypt_key` 改用 `verification_token`。
 
 #### Webhook HTTPS 配置
 
@@ -781,8 +789,7 @@ AI-Personal-Assistant/
 │   │
 │   ├── providers/               # AI Provider 实现
 │   │   ├── anthropic_provider.py # Anthropic Claude API
-│   │   ├── openai_provider.py   # OpenAI / 兼容 API（如 Azure、本地模型）
-│   │   └── dify_provider.py     # Dify 平台（chatbot/agent/workflow）
+│   │   └── openai_provider.py   # OpenAI / 兼容 API（如 Azure、本地模型）
 │   │
 │   ├── static/                  # Web 前端静态资源
 │   │   └── index.html           # Web 聊天界面（纯前端 SPA）

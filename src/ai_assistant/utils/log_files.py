@@ -38,6 +38,7 @@ _ZIP_MAX_TOTAL_BYTES = 200 * 1024 * 1024  # 解压后总量上限 200MB，防解
 #
 # 黑名单内容：ASCII 控制字符与 DEL（文件名里不可见，易被用来伪装）、路径分隔符
 # / \、Windows 保留字符 < > : " | ? *（其中 : 同时是 NTFS 数据流与盘符分隔符）。
+# 冒号被替换成下划线而非截断，原因见 split_name_ext 的注释。
 _UNSAFE_NAME_RE = re.compile(r'[\x00-\x1f\x7f<>:"/\\|?*]')
 
 # 路径分隔符：os.path.basename 只认当前平台的分隔符，Linux 上取不出
@@ -68,8 +69,14 @@ def split_name_ext(name: str) -> Tuple[str, str]:
     """
     从原始文件名中切出（名字主体, 扩展名），扩展名判定不受主体净化影响。
 
-    先剥目录与 NTFS 数据流后缀，再切扩展名。这样即使主体被整体改写，扩展名也
-    原样保留——这是 ログ.log 被误拒的直接成因（主体变下划线后扩展名被 strip 吞掉）。
+    先剥目录、再把危险字符替换成下划线，最后切扩展名。这样即使主体被整体改写，
+    扩展名也原样保留——这是 ログ.log 被误拒的直接成因（主体变下划线后扩展名被
+    strip 吞掉）。
+
+    核心不变式：**判定用的扩展名必须等于最终落盘名字的扩展名**。
+    sanitize_filename 用本函数切出的 ext 拼最终名字，is_allowed 又用本函数取
+    ext，因此只要 ext 取自"危险字符已替换之后"的字符串，「校验通过的后缀」与
+    「磁盘上的后缀」就永远一致，不会出现校验一个、落地另一个。
 
     Args:
         name: 原始文件名（可能带路径、盘符或 ":stream" 后缀）
@@ -79,17 +86,35 @@ def split_name_ext(name: str) -> Tuple[str, str]:
     """
     # 两种分隔符都切，取最后一段，挡住 ../../etc/passwd 与 ..\..\windows\cfg
     base = _PATH_SEP_RE.split(name or "")[-1]
-    # NTFS 数据流 / 盘符：在冒号处截断而不是替换。替换成下划线会把
-    # "app.log:evil.exe" 变成 "app.log_evil.exe"，扩展名反而变成 .exe。
-    # 取冒号前半段的代价：盘符相对路径 "C:a.log"（无分隔符）会被截成 "C"，
-    # 进而因无扩展名被 is_allowed 拒收。这是有意的取舍——浏览器 file input
-    # 只会给出裸文件名，带盘符的形态必然带分隔符（C:\x 或 C:/x）而被上面切掉；
-    # 反过来若把单字母当盘符跳过，"a:evil.exe" 就能洗成 "evil.exe"，是 fail-open。
-    base = base.split(":", 1)[0]
+    # NTFS 数据流 / 盘符的冒号：替换成下划线，而不是在冒号处截断。
+    #
+    # 原先是截断（取冒号前半段），目的是防 "a:evil.exe" 被洗成 "evil.exe" 的
+    # fail-open。但截断误伤了带时间戳的日志名：
+    # "app-2026-10-23 11:18:03.log" 被截成 "app-2026-10-23 11"，扩展名整段丢失，
+    # is_allowed 判为空后缀 → 用户上传的合法日志被 400 拒收。
+    #
+    # 替换两头都顾，因为替换**不会移除结尾的扩展名**：
+    #   "a:evil.exe"        → "a_evil.exe"       → .exe → 照旧拒收（无 fail-open）
+    #   "app.log:evil.exe"  → "app.log_evil.exe" → .exe → 拒收（落盘名确实以 .exe 结尾）
+    #   "app-2026-10-23 11:18:03.log" → "app-2026-10-23 11_18_03.log" → .log → 放行
+    # 判定的后缀就是落盘名字的后缀（见上面的不变式）；冒号本身已被替换掉，
+    # 不可能在磁盘上创建 NTFS 数据流或引用盘符。
+    base = _UNSAFE_NAME_RE.sub("_", base)
+
+    # 只剥尾部空格，不剥尾部点。
+    # 剥空格：sanitize_filename 后面会 strip 掉它，不在这里一起剥会让 "app.log "
+    # 的 ext 被 _EXT_RE 判为不合法（".log " 带空格）→ 按原始名判定时被拒收，而
+    # 清洗后的 "app.log" 又是合法的，违反上面的不变式。
+    # 不剥点："app.log." 的后缀必须判为空而被拒收——这是白名单绕过的入口之一
+    # （过去它被洗成兜底名 "attachment.log" 从而过关）。
+    base = base.rstrip(" ")
 
     stem, ext = os.path.splitext(base)
     if not _EXT_RE.match(ext):
-        # 形态不合法（含横线、过长、或根本没有点）时整体当主体
+        # 形态不合法（含横线/空格、过长、只有一个点、或根本没有点）时整体当主体。
+        # 这同时让 "app.log."（splitext 取到 ext="."）、"..."、"_" 取到空后缀而被
+        # is_allowed 拒收——防回归：它们过去会被 sanitize_filename 洗成兜底名
+        # "attachment.log" 从而绕过白名单，详见 _collect_web_log_files 的注释。
         return base, ""
     return stem, ext
 
