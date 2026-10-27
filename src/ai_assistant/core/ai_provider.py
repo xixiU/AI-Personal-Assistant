@@ -5,7 +5,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 from loguru import logger
-from ai_assistant.core.models import Message
+from ai_assistant.core.models import Content, Message
 
 
 class DocIndexingInProgressError(Exception):
@@ -385,6 +385,99 @@ def log_subcall_degraded(subcall: str, reason: str, raw: str, query_preview: str
         f"⚠️ AI 子调用降级: subcall={subcall}, reason={reason}, "
         f"query='{query_preview}', raw_head={snippet!r}"
     )
+
+
+# 图片占位文本：OpenAI 兼容网关背后的模型不保证支持视觉输入，直接塞
+# image_url 可能让整次请求 400（从"丢图但能回答"退化成"完全回不了"），
+# 因此纯文本通道不做视觉输入。但必须把"有一张图我读不到"告诉模型，否则它会
+# 把只剩文字的提问当作完整信息，一本正经地瞎答。
+_IMAGE_UNSUPPORTED_PLACEHOLDER = (
+    "[用户发送了一张图片，但当前 AI 通道不支持图像输入，图片内容未被读取。"
+    "如果回答依赖图片内容，请明确告知用户你看不到图片，不要凭猜测作答。]"
+)
+
+
+def flatten_content_to_text(content: Content) -> str:
+    """
+    把单个 Content 块拍平成纯文本，供纯文本通道（OpenAI 兼容 API）使用。
+
+    防回归：原实现只认 type == "text" 且没有 else 分支，log_file / image
+    内容块被静默丢弃——config.example.yaml 的默认 provider 是 "openai"，
+    所以按默认配置部署时，用户上传的日志文件根本到不了模型，
+    AI 只收到问题文本然后一本正经地瞎答。
+    未识别的类型一律落 warning，下次新增 Content 类型时能立刻看见漏网，
+    而不是再次无声吞掉。
+
+    ⚠️ 新增 Content 类型时，这里和 anthropic_provider._content_to_api_parts
+    两处都要同步改。两边输出形态不同（这里是纯文本，那边是 Anthropic
+    content blocks），没法共用一份实现，只能靠这条注释提醒——
+    本项目已经为"漏改一处导致附件静默丢失"付过一次代价。
+
+    日志只打 Content.summary()（文件名 + 正文长度），不得输出文件正文，
+    这是项目硬规则（CLAUDE.md 禁止在日志中记录完整用户消息）。
+
+    Args:
+        content: 单个 Content 内容块
+
+    Returns:
+        拍平后的文本；无法表达的内容块返回空字符串
+    """
+    if content.type == "text":
+        return content.data if isinstance(content.data, str) else str(content.data)
+
+    if content.type == "log_file":
+        if not isinstance(content.data, dict):
+            logger.warning(f"log_file 内容块格式异常已丢弃: {content.summary()}")
+            return ""
+
+        # 小文件带正文，大文件/压缩包只给路径与说明，由 AI 按需读取。
+        # 字段组织方式与 anthropic_provider._content_to_api_parts 保持一致，
+        # 否则同一份附件在不同 provider 下表现不一样。
+        name = content.data.get("name", "attachment")
+        path = content.data.get("path", "")
+        note = content.data.get("note", "")
+        text = content.data.get("text", "")
+        parts = [f"[用户上传的日志文件] 文件名: {name}"]
+        if path:
+            parts.append(f"本地路径: {path}")
+        if note:
+            parts.append(note)
+        if text:
+            parts.append(f"文件内容:\n{text}")
+        elif path and not note:
+            parts.append("（内容未内联，可用代码排查工具读取上述路径）")
+
+        logger.info(f"日志文件已注入 prompt: {content.summary()}")
+        return "\n".join(parts)
+
+    if content.type == "image":
+        logger.warning(
+            f"本通道不支持图像输入，图片内容已丢弃（仅注入占位说明）: {content.summary()}"
+        )
+        return _IMAGE_UNSUPPORTED_PLACEHOLDER
+
+    logger.warning(
+        f"未知内容类型 '{content.type}' 已丢弃，"
+        f"请在 flatten_content_to_text 中补充处理: {content.summary()}"
+    )
+    return ""
+
+
+def flatten_message_text(msg: Message) -> str:
+    """
+    把一条 Message 的所有内容块拍平成单段文本。
+
+    多个内容块用换行连接（原实现是无分隔符直接 += ，日志文件块与提问文本
+    黏在一起会丢掉边界）。
+
+    Args:
+        msg: 消息对象
+
+    Returns:
+        该消息的纯文本表示（可能为空字符串）
+    """
+    parts = [flatten_content_to_text(c) for c in msg.content]
+    return "\n".join(p for p in parts if p)
 
 
 @dataclass

@@ -26,6 +26,7 @@ from ai_assistant.core.ai_provider import (
     wrap_user_data,
     parse_doc_index_list,
     log_subcall_degraded,
+    flatten_message_text,
 )
 from ai_assistant.core.models import Message
 
@@ -81,10 +82,9 @@ class OpenAIProvider(AIProvider):
                 api_messages.append({"role": "system", "content": system_content})
 
             for msg in messages:
-                content_text = ""
-                for content in msg.content:
-                    if content.type == "text":
-                        content_text += content.data
+                # 必须走 flatten_message_text 而不是只取 text 块：
+                # 否则 log_file / image 内容块会被静默丢弃（见该函数的防回归说明）
+                content_text = flatten_message_text(msg)
 
                 api_messages.append({
                     "role": msg.role,
