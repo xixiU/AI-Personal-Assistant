@@ -26,10 +26,15 @@ class _StubApp:
         self._pending_lone_images = {}
         self._lone_image_wait = wait
 
-    # 直接复用被测实现，保证测的是真代码而不是副本
+    # 直接复用被测实现，保证测的是真代码而不是副本。
+    # _take_pending_and_defer 是 _process_event 里「pop 暂存 + 进等待窗口」那段的
+    # 收口，必须连它一起复用：只测 _defer_lone_attachment 会漏掉调用方先无条件
+    # pop 这个关键时序，曾因此产生假绿灯（见
+    # test_consecutive_files_are_merged_not_overwritten）。
     from ai_assistant.main import AIAssistant
 
     _defer_lone_attachment = AIAssistant._defer_lone_attachment
+    _take_pending_and_defer = AIAssistant._take_pending_and_defer
 
 
 def _log_content(name: str = "app.log") -> Content:
@@ -39,6 +44,29 @@ def _log_content(name: str = "app.log") -> Content:
         "text": "ERROR something broke",
         "note": "",
     })
+
+
+def _simulate_attachment_event(app, session_id, image_data, own_logs, message_id):
+    """
+    复现 _process_event 收到一条纯附件消息时的真实时序。
+
+    关键是**不要**跳过调用方的无条件 pop 直接调 _defer_lone_attachment：
+    线上流程是「先 pop 清空槽位 → 再 defer」，跳过 pop 会让 defer 内部的合并
+    分支看到残留的旧附件而误判为正常，这正是假绿灯的成因。
+
+    Returns:
+        {"deferred": bool, "image_in_hand": ..., "logs_in_hand": [...]}
+        deferred 对应 _process_event 里"直接 return"的分支；
+        in_hand 是超时后调用方手里实际还剩的附件（会被并入 content_parts）。
+    """
+    pending_image, pending_logs, deferred = app._take_pending_and_defer(
+        session_id, image_data, own_logs or [], "", message_id
+    )
+    return {
+        "deferred": deferred,
+        "image_in_hand": image_data or pending_image,
+        "logs_in_hand": list(pending_logs) + list(own_logs or []),
+    }
 
 
 def test_lone_log_file_taken_over_by_text():
@@ -176,12 +204,15 @@ def test_parse_stage_must_not_prefill_default_question():
         "同样会让延迟等待失效"
     )
 
-    # 同时确认 _process_event 里补默认提问的位置在延迟判断之后
+    # 同时确认 _process_event 里补默认提问的位置在延迟判断之后。
+    # 锚点是 _take_pending_and_defer —— 等待窗口的入口（pop 暂存 + 调
+    # _defer_lone_attachment 收口在那个方法里），它内部的 `not text` 判断
+    # 才是真正会被默认提问破坏的那个条件。
     p_start = full.index("    def _process_event(")
     p_end = full.index("\n    def ", p_start + 10)
     process_body = full[p_start:p_end]
     assert process_body.index("text = self._DEFAULT_ATTACHMENT_QUESTION") > \
-        process_body.index("_defer_lone_attachment("), \
+        process_body.index("_take_pending_and_defer("), \
         "默认提问被放到了延迟判断之前，`not text` 判断将永远为假"
 
 
@@ -195,20 +226,26 @@ def test_consecutive_files_are_merged_not_overwritten():
     用户随后提问时只取到最后一个——先到的日志被永久静默丢弃。
     而"拖多个日志文件再提问"正是日志排查的典型用法。
 
+    必须复现 _process_event 的真实时序：**先无条件 pop，再 defer**
+    （见 _simulate_attachment_event）。这个测试早先直接调 _defer_lone_attachment，
+    槽位里还留着 a.log，于是刚好走进 defer 内部的合并分支、测试通过——但线上
+    真实流程里调用方总是先把槽位 pop 空了，合并分支其实是死代码，a.log 停在
+    第二条事件的局部变量里随 return 一起丢掉。假绿灯由此产生，不要再退回去。
+
     复现步骤：
     1. 私聊连续拖入 a.log、b.log（间隔小于 lone_image_wait）
     2. 紧接着发问题文字
-    3. 原实现：AI 只看到 b.log；期望：两份都看到
+    3. 修复前：AI 只看到 b.log；期望：两份都看到
     """
     app = _StubApp(wait=3.0)
     captured = {}
 
     def _first():
-        app._defer_lone_attachment("chat1", None, [_log_content("a.log")], "om_1")
+        _simulate_attachment_event(app, "chat1", None, [_log_content("a.log")], "om_1")
 
     def _second():
         time.sleep(0.4)
-        app._defer_lone_attachment("chat1", None, [_log_content("b.log")], "om_2")
+        _simulate_attachment_event(app, "chat1", None, [_log_content("b.log")], "om_2")
 
     def _text_message():
         time.sleep(1.2)
@@ -225,8 +262,57 @@ def test_consecutive_files_are_merged_not_overwritten():
     for t in threads[:2]:
         t.join()
 
+    assert captured.get("popped") is not None, "文字消息没取到任何暂存附件"
     names = [c.data["name"] for c in captured["popped"]["log_contents"]]
     assert names == ["a.log", "b.log"], f"先到的附件被覆盖丢弃: {names}"
+
+
+def test_timeout_after_pop_keeps_both_attachments():
+    """
+    连发两个文件后一直没有文字说明（等待超时），两份附件都要留在调用方手里。
+
+    定位说明（别误读）：这个用例在"只传 own_logs 进 defer"那版 bug 代码下**也是
+    绿的** —— 超时路径上 pop 出来的 pending 仍停在调用方的局部变量里，会照常
+    并进 content_parts，不丢。真正的丢附件只发生在「被接管」路径（见上一个用例）。
+
+    它守的是另一件事：禁止把修复改写成「pop 延后到 defer 判断之后」。那种写法
+    下 defer 内部会把 a.log 与 b.log 合并后写回槽位，超时时 del 掉的是合并后的
+    那份，而调用方手里只有 b.log —— a.log 又丢一次，而且这次连上一个用例都
+    抓不到（它走的是接管路径）。所以这里专门把超时路径钉住。
+
+    时序：
+    1. 私聊连续拖入 a.log、b.log（间隔小于 lone_image_wait）
+    2. 之后一直不发文字，等待窗口超时
+    3. 第二条事件手里必须是 a.log + b.log 两份
+    """
+    app = _StubApp(wait=0.6)
+    results = {}
+
+    def _first():
+        results["first"] = _simulate_attachment_event(
+            app, "chat1", None, [_log_content("a.log")], "om_1"
+        )
+
+    def _second():
+        # 必须落在第一条的等待窗口内，才能复现「pop 走别人暂存的附件」
+        time.sleep(0.2)
+        results["second"] = _simulate_attachment_event(
+            app, "chat1", None, [_log_content("b.log")], "om_2"
+        )
+
+    threads = [threading.Thread(target=_first), threading.Thread(target=_second)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    # 第一条被第二条接管（ts 变化），自己不再处理附件
+    assert results["first"]["deferred"] is True, "第一条应被第二条接管"
+    # 第二条没等到文字，超时后由它按纯附件处理，手里必须是两份
+    assert results["second"]["deferred"] is False, "第二条无后续文字应超时返回"
+    names = [c.data["name"] for c in results["second"]["logs_in_hand"]]
+    assert names == ["a.log", "b.log"], f"超时路径上先到的附件丢了: {names}"
+    assert "chat1" not in app._pending_lone_images, "超时后暂存未清理"
 
 
 def test_merge_keeps_existing_image_when_second_has_none():

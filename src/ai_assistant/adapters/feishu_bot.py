@@ -200,6 +200,84 @@ class FeishuBotAdapter(IMAdapter):
 
         return text, image_keys, files
 
+    # 消息回查的错误码释义。分成两类是因为修复方向完全不同：
+    # 参数类错误说明 message_id 本身有问题（抄错/已不存在），改权限没用；
+    # 权限类错误才需要去飞书开放平台申请并发布接口权限。
+    _GET_MESSAGE_PARAM_CODES = {
+        99992354: "message_id 格式不合法或该 ID 不存在（参数问题，不是权限问题）",
+    }
+    _GET_MESSAGE_PERMISSION_CODES = {
+        99991672: "应用无该接口权限（未申请或未发布）",
+        99991671: "access_token 无效或已过期",
+        230001: "消息不存在或对该应用不可见",
+        230002: "机器人无该消息的可见权限",
+        232001: "消息已撤回或被删除",
+    }
+
+    def get_message(self, message_id: str) -> Optional[Dict[str, Any]]:
+        """
+        回查单条消息的详情（含 msg_type / body.content / chat_id / sender）
+
+        用途（也是本接口存在的唯一理由）：群聊里机器人的权限是
+        im:message.group_at_msg:readonly，只能收到 @机器人 的消息事件。
+        用户拖入文件时飞书客户端立即发送，那条纯文件消息**根本不会推 webhook**，
+        机器人对它毫无感知；随后用户引用该文件消息 @机器人提问时，事件里只带
+        parent_id / root_id 两个 ID，不内联被引用消息的内容。
+        因此「引用文件消息追问」要能工作，只能用这两个 ID 主动回查。
+
+        已实测确认：对一条从未推送给机器人的消息，本接口返回 HTTP 200 / code=0，
+        能拿到 msg_type、chat_id、sender 与 body.content（字符串化 JSON，
+        内含 file_key / image_key）。
+
+        Args:
+            message_id: 要回查的消息 ID（通常是事件里的 parent_id 或 root_id）
+
+        Returns:
+            消息详情 dict（即 data.items[0]）；查不到、无权限或异常时返回 None
+        """
+        if not message_id:
+            return None
+
+        try:
+            token = self.get_tenant_access_token()
+            url = f"{self.base_url}/open-apis/im/v1/messages/{message_id}"
+            headers = {"Authorization": f"Bearer {token}"}
+
+            logger.debug(f"回查飞书消息详情: message_id={message_id}")
+            response = requests.get(url, headers=headers, timeout=15)
+            response.raise_for_status()
+            result = response.json()
+
+            code = result.get("code")
+            if code != 0:
+                # 两类错误分开给提示：把「ID 不合法」误读成「无权限」会把排查方向
+                # 直接带到"去申请权限"上，而真正的原因可能只是 ID 抄错一位。
+                if code in self._GET_MESSAGE_PARAM_CODES:
+                    hint = self._GET_MESSAGE_PARAM_CODES[code]
+                else:
+                    hint = self._GET_MESSAGE_PERMISSION_CODES.get(code, "未知错误码")
+                logger.error(
+                    f"回查消息详情失败: message_id={message_id}, "
+                    f"code={code}, msg={result.get('msg')} ({hint})"
+                )
+                return None
+
+            items = (result.get("data") or {}).get("items") or []
+            if not items:
+                logger.warning(f"回查消息详情返回空 items: message_id={message_id}")
+                return None
+
+            item = items[0]
+            logger.info(
+                f"回查消息详情成功: message_id={message_id}, "
+                f"msg_type={item.get('msg_type')}, chat_id={item.get('chat_id')}"
+            )
+            return item
+
+        except Exception as e:
+            logger.error(f"回查消息详情异常: message_id={message_id}, {e}")
+            return None
+
     def download_file(self, message_id: str, file_key: str) -> Optional[bytes]:
         """
         下载飞书消息中的文件附件

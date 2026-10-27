@@ -114,15 +114,6 @@ class AIAssistant:
                 timeout=self.config.ai_timeout,
                 feedback_manager=self.feedback_manager,
             )
-        elif provider_type == "dify":
-            from ai_assistant.providers.dify_provider import DifyProvider
-            self.ai_provider = DifyProvider(
-                base_url=self.config.ai_primary_base_url,
-                api_key=self.config.ai_primary_api_key,
-                app_type=getattr(self.config, 'ai_dify_app_type', 'chat'),
-                user=getattr(self.config, 'ai_dify_user', 'default-user'),
-                timeout=self.config.ai_timeout
-            )
         else:
             from ai_assistant.providers.openai_provider import OpenAIProvider
             self.ai_provider = OpenAIProvider(
@@ -288,6 +279,15 @@ class AIAssistant:
         self._lone_image_wait = getattr(self.config, "context_lone_image_wait", 8.0)
         # 等待期内收到的纯图片消息标记: {session_id: timestamp}
         self._pending_lone_images = {}
+
+        # 引用回查到的日志附件缓存: file_key -> log_file 类型的 Content。
+        # 同一条引用链会被反复追问（用户引用机器人回答继续问），每轮都回查到同一个
+        # file_key，不缓存就是每轮重下一遍几百 KB 的日志包。文件已落地磁盘，这里只
+        # 缓存"落地路径 + 截断后正文"这个 Content，内存有界。
+        self._quoted_attachment_cache = {}
+        self._quoted_cache_lock = threading.Lock()
+        # 上限保护，防长跑内存无界增长（同 feishu_bot._updated_fp_max_keys 的做法）
+        self._quoted_cache_max_keys = 200
 
         # 文档索引更新期间的延迟重试队列
         # 格式: [(timestamp, event_data), ...]
@@ -493,32 +493,17 @@ class AIAssistant:
             # 保存原始 text 用于运维模式检测（需要保留 @ 提及来识别命令）
             original_text = text
 
-            # 新消息到达：取回该 session 暂存的"纯图片"（先图后文场景）。
-            # 图片与文字是两条独立飞书消息，各自 message_id 不同、不共享 context_key，
-            # 唯一稳定的桥是 session_id(群 chat_id)。这里把暂存图片本体取出，随本条消息
-            # 一起并入 content_parts（归到当前 context_key），从根上避免"写入键=session_id、
-            # 读取键=context_key"不一致导致的丢图（488fac5 统一读取键后引入的回归）。
-            pending_image = None
-            pending_logs = []
-            with self._processing_lock:
-                popped = self._pending_lone_images.pop(session_id, None)
-            if popped is not None:
-                pending_image = popped.get("image")
-                pending_logs = popped.get("log_contents") or []
-
             # 本条自带的日志文件附件（解析阶段已下载落地）
             own_logs = parsed.get("log_contents") or []
 
-            # 纯附件无文字：用户几乎总是分两条发（先发截图/日志文件 → 再描述问题），
-            # 飞书客户端拖入文件即发送，根本没法把文件和文字拼成一条消息。
-            # 立即调 AI 只能反问，这里短暂等待后续文字消息合并处理。
-            if (image_data or own_logs) and not text and self._lone_image_wait > 0:
-                if self._defer_lone_attachment(
-                    session_id, image_data, own_logs, message_id
-                ):
-                    # 等待期内收到后续消息，附件已被该消息取走一并处理
-                    return
-                # 等待超时仍无文字：按纯附件正常处理（image_data / own_logs 仍在手，下方会加入）
+            # 取回该 session 暂存的纯附件（先附件后文字场景），必要时本条也进等待窗口。
+            # pop 与 defer 必须成对、顺序正确，故收口在一个方法里（见其 docstring）。
+            pending_image, pending_logs, deferred = self._take_pending_and_defer(
+                session_id, image_data, own_logs, text, message_id
+            )
+            if deferred:
+                # 等待期内收到后续消息，附件已被该消息取走一并处理
+                return
 
             # 等待窗口已过（或未启用等待）仍无文字说明时，给日志文件补一句默认提问，
             # 避免 text 为空导致 AI 无从下手。必须放在延迟判断之后：解析阶段就补会让
@@ -587,6 +572,54 @@ class AIAssistant:
                     except Exception as e:
                         logger.warning(f"添加思考表情失败（不影响主流程）: {e}")
 
+            # 引用追问时主动回查被引用消息的附件。
+            # 这是「群聊里拖文件 → 引用该文件提问」唯一能拿到日志的通路：那条纯文件
+            # 消息不会推 webhook（权限只推 @机器人 的消息），机器人从未见过它，
+            # pending_logs 恒为空。详见 _fetch_quoted_attachments 的 docstring。
+            #
+            # 与历史重建正交，不是 fallback：jsonl 的 record 结构不存附件，
+            # 历史命中与否和附件拿不拿得到互不相干，两条补全各自独立执行。
+            #
+            # 本轮已经有附件就不回查：白费一次 API 调用，且用户当前发的附件才是
+            # 他想问的东西，引用链上的旧附件此时不该再抢位置。
+            #
+            # 为什么上面那条"session 处理中"分支（:518 起）不回查也不丢附件
+            # ——依据必须写准，这个耦合很脆：
+            #   回查的触发条件要求 `text` 非空 → 落到那条分支的消息必然带文字
+            #   → 必然命中 :545 的 `if text:` 把 event_data 登记进
+            #   _deferred_messages → finally 里必然补跑一次，补跑时走完整路径
+            #   并执行这里的回查（同一个 file_key 命中缓存，不重复下载）。
+            # 注意不是"那条分支的消息都会补跑"：:551 的无文字分支只入上下文、
+            # 直接 return、**不补跑**。所以哪天有人放宽回查条件允许无文字触发，
+            # 这条路径就会静默丢附件 —— 放宽前必须先让无文字分支也能补跑。
+            quoted_logs = []
+            quoted_image = None
+            if (
+                not image_data
+                and not own_logs
+                and not pending_logs
+                and pending_image is None
+                and text
+                and parsed.get("parent_id")
+            ):
+                quoted_logs, quoted_image, quoted_notice = self._fetch_quoted_attachments(
+                    adapter,
+                    parsed.get("parent_id", ""),
+                    root_id,
+                    session_id,
+                )
+                # 回查失败不静默：把说明并进文本，让 AI 据实告知用户，
+                # 而不是以为"用户只发了文字"去凭空作答。
+                if quoted_notice:
+                    text = f"{text} {quoted_notice}".strip()
+                if quoted_logs or quoted_image is not None:
+                    logger.info(
+                        "引用回查附件已并入本轮: {}",
+                        [c.summary() for c in quoted_logs]
+                        + ([f"image({quoted_image.get('media_type', '?')})"]
+                           if quoted_image else []),
+                    )
+
             # 构建用户消息（支持图文）
             # 先图后文场景：pending_image 是上一条纯图片消息暂存的图片，随本条一并注入，
             # 与当前消息归到同一个 context_key，杜绝写入键/读取键不一致导致的丢图。
@@ -595,12 +628,19 @@ class AIAssistant:
                 content_parts.append(Content(type="image", data=pending_image))
             if image_data:
                 content_parts.append(Content(type="image", data=image_data))
+            if quoted_image is not None:
+                content_parts.append(Content(type="image", data=quoted_image))
             # 日志文件附件（已在解析阶段下载落地），与图片同样触发代码排查模式。
             # pending_logs 来自上一条纯文件消息的暂存（先发文件、紧接着发问题），
-            # own_logs 是本条消息自带的附件，两者都要并入。
+            # own_logs 是本条消息自带的附件，quoted_logs 来自引用链回查，三者都要并入。
+            # 顺序约束（防回归）：必须全部排在下方 text 的 Content 之前，与
+            # pending/own 既有顺序一致 —— provider 侧按内容块顺序拼 prompt，
+            # 附件在问题之后会让"先给材料再提问"的结构倒置。
             for _lc in pending_logs:
                 content_parts.append(_lc)
             for _lc in own_logs:
+                content_parts.append(_lc)
+            for _lc in quoted_logs:
                 content_parts.append(_lc)
 
             # 在构建消息前，先用原始 text 检测运维模式，然后再清理 @ 提及
@@ -824,6 +864,243 @@ class AIAssistant:
             f"注入消息 {len(rebuilt)} 条"
         )
         return rebuilt
+
+    def _fetch_quoted_attachments(
+        self,
+        adapter,
+        parent_id: str,
+        root_id: str,
+        chat_id: str,
+    ) -> tuple:
+        """
+        回查被引用消息的附件（引用文件消息追问场景的唯一通路）
+
+        为什么必须主动回查（这是整条链路的根因，改动前请先读懂）：
+        群聊里机器人的权限是 im:message.group_at_msg:readonly，只能收到 @机器人
+        的消息。用户拖入文件时飞书客户端立即发送，那条纯文件消息**根本不会推
+        webhook 事件** —— 机器人对它毫无感知，`_defer_lone_attachment` 没有机会
+        执行，`pending_logs` 恒为空。用户随后引用该文件消息 @机器人提问时，机器人
+        只收到这一个事件，事件里只有 parent_id / root_id 两个 ID，不内联被引用
+        消息的内容。所以附件只能靠这两个 ID 回查拿到。
+
+        与历史重建是两个**正交**的补全，不是互为 fallback（防回归）：
+        chat_history 的 jsonl record 结构里压根不存附件（见 core/chat_history.py），
+        所以「历史命中几轮」与「附件能不能拿到」是两件独立的事。历史照旧由
+        _rebuild_context_from_chain 按 context_key 从 jsonl 重建，附件单独走这里。
+        若把回查写成「历史没命中才回查」，历史命中时附件就永远拿不到了。
+
+        parent / root 的取舍（最多两次回查，不做无界向上爬）：
+        - 首轮「引用文件消息提问」：文件消息自身不是回复，parent_id == root_id
+          == 文件消息，查 parent 一次命中（root 会被相等判断跳过，不多花调用）。
+        - 追问轮「引用机器人回答再追问」：parent_id 是机器人那条纯文本回答（无附件），
+          root_id 才是最初的文件消息 —— 这时查 root 是拿到日志的唯一通路。
+        - 链中间节点都是「机器人回答 / 用户追问」这类纯文本，附件只可能出现在
+          直接引用点或链根，继续向上爬收益为零而每跳一次都是一次网络往返，
+          长链路下延迟不可控，故硬性封顶两次。
+
+        Args:
+            adapter: 飞书适配器（需提供 get_message / _collect_log_files / download_image）
+            parent_id: 直接被引用的消息 ID
+            root_id: 引用链根消息 ID
+            chat_id: 当前会话 ID（日志文件按会话分目录落地）
+
+        Returns:
+            (log_contents, image_data, notice) 三元组：
+              log_contents 为 log_file 类型的 Content 列表；
+              image_data 为图片 dict 或 None；
+              notice 为回查失败时给 AI 的说明文本（成功或无附件时为空串）
+        """
+        import json as json_mod
+
+        if not hasattr(adapter, "get_message"):
+            # 非飞书机器人适配器（如 UI 自动化版）没有回查能力，安静跳过
+            return [], None, ""
+
+        # 候选 ID：parent 优先，root 兜底。去重 + 去空，天然封顶两次。
+        candidates = [mid for mid in (parent_id, root_id) if mid]
+        candidates = list(dict.fromkeys(candidates))
+
+        for index, message_id in enumerate(candidates):
+            item = adapter.get_message(message_id)
+            if not item:
+                # get_message 内部已按错误码打过 error 日志，这里只给链路上下文
+                logger.warning(
+                    f"引用回查：消息详情取不到，跳过该节点 "
+                    f"(第 {index + 1}/{len(candidates)} 个: {message_id})"
+                )
+                continue
+
+            msg_type = item.get("msg_type") or ""
+            content_str = (item.get("body") or {}).get("content") or "{}"
+            try:
+                content_data = json_mod.loads(content_str)
+            except (ValueError, TypeError) as e:
+                logger.error(f"引用回查：content 不是合法 JSON: message_id={message_id}, {e}")
+                continue
+
+            # 复用适配器既有解析能力，不另写一套递归 walk：
+            # _parse_message_content 已覆盖 text/image/file/post 四种类型
+            text, image_keys, files = adapter._parse_message_content(msg_type, content_data)
+
+            if not image_keys and not files:
+                # 被引用的是纯文本（最常见：引用机器人上一轮回答追问）。
+                # 这是正常情况而非故障，用 debug 级别，不刷 error 日志。
+                logger.debug(
+                    f"引用回查：该节点无附件，继续看下一个 "
+                    f"(message_id={message_id}, msg_type={msg_type}, text_len={len(text)})"
+                )
+                continue
+
+            log_contents, failed_files = self._collect_quoted_log_files(
+                adapter, message_id, files, chat_id
+            )
+
+            # 图片不入缓存：base64 本体一张截图就几百 KB，200 条上限即上百 MB，
+            # 而「引用一张图反复追问」远少于「引用一份日志反复追问」，不值得担这个
+            # 内存风险，走每次重新下载（与当前轮直接发图的行为一致）。
+            image_data = None
+            if image_keys:
+                if len(image_keys) > 1:
+                    logger.info(f"引用回查：该节点含 {len(image_keys)} 张图片，当前仅取第一张")
+                image_data = adapter.download_image(message_id, image_keys[0])
+                if not image_data:
+                    logger.error(
+                        f"引用回查：图片下载失败 "
+                        f"(message_id={message_id}, image_key={image_keys[0]})"
+                    )
+
+            if log_contents or image_data:
+                logger.info(
+                    f"引用回查命中附件: message_id={message_id} "
+                    f"({'parent_id' if message_id == parent_id else 'root_id'}), "
+                    f"日志块={len(log_contents)}, 图片={'有' if image_data else '无'}"
+                )
+                # 部分文件失败时也要说明，不静默：用户发了 3 个日志只读到 2 个，
+                # AI 不知情就会按"全都看过了"作答。
+                notice = ""
+                if failed_files:
+                    notice = (
+                        f"（用户引用的消息里有 {len(failed_files)} 个附件未能读取"
+                        f"：{'、'.join(failed_files)}）"
+                    )
+                return log_contents, image_data, notice
+
+            # 有附件标识但全军覆没（下载失败 / 类型不支持 / 超过大小上限）。
+            # 必须出声：否则 AI 以为用户只发了文字，会凭空猜一个答案。
+            notice = (
+                f"（用户引用的消息里带了 {len(files) + len(image_keys)} 个附件，"
+                f"但服务端未能读取其内容）"
+            )
+            logger.error(
+                f"引用回查：该节点有附件标识但全部读取失败 "
+                f"(message_id={message_id}, files={len(files)}, images={len(image_keys)})"
+            )
+            return [], None, notice
+
+        logger.info(
+            f"引用回查：链上 {len(candidates)} 个节点均无附件 "
+            f"(parent_id={parent_id}, root_id={root_id})"
+        )
+        return [], None, ""
+
+    def _collect_quoted_log_files(
+        self,
+        adapter,
+        message_id: str,
+        files: List[dict],
+        chat_id: str,
+    ) -> tuple:
+        """
+        下载被引用消息的日志附件，按 file_key 做进程内缓存
+
+        同一条引用链会被反复追问（用户引用机器人回答继续问），每轮回查到的
+        file_key 都一样，不缓存就是每轮重下一遍整包日志。
+
+        缓存命中时必须校验落地文件仍存在（防回归）：LogFileManager 有
+        retention_hours 定时清理，缓存住一个已被清掉的路径，会让 AI 拿着不存在
+        的路径去用代码排查工具读文件，读不到还以为是日志本身有问题。
+
+        Args:
+            adapter: 飞书适配器（提供 _collect_log_files）
+            message_id: 附件所属消息的 ID。**必须是被引用那条消息的 ID**，
+                不是当前提问消息的 ID —— resources 下载接口按"附件挂在哪条消息"
+                鉴权，传错 ID 会 404。
+            files: [{"file_key","file_name"}] 列表
+            chat_id: 当前会话 ID（落地分目录）
+
+        Returns:
+            (contents, failed_names)：成功的 log_file Content 列表，
+            以及未能读取的文件名列表（供上层生成说明文本）
+        """
+        contents: List[Content] = []
+        failed_names: List[str] = []
+        pending: List[dict] = []
+
+        manager = getattr(self, "log_file_manager", None)
+
+        for item in files:
+            file_key = item.get("file_key") or ""
+            file_name = item.get("file_name") or "attachment"
+
+            if not file_key:
+                failed_names.append(file_name)
+                continue
+
+            # 扩展名白名单先于缓存/下载判断：不支持的类型连下载都不该发起
+            if manager and not manager.is_allowed(file_name):
+                logger.info(f"引用回查：跳过非日志类附件: {file_name}")
+                failed_names.append(file_name)
+                continue
+
+            with self._quoted_cache_lock:
+                cached = self._quoted_attachment_cache.get(file_key)
+            if cached is not None:
+                cached_path = (cached.data or {}).get("path") or ""
+                # 路径为空是"超限/保存失败"的说明块，本身就有效，照常复用
+                if not cached_path or os.path.exists(cached_path):
+                    logger.info(f"引用回查：命中附件缓存，跳过下载: {file_name}")
+                    contents.append(cached)
+                    continue
+                logger.info(
+                    f"引用回查：缓存的落地文件已被定时清理，重新下载: "
+                    f"{file_name} (path={cached_path})"
+                )
+                # 必须真的删掉失效条目，不能只是跳过它去下载（防回归）：
+                # 留着旧条目的话，下面重下虽然会按同一个 file_key 覆盖写回，
+                # 但一旦哪天改成"仅在 key 不存在时写入"，就会变成每轮追问都
+                # 走一遍"命中→校验失败→重下"，缓存等于失效。
+                with self._quoted_cache_lock:
+                    self._quoted_attachment_cache.pop(file_key, None)
+
+            pending.append(item)
+
+        if pending:
+            # 下载/落地/解压/截断全部复用适配器既有实现（含大小上限与 zip 处理）
+            fetched = adapter._collect_log_files(message_id, pending, chat_id)
+            if len(fetched) < len(pending):
+                # _collect_log_files 对下载失败的条目直接跳过，数量差即失败数。
+                # 无法一一对应回文件名，只能按尾部补齐，够用于生成说明文本。
+                missing = len(pending) - len(fetched)
+                failed_names.extend(
+                    (it.get("file_name") or "attachment") for it in pending[-missing:]
+                )
+                logger.error(
+                    f"引用回查：{missing} 个附件下载或落地失败 "
+                    f"(message_id={message_id})"
+                )
+            # fetched 与 pending 顺序一致，按位回填 file_key 建缓存。
+            # 直接赋值（不是 setdefault）：失效后重下的条目要覆盖掉旧的，
+            # 否则重下的新路径进不了缓存，下一轮又得重下一次。
+            for item, content in zip(pending, fetched):
+                contents.append(content)
+                with self._quoted_cache_lock:
+                    self._quoted_attachment_cache[item.get("file_key")] = content
+                    # 上限保护：超限丢弃最早插入的键（dict 保持插入序）
+                    if len(self._quoted_attachment_cache) > self._quoted_cache_max_keys:
+                        oldest = next(iter(self._quoted_attachment_cache))
+                        del self._quoted_attachment_cache[oldest]
+
+        return contents, failed_names
 
     def _parse_feishu_event(self, event_data: dict, adapter=None) -> Optional[dict]:
         """
@@ -1115,6 +1392,84 @@ class AIAssistant:
         except Exception as e:
             logger.error(f"Failed to parse feishu event: {e}")
             return None
+
+    def _take_pending_and_defer(
+        self,
+        session_id: str,
+        image_data: Optional[dict],
+        own_logs: List[Content],
+        text: str,
+        message_id: str,
+    ) -> tuple:
+        """
+        取回该 session 暂存的纯附件，并在本条也无文字时进入等待窗口
+
+        图片/文件与文字是两条独立飞书消息，各自 message_id 不同、不共享
+        context_key，唯一稳定的桥是 session_id（群 chat_id）。这里把暂存的附件
+        本体取出交给调用方，随本条消息一并并入 content_parts（归到当前
+        context_key），从根上避免"写入键=session_id、读取键=context_key"
+        不一致导致的丢图（488fac5 统一读取键后引入的回归）。
+
+        pop 与 defer 必须成对且顺序正确，所以收口在这一个方法里（防回归）：
+        pop 是无条件的，连发两个日志文件时第二条事件会先把第一条暂存的 a.log
+        取出来；若只拿 own_logs 去 defer，a.log 就停在调用方的局部变量里而调用方
+        紧接着 return —— a.log 被静默丢弃，用户随后提问时 AI 只看到 b.log。
+        把 pop 出来的 pending 一起传进 defer，_defer_lone_attachment 内部的合并
+        分支才真正生效（在此之前，那段合并代码因调用方总是先清空槽位而是死代码）。
+
+        另一种写法「把 pop 延后到 defer 判断之后」是错的：defer 内部会把已暂存的
+        a.log 与本条的 b.log 合并后写回槽位，超时时它 del 掉的是合并后的那份，
+        而调用方手里只有 b.log —— a.log 又丢一次。
+
+        三条路径都自洽：
+        - 被接管 → 返回 deferred=True，合并后的附件留在槽位等后续文字消息 pop；
+        - 超时 → defer 删掉的是它自己写回的那份拷贝，调用方手里的
+          pending_image / pending_logs / own_logs 都还在，照常全部并入；
+        - 等待期内第三条附件到达 → 它先 pop 走合并结果再 defer，本线程因 ts
+          变化返回 True，正确移交。
+
+        Args:
+            session_id: 会话 ID（群 chat_id）
+            image_data: 本条消息自带的图片数据，可为 None
+            own_logs: 本条消息自带的日志文件内容块
+            text: 本条消息的文字（为空才进入等待窗口）
+            message_id: 飞书消息 ID
+
+        Returns:
+            (pending_image, pending_logs, deferred) 三元组：
+            前两个是从暂存里取回的附件，deferred=True 表示本条已交由后续消息
+            处理、调用方应直接返回
+        """
+        pending_image = None
+        pending_logs: List[Content] = []
+        with self._processing_lock:
+            popped = self._pending_lone_images.pop(session_id, None)
+        if popped is not None:
+            pending_image = popped.get("image")
+            pending_logs = popped.get("log_contents") or []
+
+        # 纯附件无文字：用户几乎总是分两条发（先发截图/日志文件 → 再描述问题），
+        # 飞书客户端拖入文件即发送，根本没法把文件和文字拼成一条消息。
+        # 立即调 AI 只能反问，这里短暂等待后续文字消息合并处理。
+        #
+        # 条件里带上 pending 两项：手里有任何附件且无文字就该等。只看
+        # image_data/own_logs 会让「上一条是纯文件、本条图片下载失败」这种情况
+        # 直接跳过等待窗口，白白浪费一次合并机会。
+        #
+        # 图片仍是 `image_data or pending_image` 二选一：暂存结构只有一个 image
+        # 槽位、content_parts 也只排两张图，连发两张纯图片本来就存不下第二张，
+        # 这是既有设计边界，这里不扩大也不缩小。
+        if (image_data or own_logs or pending_image or pending_logs) \
+                and not text and self._lone_image_wait > 0:
+            if self._defer_lone_attachment(
+                session_id,
+                image_data or pending_image,
+                pending_logs + list(own_logs),
+                message_id,
+            ):
+                return pending_image, pending_logs, True
+
+        return pending_image, pending_logs, False
 
     def _defer_lone_attachment(
         self,
