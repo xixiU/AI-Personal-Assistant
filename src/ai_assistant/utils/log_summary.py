@@ -261,6 +261,49 @@ def _normalize_key(key: Any) -> str:
 # 不随业务字段名增长。
 NUMERIC_OK_HINTS = ("token",)
 
+# 计数标记词：数值豁免的**第二道**判据，看的是**键名本身**而不是命中的 hint。
+#
+# 为什么需要第二道 —— 第一道单独用会对 token 类凭据恰好失效。
+# `NUMERIC_OK_HINTS = ("token",)` 加 `all()` 单独使用时，实测 12 个数值型
+# token 凭据被原样打出：
+#   token / access_token / refresh_token / verification_token / auth_token /
+#   tenant_access_token / app_access_token / user_access_token / app_token /
+#   api_token / session_token / id_token
+# （`bearer_token` 只是因为还命中了 `bearer` 才侥幸逃过 —— 这种"靠第二个 hint
+#  兜住"的运气说明判据本身有洞。）
+# 根因：`SECRET_KEY_HINTS` 里那条 hint 是光秃秃的 `token`，所以凭据
+# `access_token` 和计数 `max_tokens` 命中的 hint **完全相同**（都是 `('token',)`），
+# 只看 hint 根本区分不开两者。这和当初 `key_passphrase` 是同构缺陷：
+# 邻居（`password` / `api_key`）遮住了，这一类没遮，比整体漏更难发现。
+#
+# 为什么不改成 `NUMERIC_OK_HINTS = ("tokens", "token_count")`（看着更精确）：
+# 实测凭据泄漏确实降到 0，但计数字段 **10/10 全部被误遮**（`max_tokens` /
+# `input_tokens` / `token_count` / `cache_read_input_tokens` … 全变遮蔽态）。
+# 因为豁免判据比对的是**命中的 hint**，而 hint 永远是 `token` 这一条，
+# 不是键名，所以 `all(h in NUMERIC_OK_HINTS ...)` 恒为假，豁免整条失效。
+#
+# **两道判据必须叠加，不能用键名判据替代 hint 判据。** 这是下一个人最可能
+# "简化"掉的地方。只用键名判据会开新口子 —— 这些键名里含计数词，但它们是
+# 实打实的凭据，实测会被当计数放过：
+#       max_app_secret / total_password / num_api_key
+# 叠加形态下它们仍被正确遮蔽（hint 是 `secret`/`password`/`api_key`，
+# 不在 NUMERIC_OK_HINTS 里，第一道就拦住了）。
+#
+# **标记词表不要再扩。** `input` / `output` / `prompt` / `completion` 这些
+# 系列已经被复数 `tokens` 覆盖（`input_tokens` 按 `_` 分词后含 `tokens`），
+# 补进去只会多开口子 —— 每多一个标记词，就多一类"含该词的真凭据"被放过。
+NUMERIC_COUNTER_MARKS = (
+    "tokens",
+    "count",
+    "max",
+    "total",
+    "usage",
+    "num",
+    "used",
+    "remaining",
+    "limit",
+)
+
 
 def _is_plain_number(value: Any) -> bool:
     """值是不是纯数值。排除 bool：`isinstance(True, int)` 为 True，但它不是计数。"""
@@ -306,16 +349,27 @@ def _should_redact(key: Any, value: Any) -> bool:
     """
     这个键值对要不要遮蔽。比 `_is_secret_key` 多看一眼值，只为放过计数字段。
 
-    注意是 `all()` 而不是 `any()`：`token_password` 这种同时命中
+    数值豁免要同时过**两道**判据，缺一不可（详见 NUMERIC_COUNTER_MARKS 上的
+    注释）：第一道看命中的 hint，第二道看键名里有没有计数标记词。
+    只有两道都过才放过数值。
+
+    注意第一道是 `all()` 而不是 `any()`：`token_password` 这种同时命中
     `token` 和 `password` 的键，仍然必须遮 —— 只要有一个命中的 hint
     不属于 NUMERIC_OK_HINTS，就按凭据处理。
     """
     hints = _matched_secret_hints(key)
     if not hints:
         return False
-    if _is_plain_number(value) and all(h in NUMERIC_OK_HINTS for h in hints):
-        return False
-    return True
+    # 非数值一律按凭据处理：字符串/bytes 形态的凭据不参与豁免
+    if not _is_plain_number(value):
+        return True
+    # 第一道：命中的 hint 必须全都有「数量」语义
+    if not all(h in NUMERIC_OK_HINTS for h in hints):
+        return True
+    # 第二道：键名里必须真的含计数标记词。只有这道能区分
+    # 凭据 `access_token` 和计数 `max_tokens` —— 两者命中的 hint 完全相同
+    parts = _normalize_key(key).split("_")
+    return not any(p in NUMERIC_COUNTER_MARKS for p in parts)
 
 
 def redact_secret(value: Any) -> str:

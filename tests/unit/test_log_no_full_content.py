@@ -1151,6 +1151,87 @@ def test_numeric_counter_fields_stay_readable_but_numeric_secrets_do_not():
     assert "redacted" in repr(summarize_obj({"token": True}))
 
 
+def test_numeric_passthrough_does_not_cover_token_credentials():
+    """
+    数值豁免**不得**覆盖 token 类凭据 —— 这是 `NUMERIC_OK_HINTS` 单独使用时
+    的缺陷：实测 12 个数值型 token 凭据被原样打进日志。
+
+    根因：`SECRET_KEY_HINTS` 里那条 hint 是光秃秃的 `token`，所以凭据
+    `access_token` 和计数 `max_tokens` 命中的 hint **完全相同**（都是
+    `('token',)`），只看 hint 区分不开两者。`bearer_token` 当时侥幸没泄漏，
+    是因为它还命中了 `bearer` —— 这种"靠第二个 hint 兜住"的运气恰恰说明
+    判据有洞，所以它也在下面的必遮清单里。
+
+    修法是叠加**第二道键名判据**（`NUMERIC_COUNTER_MARKS`）。本测试三个
+    方向一起守，因为它们会互相拉扯：只修凭据方向会把计数字段全误遮
+    （实测 `NUMERIC_OK_HINTS = ("tokens","token_count")` 这个改法让
+    计数字段 10/10 变遮蔽态），只修计数方向就是现在这个泄漏。
+
+    红灯验证：把 `_should_redact` 里第二道键名判据删掉（恢复成
+    `NUMERIC_OK_HINTS` 单独使用），第一组断言会 AssertionError。
+    """
+    from ai_assistant.utils.log_summary import summarize_obj
+
+    numeric = 1234567890123456
+
+    # 方向一：数值型 token 凭据必须遮
+    token_credentials = [
+        "token",
+        "access_token",
+        "refresh_token",
+        "verification_token",   # config.example.yaml 的真实字段，明文模式下就是身份凭据
+        "auth_token",
+        "tenant_access_token",
+        "app_access_token",
+        "user_access_token",
+        "app_token",
+        "api_token",
+        "session_token",
+        "id_token",
+        "bearer_token",         # 当时靠 bearer 侥幸逃过，不能依赖这种运气
+    ]
+    for key in token_credentials:
+        rendered = repr(summarize_obj({key: numeric}))
+        assert str(numeric) not in rendered, (
+            f"{key}={numeric} 数值型 token 凭据被原样打进日志"
+        )
+        assert "redacted" in rendered, f"{key} 没走遮蔽分支"
+
+    # 方向二：数值型计数字段必须保持可读（含 camelCase，靠 _normalize_key 拆开）
+    counters = [
+        "max_tokens",
+        "input_tokens",
+        "output_tokens",
+        "token_count",
+        "total_tokens",
+        "cache_read_input_tokens",
+        "tokens_used",
+        "num_tokens",
+        "prompt_tokens",
+        "completion_tokens",
+        "maxTokens",
+        "inputTokens",
+        "total_token_count",
+        "usage_tokens",
+        "tokens_remaining",
+        "token_limit",
+        "num_tokens_used",
+    ]
+    for key in counters:
+        rendered = summarize_obj({key: 4096})
+        assert rendered == {key: 4096}, f"{key} 的计数值被误遮：{rendered}"
+
+    # 方向三：键名含计数词、但本体是凭据的，必须仍然遮。
+    # 这组守的是「两道判据必须叠加」—— 只用键名判据会把它们当计数放过。
+    counter_looking_credentials = ["max_app_secret", "total_password", "num_api_key"]
+    for key in counter_looking_credentials:
+        rendered = repr(summarize_obj({key: numeric}))
+        assert str(numeric) not in rendered, (
+            f"{key} 含计数词就被放过了 —— 键名判据不能替代 hint 判据"
+        )
+        assert "redacted" in rendered, f"{key} 没走遮蔽分支"
+
+
 # ============ P1：summary() 的返回值不是可信成品 ============
 
 
