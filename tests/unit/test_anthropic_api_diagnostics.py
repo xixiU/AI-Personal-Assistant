@@ -951,6 +951,47 @@ class TestErrorDetailDoesNotEchoBody:
             f"摘要窗口太窄，关键短语被切掉，告警里只剩 'Error code: 400': {detail[:200]}"
         )
 
+    def test_operations_error_detail_is_summarized(self):
+        """
+        第二处（_send_with_context_operations，mode=operations）同样要收口。
+
+        === 为什么单独补这条 ===
+        三处出口里只有 agentic(:1691) 和 rag(:2553) 有看守，中间这处
+        （:2183）零覆盖。实测把 :2183 改回裸 `f"message={e.message}"`：
+            :1691 改回 -> 1 failed（agentic 那条红）
+            :2183 改回 -> 33 passed  ← 全绿放行，270+ 字符正文整段进告警
+            :2553 改回 -> 1 failed（rag 那条红）
+        这是「左右对照漏抄」的同一类缺口：防护抄了三处里的两处，测试也
+        只钉了那两处。运维模式恰恰是正文最敏感的通道 —— 运维指令里常带
+        主机名、内网 IP、账号，而下游 redact 走形态匹配挡不住自然语言正文。
+
+        === 复现步骤（把 :2183 改回裸 e.message 后必现）===
+        1. 构造 message 里含长段正文回显的 400（模拟网关回显请求体）
+        2. 走 _provider_with_ops_raising 驱动运维循环（鉴权必须真过，
+           否则停在 unauthorized，压根到不了 except 分支）
+        3. 修复前：metadata["error_detail"] 含正文原文（实测 detail 从
+           338 字符涨到 363，正文整段在内）
+           修复后：只剩 upstream_msg(...sha1=...) 摘要
+        """
+        provider = _provider_with_ops_raising(self._echo_400())
+        _reply, metadata = provider._send_with_context_operations(
+            _ops_messages(), "", "session-ops", timeout_mode="rounds", max_rounds=3,
+        )
+
+        detail = metadata.get("error_detail", "")
+        assert metadata.get("mode") == "operations"
+        assert self.ECHOED_BODY not in detail, (
+            "运维路径的 error_detail 整段回显了上游文案，会经单点上报送进飞书告警"
+        )
+        assert "upstream_msg(" in detail and "sha1=" in detail, (
+            f"message 没走摘要，或摘要形态变了: {detail[:200]}"
+        )
+        # 摘要换掉原文之后，排查还要能定位：status 和分类短语都得在
+        assert "status=400" in detail, f"丢了 status: {detail[:200]}"
+        assert "REQUEST_BODY_INVALID" in detail, (
+            f"摘要窗口太窄，关键短语被切掉，告警里只剩 'Error code: 400': {detail[:200]}"
+        )
+
     def test_standard_rag_error_detail_is_summarized(self):
         """第三处（_send_with_context_standard，mode=rag）同样要收口"""
         from ai_assistant.core.models import Content, Message
@@ -972,18 +1013,99 @@ class TestErrorDetailDoesNotEchoBody:
         """
         _ALERT_MSG_CHARS 必须大到容得下错误分类的关键短语。
 
-        实测现场文案：前缀 `Error code: 400 - {'error': {'type': '<nil>',
-        'message': '` 占掉 58 字符，"REQUEST_BODY_INVALID" 落在 85~105。
-        用默认窗口（80）这两个短语会被全切掉，告警里只剩 "Error code: 400"，
-        维护者无法判断是哪类 400。本条把这个下界钉住。
+        === 注意 summarize_text 是「头窗 + 尾窗」双段输出 ===
+            label(len=N,lines=L,sha1=XX):'头 limit 字符'…'尾 40 字符'
+        所以 `短语 in out` 这种断言**会被尾窗蒙过去**：短语可能是在尾部
+        重复出现才被捞到的，而不是头窗真的覆盖到了它。实测过一条会假绿灯的
+        形态 —— 网关把 message 又塞进 'code' 字段时（`...REQUEST_BODY_INVALID',
+        'code': 'REQUEST_BODY_INVALID'}}`），默认窗口（80）下
+        `"REQUEST_BODY_INVALID" in out` 是 True，但头窗里压根没有它。
+        若只用整体 `in` 断言，把 _ALERT_MSG_CHARS 调回 80 这条测试仍会绿。
+
+        因此本条断言「短语必须完整出现在**头窗片段**内」。头窗片段的构造方式
+        与 log_summary._preview 一致（`repr(text[:limit])`），不依赖对输出做
+        字符串切分。
+
+        下界的真实理由（不是"前缀占 58 字符所以够不到"）：默认窗口下
+        "Invalid tool use format" 被截在词中间（止于 `Invalid tool use forma`），
+        而另一条短语可见与否取决于上游文案尾部有没有恰好重复它。网关文案格式
+        不受我们控制，所以**不能按偏移量去卡一个刚好够的窗口**（照"58 字符"
+        那套推导会算出"100 就够"，那是在赌下一种文案形态）。
         """
         from ai_assistant.providers.anthropic_provider import _ALERT_MSG_CHARS
         from ai_assistant.utils.log_summary import summarize_text
 
         out = summarize_text(LIVE_400_MESSAGE, limit=_ALERT_MSG_CHARS, label="upstream_msg")
+        # 头窗片段：与 log_summary._preview 同构，避免按 … 切分（内容本身可能含 …）
+        head = repr(LIVE_400_MESSAGE[:_ALERT_MSG_CHARS])
 
-        assert "Invalid tool use format" in out, f"关键短语被切掉: {out}"
-        assert "REQUEST_BODY_INVALID" in out, f"错误码被切掉: {out}"
+        assert head in out, (
+            f"头窗片段的渲染方式变了，本条的头窗断言已失效，请同步修改: {out[:160]}"
+        )
+        for phrase in ("Invalid tool use format", "REQUEST_BODY_INVALID"):
+            assert phrase in out, f"关键短语整体缺失: {phrase!r} / {out}"
+            assert phrase in head, (
+                f"{phrase!r} 只在尾窗出现（靠上游文案尾部重复捞回来的），"
+                f"头窗没覆盖到。换一种不重复该短语的网关文案就看不见了，"
+                f"告警会退化成一句 'Error code: 400'。当前 _ALERT_MSG_CHARS="
+                f"{_ALERT_MSG_CHARS}"
+            )
+
+    # 网关把 message 又塞进 'code' 字段 —— 判别短语在文案尾部重复一次。
+    # 这种形态下尾窗会把短语"捞回来"，让整体 `in` 断言失去判别力。
+    TAIL_REPEAT_400 = (
+        "Error code: 400 - {'error': {'type': '<nil>', 'message': "
+        "'Invalid tool use format. | REQUEST_BODY_INVALID', "
+        "'code': 'REQUEST_BODY_INVALID'}}"
+    )
+
+    def test_alert_window_covers_keywords_even_without_tail_luck(self):
+        """
+        上一条用的现场文案尾部**不**重复判别短语，所以在它身上「整体 in」和
+        「头窗 in」恰好等价（实测扫了 limit 20~208 共 95 个取值，零缺口）——
+        也就是说头窗断言在那条上还是备用的。本条换成尾部重复的网关形态，
+        让头窗断言真正承重。
+
+        实测在这条文案上，limit 取 20~104 之间任意值（43 个取值）时：
+            "REQUEST_BODY_INVALID" in out  -> True   （尾窗捞回来的）
+            "REQUEST_BODY_INVALID" in head -> False  （头窗压根没到）
+        所以若有人把 _ALERT_MSG_CHARS 调回 80，只有头窗断言会红。
+        """
+        from ai_assistant.providers.anthropic_provider import _ALERT_MSG_CHARS
+        from ai_assistant.utils.log_summary import summarize_text
+
+        out = summarize_text(self.TAIL_REPEAT_400, limit=_ALERT_MSG_CHARS, label="upstream_msg")
+        head = repr(self.TAIL_REPEAT_400[:_ALERT_MSG_CHARS])
+
+        assert head in out, (
+            f"头窗片段的渲染方式变了，本条的头窗断言已失效: {out[:160]}"
+        )
+        for phrase in ("Invalid tool use format", "REQUEST_BODY_INVALID"):
+            assert phrase in head, (
+                f"{phrase!r} 不在头窗内。这条文案尾部重复了判别短语，所以整体 "
+                f"`in` 仍会是 True —— 告警看着有信息，换一种不重复的网关文案就"
+                f"什么都没有了。当前 _ALERT_MSG_CHARS={_ALERT_MSG_CHARS}"
+            )
+
+    def test_tail_window_can_fake_a_green_light(self):
+        """
+        把上面两条依赖的那个坑本身钉住：证明"整体 in"确实能被尾窗蒙过。
+
+        这条不是测产品代码，是测**测法**。若将来 log_summary 去掉尾窗，
+        本条会红 —— 那时头窗断言就成了多余的严格，可以一起简化。
+        反过来，只要本条是绿的，就说明"整体 in"这种断言方式仍然不可信。
+        """
+        from ai_assistant.utils.log_summary import PREVIEW_HEAD_CHARS, summarize_text
+
+        out = summarize_text(self.TAIL_REPEAT_400, limit=None, label="upstream_msg")
+        head = repr(self.TAIL_REPEAT_400[:PREVIEW_HEAD_CHARS])
+
+        assert "REQUEST_BODY_INVALID" in out, (
+            "尾窗没捞回重复的短语，尾窗行为变了（头窗断言可相应简化）"
+        )
+        assert "REQUEST_BODY_INVALID" not in head, (
+            "头窗已经覆盖到该短语，这条构造不出假绿灯了，请换一条更长的文案"
+        )
 
     def test_alert_window_still_truncates_mid_length_echo(self):
         """
@@ -992,17 +1114,49 @@ class TestErrorDetailDoesNotEchoBody:
         limit 同时抬高"整段原样显示"的门槛，所以这条盯的是
         _ALERT_MSG_CHARS 被人"顺手"调大（如调到 600）时的回归 ——
         一条 582 字符的回显文案在 600 下会原样落盘，在 200 下被压成摘要。
+
+        === 前置断言为什么不能写成 `len(echoed) > _ALERT_MSG_CHARS` ===
+        log_summary 的"整段显示"门槛**就是** limit（`len <= _head_len(limit)`
+        走原样输出分支），所以那样写的话前置条件和正主断言在**整个取值域上
+        恒等**，不是"当前取值下恰好同真假"：
+            limit=581  len>limit=True  | echoed in out=False
+            limit=582  len>limit=False | echoed in out=True
+            limit=583  len>limit=False | echoed in out=True
+        （limit 取 20~900 步长 7 共 126 个取值全程 `(len>limit) == (echoed
+        not in out)`。）前置断言成了正主断言换个写法，后果有两条：
+          1. 常量被调到 600 时红的是前置那行裸 assert（无消息体），正主那句
+             写得很清楚的"太大，582 字符的回显被整段打全"永远没人看得到；
+          2. 正主断言零鉴别力 —— 它在任何 limit 下都不可能单独红。
+
+        所以前置断言只钉**夹具自身的性质**、不碰 `_ALERT_MSG_CHARS`：
+          - 夹具被人改短 → 前置红，提示这条不再覆盖"调到 600"那个场景；
+          - 常量被人调大 → 前置仍过，让带消息体的正主断言来红。
+        500 是对"上界要防到多大"的声明，和被测常量解耦（取 500 而不是 582
+        是留余量：夹具长度随 "用户提问内容"*90 的实现微调，不该一动就红）。
+
+        没用「把夹具拉长」或「换成 pytest.skip」这两种改法：
+          - 拉长夹具只是换个数字，恒等关系不变，红的还是前置断言
+            （实测夹具换成 1242 字符后，limit=1242 时仍是前置先红）；
+          - 换成 skip 更糟 —— 常量被调到 600 时这条会"跳过"而不是失败，
+            一条上界回归变成零信号。
         """
         from ai_assistant.providers.anthropic_provider import _ALERT_MSG_CHARS
         from ai_assistant.utils.log_summary import summarize_text
 
         echoed = "Error code: 400 - {'error':{'message':'" + "用户提问内容" * 90 + "'}}"
-        assert len(echoed) > _ALERT_MSG_CHARS
+
+        # 前置：只钉夹具性质，不引用被测常量（理由见 docstring）
+        assert len(echoed) > 500, (
+            f"夹具变短了（当前 {len(echoed)} 字符），这条就不再覆盖"
+            f"「_ALERT_MSG_CHARS 被调到 600」这个回归场景"
+        )
 
         out = summarize_text(echoed, limit=_ALERT_MSG_CHARS, label="upstream_msg")
 
         assert echoed not in out, (
-            f"_ALERT_MSG_CHARS={_ALERT_MSG_CHARS} 太大，{len(echoed)} 字符的回显被整段打全"
+            f"_ALERT_MSG_CHARS={_ALERT_MSG_CHARS} 太大，{len(echoed)} 字符的回显被"
+            f"整段打全。limit 同时是「整段原样显示」的门槛（见 log_summary 的 "
+            f"PREVIEW_HEAD_CHARS 注释），调大它等于放宽泄漏门槛，不只是让摘要更长"
         )
         assert "sha1=" in out, "长内容没有指纹，跨日志串联会断"
 
