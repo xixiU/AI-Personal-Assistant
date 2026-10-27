@@ -379,9 +379,8 @@ cp config.example.yaml config.yaml
 #### 触发条件
 ```yaml
 trigger:
-  keyword: "【ai】"           # 触发关键词
-  check_mention: true         # 是否检查 @机器人
-  check_private: true         # 是否响应私聊
+  keyword: "【ai】"         # 触发关键词（仅微信模式有效，飞书 bot 模式忽略）
+  ignore_mention_all: true    # 忽略 @所有人 的消息（默认不回复）
 ```
 
 #### AI Provider
@@ -887,7 +886,7 @@ AI-Personal-Assistant/
 
 ### 飞书群聊/私聊
 1. 将 Bot 添加到群聊
-2. 在消息中包含触发关键词（默认 `【ai】`）或 @机器人
+2. 私聊直接提问，群聊 @机器人（群聊只有 @机器人 的消息才会推送事件）
 3. Bot 自动回复（支持多轮对话，上下文窗口 10 条消息）
 
 ### 微信（UI 自动化模式）

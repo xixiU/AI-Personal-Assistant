@@ -21,9 +21,9 @@ class RepositoryConfig:
 class Config:
     """配置管理类"""
     # 触发规则
+    # 仅微信 UI 自动化模式有效（wechat_adapter.py 按此关键词匹配聊天窗口文本）；
+    # 飞书 bot 模式忽略此项，收到的消息一律触发，见 feishu_bot.py:820
     trigger_keyword: str = "【ai】"
-    trigger_check_mention: bool = True
-    trigger_check_private: bool = True
     trigger_ignore_mention_all: bool = True  # 忽略 @所有人 的消息（默认不回复）
 
     # 上下文策略
@@ -160,9 +160,13 @@ class Config:
 
         # 解析触发规则
         if "trigger" in data:
+            # 曾有 check_mention / check_private 两项，已删：读取了但全仓库零消费点，
+            # 用户改了毫无效果。check_mention 的语义由飞书权限
+            # im:message.group_at_msg:readonly 在协议层决定（群里只有被 @ 才推事件，
+            # 代码无从选择），check_private 的语义被「收到即触发」取代，
+            # 两者都不是「待实现」而是「永远不需要实现」。
+            # 旧配置文件里残留这两个键不会报错——未列出的键在这里被静默忽略。
             config.trigger_keyword = data["trigger"].get("keyword", config.trigger_keyword)
-            config.trigger_check_mention = data["trigger"].get("check_mention", config.trigger_check_mention)
-            config.trigger_check_private = data["trigger"].get("check_private", config.trigger_check_private)
             config.trigger_ignore_mention_all = data["trigger"].get("ignore_mention_all", config.trigger_ignore_mention_all)
 
         # 解析上下文策略
