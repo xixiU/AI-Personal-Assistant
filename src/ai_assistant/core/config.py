@@ -53,10 +53,6 @@ class Config:
     ai_timeout: int = 30
     ai_multimodal: bool = False
 
-    # Dify 特定配置
-    ai_dify_app_type: str = "chat"  # "chat" 或 "completion"
-    ai_dify_user: str = "default-user"
-
     # 飞书文档配置
     feishu_docs_enabled: bool = False
     feishu_docs_mcp_url: str = "http://localhost:50070/sse"
@@ -203,12 +199,6 @@ class Config:
 
             config.ai_timeout = data["ai"].get("timeout", config.ai_timeout)
             config.ai_multimodal = data["ai"].get("multimodal", config.ai_multimodal)
-
-            # 解析 Dify 特定配置
-            if "dify" in data["ai"]:
-                dify = data["ai"]["dify"]
-                config.ai_dify_app_type = dify.get("app_type", config.ai_dify_app_type)
-                config.ai_dify_user = dify.get("user", config.ai_dify_user)
 
         # 解析飞书文档配置
         if "feishu_docs" in data:

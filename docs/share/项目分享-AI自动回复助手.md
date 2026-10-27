@@ -59,7 +59,7 @@
 |----------|----------|--------|
 | 飞书私有化部署 | 不支持或需要额外适配 | 原生支持（讯飞飞书等私有化环境） |
 | 数据安全 | 文档上传到第三方 | 数据不出内网，本地处理 |
-| 模型自由度 | 绑定平台模型 | 一份配置切换 Claude/GPT/Ollama/Dify |
+| 模型自由度 | 绑定平台模型 | 一份配置切换 Claude/GPT/Ollama |
 | 定制能力 | 受限于平台功能 | 完全可控，按需扩展 |
 | 成本 | 按量付费，规模上去后贵 | 自部署，模型费用可控 |
 
@@ -152,7 +152,6 @@
 |----------|---------|
 | Anthropic Claude | 长上下文、文档问答效果最优 |
 | OpenAI 兼容 | GPT / Ollama / LM Studio / Azure |
-| Dify | 已有 Dify 应用，直接对接 |
 | 本地模型 | 数据敏感场景，Ollama 私有化部署 |
 
 ### 生产级部署
@@ -181,7 +180,7 @@
 | 并发处理层 | 削峰 + 多用户并发 | 事件队列 (Queue) + 线程池 (ThreadPoolExecutor) |
 | 核心模块层 | 业务逻辑 | Context Manager、AI Provider、混合检索引擎、Trace ID |
 | 数据层 | 存储与索引 | ChromaDB 向量库、BM25 索引、MCP 客户端、本地缓存、ONNX Embedding 模型 |
-| 外部服务 | 第三方 API | Anthropic/OpenAI/Dify、飞书 MCP 服务器、飞书开放平台 |
+| 外部服务 | 第三方 API | Anthropic/OpenAI、飞书 MCP 服务器、飞书开放平台 |
 
 ---
 
