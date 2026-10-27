@@ -16,6 +16,7 @@ from loguru import logger
 from ai_assistant.core.simple_mcp_client import SimpleMCPClient
 from ai_assistant.core.hybrid_search import HybridSearchEngine
 from ai_assistant.core.ai_provider import KeywordExtractionResult
+from ai_assistant.utils.log_summary import summarize_text
 
 
 class FeishuDocManager:
@@ -224,8 +225,12 @@ class FeishuDocManager:
 
         # 通用技术问题（Redis/Nginx/Docker 等标准组件问题）直接跳过文档检索
         if kw_result.is_generic_tech:
+            # 原先是 cleaned_query[:60]：长度上虽已截断，但用户提问常是多行
+            # 异常堆栈，裸切片把换行一起带进日志，一条日志炸成好几行且破坏
+            # 按行采集。summarize_text 会把换行转义成可见的 \n 字面量。
             logger.info(
-                f"问题分类为通用技术问题，跳过文档检索（直接用大模型知识回答）: '{cleaned_query[:60]}'"
+                f"问题分类为通用技术问题，跳过文档检索（直接用大模型知识回答）: "
+                f"{summarize_text(cleaned_query, label='query')}"
             )
             return ""
 
@@ -233,7 +238,9 @@ class FeishuDocManager:
         if keywords:
             # 关键词拼接到 query 前面，提高权重
             enhanced_query = " ".join(keywords) + " " + cleaned_query
-            logger.info(f"关键词增强检索: '{cleaned_query}' → keywords={keywords}")
+            # 查询只打摘要：这里的 cleaned_query 就是用户提问全文，
+            # 原先 INFO 直接插值，一份长堆栈在本行又被完整打一遍（同一请求第 3 遍）。
+            logger.info(f"关键词增强检索: {summarize_text(cleaned_query, label='query')} → keywords={keywords}")
         else:
             enhanced_query = cleaned_query
 
@@ -250,7 +257,7 @@ class FeishuDocManager:
         candidates = self._search_engine.search(enhanced_query, top_k=self.MAX_DOCS_IN_PROMPT)
 
         if not candidates:
-            logger.info(f"检索无结果: '{query_text[:50]}'")
+            logger.info(f"检索无结果: {summarize_text(query_text, label='query')}")
             return ""
 
         # 用 AI 过滤标题：判断哪些文档标题与 query 相关
@@ -859,14 +866,16 @@ class FeishuDocManager:
             try:
                 keywords = self._keyword_extractor(query_text)
                 if keywords:
-                    logger.info(f"callable 关键词提取: '{query_text[:50]}' → {keywords}")
+                    logger.info(
+                        f"callable 关键词提取: {summarize_text(query_text, label='query')} → {keywords}"
+                    )
                     return KeywordExtractionResult(keywords=keywords, is_generic_tech=False)
             except Exception as e:
                 logger.warning(f"callable 关键词提取失败，降级到规则提取: {e}")
 
         # 最终降级：规则提取
         keywords = self._extract_keywords_by_rules(query_text)
-        logger.info(f"规则关键词提取: '{query_text[:50]}' → {keywords}")
+        logger.info(f"规则关键词提取: {summarize_text(query_text, label='query')} → {keywords}")
         return KeywordExtractionResult(keywords=keywords, is_generic_tech=False)
 
     def _extract_keywords_by_rules(self, query_text: str) -> List[str]:
@@ -1076,7 +1085,13 @@ class FeishuDocManager:
                 candidates_lines.append(f"{i}. {path}")
             candidates_text = "\n".join(candidates_lines)
 
-            logger.info(f"AI 标题过滤输入:\n查询: {query}\n候选文档({len(docs)}篇):\n{candidates_text}")
+            # 查询只打摘要（原先是全文，同一请求第 4 遍打印用户原文）。
+            # 候选文档只是标题/路径列表，不含用户内容，保留全量——它是判断
+            # "AI 过滤有没有把对的文档筛掉"的唯一依据。
+            logger.info(
+                f"AI 标题过滤输入: {summarize_text(query, label='query')}\n"
+                f"候选文档({len(docs)}篇):\n{candidates_text}"
+            )
 
             selected_indices = self._ai_provider.filter_docs_by_relevance(
                 query, docs, max_docs=self.MAX_DOCS_IN_PROMPT

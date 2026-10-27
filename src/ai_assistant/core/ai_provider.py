@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 from loguru import logger
 from ai_assistant.core.models import Content, Message
+from ai_assistant.utils.log_summary import summarize_text
 
 
 class DocIndexingInProgressError(Exception):
@@ -378,12 +379,15 @@ def log_subcall_degraded(subcall: str, reason: str, raw: str, query_preview: str
         subcall: 子调用标识（如 keyword_extraction / doc_title_filter / prompt_safety）
         reason: 降级原因
         raw: AI 原始输出（会截断）
-        query_preview: 查询摘要（可选）
+        query_preview: 查询摘要（可选；本函数内部再压一次，不信任调用方已截断）
     """
     snippet = (raw or "").replace("\n", " ")[:200]
+    # query_preview 由各 Provider 传入（现状都传 query_text[:50]），但签名不强制，
+    # 一旦有调用点漏传完整提问，这行就会把用户原文整段打出来。这里自己兜一层摘要，
+    # 让"是否截断"不依赖每个调用点的自觉。
     logger.warning(
         f"⚠️ AI 子调用降级: subcall={subcall}, reason={reason}, "
-        f"query='{query_preview}', raw_head={snippet!r}"
+        f"{summarize_text(query_preview, label='query')}, raw_head={snippet!r}"
     )
 
 

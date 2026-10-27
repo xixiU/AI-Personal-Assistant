@@ -13,15 +13,13 @@ from loguru import logger
 from typing import Any, List, Optional, Tuple
 import os
 from ai_assistant.core.feedback_manager import FeedbackManager
+from ai_assistant.utils.log_summary import summarize_obj
 
 # Web 端单次请求允许携带的日志文件数上限（防止一次塞几十个文件把上下文/磁盘打满）
 _MAX_WEB_LOG_FILES = 5
 
 # 文件消息常常只有附件没有文字，给一句默认提问，避免 AI 收到空 query
 _DEFAULT_LOG_FILE_QUESTION = "请分析这个日志文件中的问题。"
-
-# 原始报文调试日志的截断长度（加密报文动辄上千字符，整段打出来不可读）
-_RAW_PAYLOAD_DEBUG_CHARS = 500
 
 # 请求体上限：base64 编码膨胀约 1.37 倍，另留余量给 JSON 结构与文字字段。
 # 不设上限时 request.get_json() 会把整个 body 读进内存，5 个 20MB 文件的
@@ -214,7 +212,13 @@ class WebhookServer:
                 logger.info(f"📨 Webhook received: encrypted=yes, cipher_len={len(encrypted_text)}")
             else:
                 logger.info("📨 Webhook received: encrypted=no")
-            logger.debug(f"📨 Raw payload(截断): {str(data)[:_RAW_PAYLOAD_DEBUG_CHARS]}")
+            # 原先是 `str(data)[:500]`，这在**明文模式**（只配 verification_token、
+            # 未配 encrypt_key）下是凭据泄漏：data 的前 500 字符里既有用户消息正文，
+            # 也有真实的 verification_token —— str() 会把两者一起打出去。
+            # summarize_obj 对这两类分别处理：凭据按字段名遮蔽成 <redacted:len=N>
+            # （token 只有 32 字符单行，靠长度截断是挡不住的），用户正文压成
+            # len/lines/sha1 摘要。防回归见 tests/unit/test_log_no_full_content.py。
+            logger.debug("📨 Raw payload(摘要): {}", summarize_obj(data))
 
             # 强制鉴权门禁：校验不通过的报文一律拒绝，绝不入队。
             # 必须在读取任何事件字段之前完成——包括 url_verification 与
@@ -763,7 +767,10 @@ class WebhookServer:
                 logger.info(f"📨 Card action received: encrypted=yes, cipher_len={len(card_cipher)}")
             else:
                 logger.info("📨 Card action received: encrypted=no")
-            logger.debug(f"📨 Card raw payload(截断): {str(data)[:_RAW_PAYLOAD_DEBUG_CHARS]}")
+            # 同 /webhook/feishu：明文模式下 str(data)[:500] 会把 verification_token
+            # 原值和用户内容一起打进日志。两个端点必须用同一套摘要，只改一处
+            # 会把凭据泄漏留在这里（鉴权绕过当初就是这么漏的，见上面 eddce98 的注释）。
+            logger.debug("📨 Card raw payload(摘要): {}", summarize_obj(data))
 
             # 同一道强制鉴权门禁。这个端点原本也是「带 encrypt 才解密」的条件分支，
             # 伪造的明文卡片事件能直接驱动 process_card_action（伪造点赞/点踩、

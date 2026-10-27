@@ -28,6 +28,7 @@ from ai_assistant.core.reply_executor import ReplyExecutor
 from ai_assistant.core.models import Message, Content
 from ai_assistant.core.trace_context import get_trace_id, with_new_trace_id, set_trace_id
 from ai_assistant.core.ai_provider import DocIndexingInProgressError
+from ai_assistant.utils.log_summary import summarize_text, summarize_obj
 
 
 class AIAssistant:
@@ -468,7 +469,13 @@ class AIAssistant:
                 _parsed_log["log_contents"] = [
                     c.summary() if hasattr(c, "summary") else str(c) for c in _logs
                 ]
-            logger.debug("parsed message:{}", _parsed_log)
+            # text 字段同样必须摘要（防回归）：上面两处只挡住了图片与日志文件，
+            # parsed["text"] 仍是用户提问全文——私聊贴一份 3442 字符的异常堆栈时，
+            # DEBUG 级别下这里就把原文整段打出去了。summarize_obj 兜住整个 dict，
+            # 以后 _parse_feishu_event 新增任何承载用户内容的字段都自动受保护，
+            # 不必再在此处补一段 if。注意它对已替换成字符串的 image_data /
+            # log_contents 摘要是幂等的（短字符串原样、长字符串再压一层）。
+            logger.debug("parsed message:{}", summarize_obj(_parsed_log))
 
             session_id = parsed["chat_id"]
             text = parsed["text"]
@@ -555,7 +562,15 @@ class AIAssistant:
                     return
                 self._processing_sessions.add(session_id)
 
-            logger.info(f"Processing message for session: {session_id}, text:{text}, has_image:{image_data is not None}")
+            # 用户提问只打摘要，绝不打全文（CLAUDE.md：日志中不记录完整消息内容）。
+            # 原先是 INFO 级 f"text:{text}"：用户贴一份 3442 字符的异常堆栈，默认
+            # 日志级别下整份原文就刷满终端，同一份内容在一次请求里还会被重复打多遍。
+            # summarize_text 给出 len/lines/sha1/首尾片段，其中 sha1 让本条与后续
+            # 环节（关键词提取、文档过滤）的摘要能对上，是"同一份输入"的判据。
+            logger.info(
+                f"Processing message for session: {session_id}, "
+                f"{summarize_text(text)}, has_image:{image_data is not None}"
+            )
 
             # 添加"思考中"表情回复（飞书体验优化，从 adapter 配置读取）
             if hasattr(adapter, 'add_reaction'):

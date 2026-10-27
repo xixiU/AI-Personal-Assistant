@@ -9,6 +9,8 @@ from typing import Any, Dict, List, Optional
 from pathlib import Path
 from loguru import logger
 
+from ai_assistant.utils.log_summary import summarize_text, summarize_obj
+
 
 class Text2VecEmbeddingFunction:
     """基于 ONNX Runtime 的中文 Embedding 函数，支持 GPU 加速"""
@@ -138,7 +140,12 @@ class Text2VecEmbeddingFunction:
         if isinstance(result, list) and len(result) > 0:
             return result[0]
         else:
-            logger.error(f"embed_query 返回类型错误: {type(result)}, {result}")
+            # 只打类型与摘要：result 是 embedding 结果，异常时可能是上游返回的
+            # 整段文本/报文，原样插值会把用户查询或文档正文刷进日志
+            logger.error(
+                f"embed_query 返回类型错误: {type(result)}, "
+                f"{summarize_text(result, label='result')}"
+            )
             return [0.0] * 768  # 返回零向量作为降级
 
     def embed_documents(self, input: List[str]) -> List[List[float]]:
@@ -152,7 +159,11 @@ class Text2VecEmbeddingFunction:
     def _encode(self, texts: List[str]) -> List[List[float]]:
         # 确保输入是字符串列表
         if not texts or not isinstance(texts, list):
-            logger.warning(f"_encode 收到非法输入: {type(texts)}, {texts}")
+            # texts 承载的是用户查询或文档正文，只打类型+摘要
+            logger.warning(
+                f"_encode 收到非法输入: {type(texts)}, "
+                f"{summarize_text(texts, label='input')}"
+            )
             texts = [str(texts)] if texts else [""]
 
         texts = [str(t) if not isinstance(t, str) else t for t in texts]
@@ -187,7 +198,13 @@ class Text2VecEmbeddingFunction:
             token_type_ids = np.array(encoded.get("token_type_ids", [[0] * len(input_ids[0])] * len(input_ids)), dtype=np.int64)
 
         except Exception as e:
-            logger.error(f"Tokenizer 调用失败: {e}, 输入类型={type(texts)}, 输入前2项={texts[:2] if len(texts) > 0 else texts}")
+            # 「输入前2项」原先是整段原文：被索引的文档正文（单篇可达几万字）
+            # 或用户查询全文会整块落进日志。改为逐项摘要，仍保留"输入长什么样"的排查价值。
+            logger.error(
+                f"Tokenizer 调用失败: {e}, 输入类型={type(texts)}, "
+                f"输入条数={len(texts) if hasattr(texts, '__len__') else '?'}, "
+                f"输入前2项={summarize_obj(texts[:2] if len(texts) > 0 else texts)}"
+            )
             raise
 
         ort_inputs = {
@@ -608,7 +625,7 @@ class HybridSearchEngine:
         bm25_titles = [f"{d['title']}({d['score']:.1f})" for d in bm25_results[:5]]
         result_titles = [d['title'] for d in results]
         logger.info(
-            f"混合检索: query='{query[:50]}'\n"
+            f"混合检索: {summarize_text(query, label='query')}\n"
             f"  向量Top5: {vector_titles}\n"
             f"  BM25Top5: {bm25_titles}\n"
             f"  融合({len(fused_titles)}篇): {fused_titles}\n"
