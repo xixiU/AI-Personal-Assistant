@@ -365,18 +365,34 @@ class WebhookServer:
         完全开放——任何人都能投递伪造事件。这是部署方的选择（例如只在内网监听），
         但不能默默裸奔，必须在日志开头就能看见。
 
+        三档日志对应 README「Webhook 鉴权（部署前置要求）」里的三种配置：
+        加密模式 info / 明文模式 warning（仅兼容既有部署）/ 无鉴权 warning。
+
         Returns:
-            True 表示当前处于无鉴权状态（已打 WARNING）
+            True 表示当前**完全无鉴权**（已打 WARNING）。
+            注意明文模式返回 False——它确实有鉴权，只是强度不达部署要求，
+            所以也打了 WARNING。要据此判断"是否达到部署规范"不能只看返回值。
         """
         adapter = self.feishu_adapter
         encrypt_key = getattr(adapter, "encrypt_key", "") if adapter else ""
         verification_token = getattr(adapter, "verification_token", "") if adapter else ""
 
         if encrypt_key:
-            logger.info("Webhook 鉴权：已启用事件加密（encrypt_key），明文报文将被拒绝")
+            logger.info(
+                "Webhook 鉴权：已启用事件加密（encrypt_key），明文报文将被拒绝。"
+                "请确认飞书后台「事件订阅 → 加密策略」已开启且 Key 一致，"
+                "否则所有消息都会被拒（日志会出现「🚫 Webhook 鉴权失败」）"
+            )
             return False
         if verification_token:
-            logger.info("Webhook 鉴权：已启用 verification_token 校验（明文模式）")
+            # 不打 info 而打 warning：部署规范要求开启加密推送（见 README「Webhook 鉴权」），
+            # 明文模式只为兼容既有部署保留——报文在传输层可被读取与重放。
+            # 返回值仍是 False：它确实有鉴权，只是强度不达部署要求。
+            logger.warning(
+                "⚠️ Webhook 运行在明文模式：只配了 verification_token，未配 encrypt_key。"
+                "该模式仅为兼容既有部署保留，报文在传输层可被读取与重放。"
+                "建议在飞书后台开启加密推送并配置 encrypt_key。"
+            )
             return False
 
         logger.warning(

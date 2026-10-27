@@ -79,14 +79,18 @@ adapters:
       base_url: "https://open.feishu.cn"  # 飞书开放平台地址（私有化部署时修改）
       app_id: ""           # 飞书应用 App ID
       app_secret: ""       # 飞书应用 App Secret
-      # ===== Webhook 鉴权（两项至少配一项，否则任何人都能投递伪造事件）=====
+      # ===== Webhook 鉴权（部署前置要求：必须配 encrypt_key）=====
       # 回调地址一旦暴露，不鉴权就等于让任何人以任意身份给机器人发消息
-      # （可伪造 sender_id / chat_id / 消息正文）。两项都为空时服务启动会打 WARNING。
+      # （可伪造 sender_id / chat_id / 消息正文）。
       #
-      # 优先级：配了 encrypt_key 就**必须**加密推送，明文报文一律被拒（403）；
-      # 只配 verification_token 时走明文模式，比对报文里的 token 字段。
+      # 部署要求：encrypt_key 必填，且必须在飞书后台「事件订阅 → 加密策略」
+      # 填入同一个 Key 开启加密推送。两边不一致机器人会收不到任何消息（403）。
+      #
+      # 服务端行为：配了 encrypt_key 就**必须**加密推送，明文报文一律被拒（403）；
+      # 只配 verification_token 走明文模式（仅兼容既有部署，新部署不要用）；
+      # 两项都空则放行并在启动时打 WARNING（裸奔，不要这么部署）。
       verification_token: ""  # 事件订阅验证 Token（明文模式下的身份凭据）
-      encrypt_key: ""      # 事件加密 Key（推荐配置；配了就必须在飞书后台同时开启加密推送）
+      encrypt_key: ""      # 事件加密 Key（**必填**，须与飞书后台加密策略一致）
       allowed_chats: []    # 允许的群聊 ID 白名单（为空则允许所有）
       allowed_users: []    # 允许的用户 ID 白名单（为空则允许所有）
       welcome_message: "👋 大家好！我是 AI 助手，很高兴加入这个群聊。\n\n我可以帮助大家回答问题、查询文档等。直接 @ 我或私法发送消息即可。\n\n📖 使用文档：https://example.com/docs/ai-assistant"  # 机器人入群欢迎消息（支持 HTTP 链接） 直接回复群聊消息不艾特需要开启【获取群组中所有消息】事件

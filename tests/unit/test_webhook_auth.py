@@ -279,6 +279,68 @@ def test_configured_adapter_reports_authenticated():
     assert _server(_FakeAdapter(verification_token="t")).warn_if_webhook_unauthenticated() is False
 
 
+def _capture_startup_log(adapter):
+    """
+    抓 warn_if_webhook_unauthenticated 的 loguru 输出（caplog 抓不到 loguru）。
+
+    sink 必须在构造完 server 之后再挂：WebhookServer.__init__ 自己会打 info
+    （"自有前端 Web 已禁用"），挂早了会把它混进来，让"级别要单一"的断言误判。
+    """
+    from loguru import logger
+
+    srv = _server(adapter)
+    records = []
+    sink_id = logger.add(
+        lambda msg: records.append((msg.record["level"].name, msg.record["message"])),
+        level="DEBUG",
+    )
+    try:
+        result = srv.warn_if_webhook_unauthenticated()
+    finally:
+        logger.remove(sink_id)
+    return result, records
+
+
+def test_plaintext_only_mode_warns_not_info():
+    """
+    只配 verification_token 时必须打 WARNING，不能打 info（防回归）。
+
+    部署规范已把"开启事件加密推送"定为前置要求（README「Webhook 鉴权」），
+    明文模式只为兼容既有部署保留——报文在传输层可被读取与重放。若这里打 info，
+    既有部署升级后不会有任何提示，会以为自己已经合规，从而长期停在明文模式。
+
+    注意返回值仍是 False：它确实有鉴权，只是强度不达部署要求。想判断
+    "是否达到部署规范"不能只看这个返回值。
+    """
+    result, records = _capture_startup_log(_FakeAdapter(verification_token="t"))
+
+    assert result is False, "明文模式有鉴权，不应被报成「完全无鉴权」"
+    levels = {lvl for lvl, _ in records}
+    assert "WARNING" in levels, (
+        "明文模式降级为 info 了：既有部署升级后收不到任何提示，"
+        "会以为自己已经合规而长期停在明文模式"
+    )
+    assert "INFO" not in levels, "明文模式不应同时打 info，级别要单一明确"
+
+
+def test_encrypted_mode_reminds_console_must_match():
+    """
+    加密模式的启动日志必须提示"飞书后台也要开加密且 Key 一致"（防回归）。
+
+    这是本次唯一的真实失败模式：只改了 config.yaml 没改飞书后台（或反之），
+    机器人会一条消息都收不到。把提示放在启动日志里，排查时第一眼就能看到，
+    不必翻 README。
+    """
+    result, records = _capture_startup_log(_FakeAdapter(encrypt_key="k"))
+
+    assert result is False
+    joined = " ".join(msg for _lvl, msg in records)
+    assert "加密策略" in joined or "后台" in joined, (
+        "加密模式的启动日志没提示飞书后台也要开启加密推送，"
+        "两边不一致时机器人收不到任何消息，排查入口就没了"
+    )
+
+
 # ============ 缺陷 3：卡片端点必须共用同一道门禁 ============
 
 def test_card_endpoint_rejects_plaintext_forgery():

@@ -541,22 +541,39 @@ log_files:
 在「事件订阅」页面：
 
 1. 配置请求地址（Webhook URL）：`https://your-domain.com/webhook/feishu`
-2. 获取 `verification_token` 和 `encrypt_key`
-3. 订阅事件：`im.message.receive_v1`
+2. **开启加密推送**（部署前置要求，见下方「Webhook 鉴权」）：在「加密策略」处生成 `Encrypt Key`
+3. 获取 `verification_token` 和 `encrypt_key`
+4. 订阅事件：`im.message.receive_v1`
 
 > **注意**：飞书要求 Webhook 必须使用 HTTPS。
 
-##### Webhook 鉴权（必读）
+##### Webhook 鉴权（部署前置要求，必读）
 
-回调地址是公网可达的，不鉴权就等于让任何知道该地址的人以**任意身份**给机器人发消息（可伪造 `sender_id`、`chat_id` 与消息正文）。`verification_token` 与 `encrypt_key` 至少配一项：
+回调地址是公网可达的，不鉴权就等于让任何知道该地址的人以**任意身份**给机器人发消息（可伪造 `sender_id`、`chat_id` 与消息正文）。本项目**要求部署时开启事件加密推送**：
 
-| 配置情况 | 服务端行为 |
-|---------|-----------|
-| 配了 `encrypt_key` | **必须**加密推送，明文报文一律拒绝（HTTP 403）。需在飞书后台「事件订阅」同时开启加密推送并填入同一个 Key |
-| 只配 `verification_token` | 明文模式，校验报文里的 `token` 字段，不匹配则拒绝（HTTP 403） |
-| 两项都为空 | 放行（兼容既有部署），启动时打 `⚠️ Webhook 处于无鉴权状态` WARNING |
+**两处必须同时做，且 Key 一致**：
 
-> **升级提示**：如果你配了 `encrypt_key` 但飞书后台没有开启加密推送，升级后机器人会收不到消息，日志里会有 `🚫 Webhook 鉴权失败` 且飞书开放平台的推送失败统计会上升。此时要么在飞书后台开启加密推送，要么清空 `encrypt_key` 改用 `verification_token`。
+1. 飞书开放平台 →「事件订阅」→「加密策略」→ 生成/填入 `Encrypt Key`，开启加密推送
+2. `config.yaml` 的 `adapters[feishu].bot_api.encrypt_key` 填入**同一个** Key
+
+只做其中一边机器人就收不到消息，这是唯一需要注意的失败模式：
+
+| 飞书后台 | config.yaml | 结果 |
+|---------|-------------|------|
+| 已开加密 | 已配 `encrypt_key`（一致） | ✅ 正常工作 |
+| 已开加密 | 未配 / Key 不一致 | ❌ 全部消息被拒（HTTP 403），日志 `🚫 Webhook 鉴权失败` |
+| 未开加密 | 已配 `encrypt_key` | ❌ 全部消息被拒（HTTP 403），同上 |
+
+排查方式：日志里 `🚫 Webhook 鉴权失败` 会写明原因（`报文未加密` 还是 `解密失败`），飞书开放平台的推送失败统计也会同步上升。
+
+> **服务端的完整判定规则**（供排查与既有部署升级参考）：
+> - 配了 `encrypt_key` → **必须**加密推送，明文报文一律拒绝
+> - 只配 `verification_token` → 明文模式，比对报文 `token` 字段，不匹配则拒绝。
+>   **仅为兼容既有部署保留，新部署不要用**：明文报文在传输层可被读取与重放
+> - 两项都为空 → 放行，启动时打 `⚠️ Webhook 处于无鉴权状态` WARNING。**不要这样部署**
+>
+> 既有部署升级：若此前未开加密推送，按上面两步补齐即可；若临时无法改动飞书后台，
+> 可先清空 `encrypt_key` 并配好 `verification_token` 维持可用，但应尽快切回加密模式。
 
 #### Webhook HTTPS 配置
 
@@ -895,11 +912,18 @@ AI-Personal-Assistant/
 - 安装了 `onnxruntime-gpu`（`uv sync --extra gpu`）
 
 ### 2. 飞书 Bot 收不到消息？
-检查：
+
+**先看日志有没有 `🚫 Webhook 鉴权失败`**——有的话是加密推送两边没对齐（最常见的部署问题）：
+- 日志写 `报文未加密` → 飞书后台「事件订阅 → 加密策略」没开启加密推送
+- 日志写 `报文解密失败` → 两边的 `Encrypt Key` 不是同一个
+- 处理方式见上方「Webhook 鉴权（部署前置要求，必读）」
+
+日志里没有鉴权失败记录，再检查：
 - Webhook URL 是否公网可访问（或使用内网穿透如 ngrok）
-- `verification_token` 和 `encrypt_key` 是否正确
-- 飞书应用权限是否开启
-- 事件订阅是否配置
+- 飞书应用权限是否开启、是否已重新发布版本
+- 事件订阅是否配置（`im.message.receive_v1`）
+- 群聊场景：机器人是否在群内，消息是否 @ 了机器人
+  （`im:message.group_at_msg:readonly` 权限只推送 @ 机器人的消息）
 
 ### 3. 检索不到飞书文档？
 检查：
