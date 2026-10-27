@@ -48,12 +48,13 @@ def test_openai_no_doc_context_no_system(mock_post):
 
 
 def test_openai_short_circuits_on_indexing():
-    """索引更新时通过基类模板方法返回提示语，未调用底层 API"""
+    """索引更新时基类模板方法向上抛出异常，未调用底层 API"""
     p = _make_provider()
     p.doc_manager = Mock()
     p.doc_manager.get_documents_by_query.side_effect = DocIndexingInProgressError("x")
     with patch("ai_assistant.providers.openai_provider.requests.post") as mock_post:
         msgs = [Message(role="user", content=[Content(type="text", data="q")], timestamp=None)]
-        reply = p.send_message(msgs)
-        assert "文档索引正在更新中" in reply
+        with pytest.raises(DocIndexingInProgressError):
+            p.send_message(msgs)
+        # 验证：未调用底层 API
         assert mock_post.call_count == 0

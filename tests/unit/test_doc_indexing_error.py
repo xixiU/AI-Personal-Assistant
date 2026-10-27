@@ -25,7 +25,7 @@ def test_doc_indexing_error_raised():
 
 
 def test_anthropic_provider_catches_indexing_error():
-    """测试：Provider 捕获异常并返回友好提示"""
+    """测试：Provider 向上抛出 DocIndexingInProgressError（不再内部捕获）"""
     # 创建 mock doc_manager
     doc_manager = Mock(spec=FeishuDocManager)
     doc_manager.get_documents_by_query.side_effect = DocIndexingInProgressError("索引中")
@@ -44,13 +44,12 @@ def test_anthropic_provider_catches_indexing_error():
             Message(role="user", content=[Content(type="text", data="智慧法庭部署文档在哪？")], timestamp=datetime.now())
         ]
 
-        # 调用 send_message（基类模板方法）
-        reply = provider.send_message(messages)
+        # 调用 send_message（基类模板方法）应向上抛出异常
+        with pytest.raises(DocIndexingInProgressError):
+            provider.send_message(messages)
 
-        # 验证：返回提示语，且未调用 Anthropic API
-        assert "文档索引正在更新中" in reply
-        assert "1-2分钟" in reply
-        assert provider.client.messages.create.call_count == 0  # 未调用 API
+        # 验证：未调用 Anthropic API
+        assert provider.client.messages.create.call_count == 0
 
 
 def test_normal_path_not_affected():
@@ -103,7 +102,7 @@ def test_base_get_doc_context_no_manager():
 
 
 def test_base_send_message_short_circuits_on_indexing():
-    """基类：doc_manager 抛出 DocIndexingInProgressError 时直接返回提示语"""
+    """基类：doc_manager 抛出 DocIndexingInProgressError 时向上抛出（不调用子类实现）"""
     from ai_assistant.core.ai_provider import AIProvider
 
     class DummyProvider(AIProvider):
@@ -121,8 +120,9 @@ def test_base_send_message_short_circuits_on_indexing():
     p.doc_manager.get_documents_by_query.side_effect = DocIndexingInProgressError("x")
 
     msgs = [Message(role="user", content=[Content(type="text", data="hi")], timestamp=None)]
-    reply = p.send_message(msgs)
-    assert "文档索引正在更新中" in reply
+    with pytest.raises(DocIndexingInProgressError):
+        p.send_message(msgs)
+    # 验证：未调用子类的 _send_with_context
     assert p.sub_called is False
 
 
@@ -135,3 +135,13 @@ def test_base_extract_last_user_text():
         Message(role="user", content=[Content(type="text", data="second")], timestamp=None),
     ]
     assert AIProvider._extract_last_user_text(msgs) == "second"
+
+
+# 生产端 main.py:746-751 / :2067-2070（捕获异常 → 入队 + 返回提示语）在此无测试。
+# 曾有一条 test_caller_handles_indexing_error 试图覆盖它，但它在测试体内自己
+# 复写了一遍 try/except 并硬编码了提示语文案，没有调用 main.py 的任何代码——
+# 把 main.py:751 整行删掉它依然全绿，是假绿灯，已删。
+# 已验证：把 :751 和 :2070 的提示语换成哨兵常量，全量 550 条测试结果不变
+# （4 failed / 546 passed 两侧完全一致），所以这两处确实零覆盖。
+# 真覆盖需要能驱动 _process_event（:409）的夹具，当前被 jieba 等缺失依赖阻塞。
+# 消费端（_check_and_retry_pending_messages）已由 test_retry_queue_logic.py 覆盖。
