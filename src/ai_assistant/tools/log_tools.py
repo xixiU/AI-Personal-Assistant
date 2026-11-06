@@ -27,6 +27,8 @@ from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple
 
 from loguru import logger
 
+from ai_assistant.utils.text_stream import clip_line, decode_line, is_binary, iter_chunks
+
 # ============ 输出与资源上限 ============
 
 MAX_HITS = 50                 # 单次搜索最多返回的命中条数（超出只计数）
@@ -104,60 +106,25 @@ def collect_current_turn_log_paths(messages: List[Any]) -> List[str]:
     return collect_log_paths(tail)
 
 
+# 以下四个是 utils/text_stream.py 的薄包装：常量在调用时读本模块的，
+# 测试 monkeypatch lt.READ_CHUNK_BYTES 等仍然生效。
+
 def _iter_chunks(path: Path) -> Iterator[Tuple[int, bytes]]:
-    """
-    逐行流式产出 (行号, 原始字节)。
-
-    超过 READ_CHUNK_BYTES 的行切成多块产出，各块行号相同。不用 for line in f：
-    没有换行的 50MB 文件会被当成一行整体读进内存。
-    """
-    line_no = 1
-    with open(path, "rb") as f:
-        while True:
-            chunk = f.readline(READ_CHUNK_BYTES)
-            if not chunk:
-                return
-            yield line_no, chunk
-            if chunk.endswith(b"\n"):
-                line_no += 1
+    """逐行流式产出 (行号, 原始字节)，单块不超过 READ_CHUNK_BYTES"""
+    return iter_chunks(path, READ_CHUNK_BYTES)
 
 
-def _decode(raw: bytes) -> str:
-    """
-    逐行解码：先 UTF-8，失败按 GB18030（GBK 超集），再不行替换非法字节。
-
-    逐行而不是按文件头嗅探一次：混合编码的日志（前半段纯 ASCII、后半段 GBK）
-    按文件头判定会把后半段全部解成乱码，中文关键词就搜不到了。
-    """
-    for encoding in ("utf-8", "gb18030"):
-        try:
-            return raw.decode(encoding)
-        except UnicodeDecodeError:
-            continue
-    return raw.decode("utf-8", errors="replace")
+_decode = decode_line
 
 
 def _is_binary(path: Path) -> bool:
     """文件头含 NUL 字节视为二进制（如解压失败时退回的 .zip 本身）"""
-    try:
-        with open(path, "rb") as f:
-            return b"\x00" in f.read(BINARY_SNIFF_BYTES)
-    except OSError:
-        return True
+    return is_binary(path, BINARY_SNIFF_BYTES)
 
 
 def _clip(text: str, pos: int = 0) -> str:
     """把超长行截到 MAX_LINE_CHARS，截取窗口以 pos 为中心，保证命中点可见"""
-    if len(text) <= MAX_LINE_CHARS:
-        return text
-    start = max(0, min(pos - MAX_LINE_CHARS // 2, len(text) - MAX_LINE_CHARS))
-    end = start + MAX_LINE_CHARS
-    return (
-        ("…" if start > 0 else "")
-        + text[start:end]
-        + ("…" if end < len(text) else "")
-        + "[行过长，已截断]"
-    )
+    return clip_line(text, MAX_LINE_CHARS, pos)
 
 
 def _normalize_keywords(keywords: Any) -> Tuple[List[str], str]:

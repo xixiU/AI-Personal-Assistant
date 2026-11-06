@@ -490,11 +490,16 @@ vector_db:
 #### 本地文档（可选）
 ```yaml
 local_docs:
-  - path: "./docs/manual.txt"
-    description: "用户手册"
-  - path: "./docs/faq.md"
-    description: "常见问题"
+  - path: "./data/local_docs/sql"
+    description: "数据库SQL配置"     # 默认 mode: "grep"
+  - path: "./data/local_docs/manual"
+    description: "产品使用手册"
+    mode: "index"                    # 显式切回向量索引
 ```
+
+- 只有 `feishu_docs.enabled: true` 时 `local_docs` 才生效。
+- 默认 `mode: "grep"`：目录不建向量索引，查询时用 AI 提取的关键词逐行查找文件内容（UTF-8/GBK 均可），把命中行及前后 3 行注入 prompt；泛词（命中超过一半文件）降权，最多展开 3 个文件。适合大量 SQL 初始化脚本。
+- 写 `mode: "index"` 才走原来的混合检索。**升级提示**：旧配置没写 mode 的目录升级后不再进索引；每次建索引前会自动清理向量库里已不在本地文档集合中的旧向量（尽力而为，失败只打 WARNING）。只有需要彻底重建时，才手动删除 `<feishu_docs.cache_dir>/_vector_db`（会触发全量重新 embedding）。
 
 #### 系统参数
 ```yaml

@@ -17,6 +17,7 @@ from ai_assistant.core.simple_mcp_client import SimpleMCPClient
 from ai_assistant.core.hybrid_search import HybridSearchEngine
 from ai_assistant.core.ai_provider import KeywordExtractionResult
 from ai_assistant.utils.log_summary import summarize_text
+from ai_assistant.utils.local_doc_grep import grep_local_docs, split_local_docs_by_mode
 
 
 class FeishuDocManager:
@@ -46,7 +47,8 @@ class FeishuDocManager:
             cache_ttl: 缓存有效期（秒），默认 1 天
             sources: 知识库/云空间 token 列表，限定搜索范围
             keyword_extractor: 关键词提取函数（可选）
-            local_docs: 本地离线文档配置列表 [{path, description, keywords}]
+            local_docs: 本地离线文档配置列表 [{path, description, mode}]，
+                mode 缺省为 grep（关键词直查，不建索引），"index" 走向量索引
             use_gpu: 是否使用 GPU 加速 Embedding 生成
             gpu_id: 使用哪张 GPU（0 或 1）
             batch_size: Embedding 批处理大小（GPU: 128-256, CPU: 16-32）
@@ -59,7 +61,8 @@ class FeishuDocManager:
         # 规范化 sources 为 [{"token": ..., "type": "wiki"|"drive"}, ...]
         self.sources = self._normalize_sources(sources or [])
         self._keyword_extractor = keyword_extractor
-        self._local_docs_config = local_docs or []
+        # 只有显式 mode: "index" 的目录进向量索引，其余按关键词直查
+        self._local_docs_config, self._grep_docs_config = split_local_docs_by_mode(local_docs)
         self._lock = threading.Lock()
         self._indexed = False
         self._indexing_in_progress = False  # 是否有线程正在索引
@@ -136,6 +139,7 @@ class FeishuDocManager:
 
                     try:
                         logger.info(f"[后台同步] 开始重建索引...({len(all_docs)} 篇文档)")
+                        self._remove_stale_local_vectors(all_docs)
                         self._search_engine.index_documents(all_docs)
 
                         with self._lock:
@@ -202,9 +206,10 @@ class FeishuDocManager:
         根据查询文本获取相关文档内容
 
         工作流程：
-        1. 确保文档已缓存且已建索引
-        2. 使用混合检索（向量 + BM25）找到相关文档
-        3. 拼接后返回
+        1. 本地关键词直查目录按内容 grep（不依赖索引）
+        2. 确保文档已缓存且已建索引（无 sources 时跳过）
+        3. 使用混合检索（向量 + BM25）找到相关文档，排在直查结果之后
+        4. 拼接后返回
 
         Args:
             query_text: 用户查询文本
@@ -212,7 +217,7 @@ class FeishuDocManager:
         Returns:
             拼接后的文档内容字符串，可直接注入 system prompt
         """
-        if not self.sources:
+        if not self.sources and not self._grep_docs_config:
             logger.warning("未配置飞书文档 sources，跳过文档检索")
             return ""
 
@@ -244,28 +249,40 @@ class FeishuDocManager:
         else:
             enhanced_query = cleaned_query
 
-        # 确保文档已加载并建立索引
-        self._ensure_indexed()
+        # 本地关键词直查：不依赖索引；排在向量结果前面，不经 AI 标题过滤
+        # （内容命中的文件名常和提问看不出关联，标题过滤会把它们删掉）
+        grep_docs = grep_local_docs(self._grep_docs_config, keywords)
 
-        # 检查索引是否就绪（可能正在后台重建）
-        if not self._indexed:
-            logger.warning(f"文档索引正在后台重建中，暂时无法检索，请稍后再试")
-            from ai_assistant.core.ai_provider import DocIndexingInProgressError
-            raise DocIndexingInProgressError("文档索引正在更新中，请稍后再试")
+        if not self.sources:
+            # 只配了直查目录：没有 sources 时后台同步不跑，也不在前台建索引
+            results = grep_docs
+        else:
+            # 确保文档已加载并建立索引
+            self._ensure_indexed()
 
-        # 使用混合检索（返回更多候选）
-        candidates = self._search_engine.search(enhanced_query, top_k=self.MAX_DOCS_IN_PROMPT)
+            # 检查索引是否就绪（可能正在后台重建）；直查有结果就先返回直查结果
+            if not self._indexed and grep_docs:
+                logger.warning("文档索引正在后台重建中，本次只返回本地关键词直查结果")
+                candidates = []
+            elif not self._indexed:
+                logger.warning(f"文档索引正在后台重建中，暂时无法检索，请稍后再试")
+                from ai_assistant.core.ai_provider import DocIndexingInProgressError
+                raise DocIndexingInProgressError("文档索引正在更新中，请稍后再试")
+            else:
+                # 使用混合检索（返回更多候选）
+                candidates = self._search_engine.search(enhanced_query, top_k=self.MAX_DOCS_IN_PROMPT)
 
-        if not candidates:
-            logger.info(f"检索无结果: {summarize_text(query_text, label='query')}")
-            return ""
+            if not candidates and not grep_docs:
+                logger.info(f"检索无结果: {summarize_text(query_text, label='query')}")
+                return ""
 
-        # 用 AI 过滤标题：判断哪些文档标题与 query 相关
-        results = self._filter_docs_by_ai(cleaned_query, candidates)
+            # 用 AI 过滤标题：判断哪些文档标题与 query 相关
+            results = self._filter_docs_by_ai(cleaned_query, candidates) if candidates else []
 
-        if not results:
-            logger.info(f"AI 过滤后无结果，使用原始检索结果")
-            results = candidates[:self.MAX_DOCS_IN_PROMPT]
+            if not results and candidates:
+                logger.info(f"AI 过滤后无结果，使用原始检索结果")
+                results = candidates[:self.MAX_DOCS_IN_PROMPT]
+            results = grep_docs + results
 
         # 拼接文档内容，限制总字符数避免 prompt 过大
         max_total_chars = 50000
@@ -325,6 +342,7 @@ class FeishuDocManager:
 
             if all_docs:
                 logger.info(f"[前台请求] 从本地缓存加载索引: {len(all_docs)} 篇文档")
+                self._remove_stale_local_vectors(all_docs)
                 self._search_engine.index_documents(all_docs)
 
                 with self._lock:
@@ -416,6 +434,11 @@ class FeishuDocManager:
                 logger.error(f"  list 失败: {e}")
 
         return all_items
+
+    def _remove_stale_local_vectors(self, all_docs: List[Dict[str, str]]) -> None:
+        """建索引前删掉向量库里已不在本次本地文档集合中的 local_ 记录（如已转为关键词直查的目录）"""
+        keep = {d.get("token") for d in all_docs if str(d.get("token", "")).startswith("local_")}
+        self._search_engine.remove_by_token_prefix("local_", keep)
 
     def _load_all_local_docs(self) -> List[Dict[str, str]]:
         """加载所有本地离线文档"""

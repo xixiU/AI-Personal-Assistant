@@ -797,6 +797,44 @@ class HybridSearchEngine:
         if tokens:
             self._collection.delete(ids=tokens)
 
+    def remove_by_token_prefix(self, prefix: str, keep_tokens: set) -> int:
+        """
+        删除向量库里 metadata.token 以 prefix 开头、且不在 keep_tokens 里的记录（尽力而为）
+
+        index_documents 只 upsert 不删：local_docs 目录改为关键词直查后，旧的向量（含
+        {token}_chunk{i} 分块）会一直占向量检索的名额。分块数不可反推，所以按每条记录
+        metadata 里存的原始 token 判断，而不是按 id。
+
+        依据 chromadb 0.4.x（requirements: chromadb>=0.4.0）的 Collection.get：
+        get(include=["metadatas"]) 返回 GetResult，ids 与 metadatas 是按下标对齐的平行列表；
+        ids 总会返回。delete 的返回值各版本不同（0.4 为 None），不依赖它计数。
+
+        任何异常只打 WARNING 并返回 0，不影响后续建索引。
+
+        Returns:
+            删除的记录数
+        """
+        if not prefix:
+            return 0  # 空前缀会匹配全部记录（含在线文档），拒绝执行
+        try:
+            result = self._collection.get(include=["metadatas"])
+            ids = result.get("ids") or []
+            metadatas = result.get("metadatas") or []
+            stale = [
+                doc_id for doc_id, meta in zip(ids, metadatas)
+                if isinstance(meta, dict)
+                and str(meta.get("token", "")).startswith(prefix)
+                and meta.get("token") not in keep_tokens
+            ]
+            for i in range(0, len(stale), 500):  # 分批，避免单次 delete 的 id 过多
+                self._collection.delete(ids=stale[i:i + 500])
+            if stale:
+                logger.info(f"清理向量库残留记录: {len(stale)} 条")
+            return len(stale)
+        except Exception as e:
+            logger.warning(f"清理向量库残留记录失败（不影响建索引）: {type(e).__name__}")
+            return 0
+
     @property
     def doc_count(self) -> int:
         """已索引文档数量"""
