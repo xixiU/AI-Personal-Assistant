@@ -986,6 +986,10 @@ class AnthropicProvider(AIProvider):
 
         与已废弃的"会话级粘性"的区别见 _inherited_chain_mode 文档字符串。
 
+        未启用 Git 工具（troubleshoot.enabled=false，默认值）时只认一种情况：
+        当前轮带可读的日志附件，此时只提供日志工具。原先这里直接 return False，
+        带大日志/zip 的消息根本进不了工具模式，AI 只看到开头或文件清单就凭空作答。
+
         Args:
             messages: 消息列表
             session_id: 会话 ID（保留参数仅为签名兼容，不用于粘性判断）
@@ -994,6 +998,9 @@ class AnthropicProvider(AIProvider):
             是否使用 Agentic 模式
         """
         if not self.git_tools_enabled or not self.git_tools:
+            if self._current_turn_has_readable_log(messages):
+                logger.info("触发 Agentic 模式：当前消息带日志文件（未启用 Git 工具，仅提供日志工具）")
+                return True
             return False
 
         last_user_text = self._extract_last_user_text(messages)
@@ -1024,7 +1031,7 @@ class AnthropicProvider(AIProvider):
         return False
 
     @staticmethod
-    def _content_to_api_parts(content) -> List[Dict[str, Any]]:
+    def _content_to_api_parts(content, log_tools_available: bool = False) -> List[Dict[str, Any]]:
         """
         把单个 Content 转成 Anthropic API 的 content part 列表。
 
@@ -1033,6 +1040,9 @@ class AnthropicProvider(AIProvider):
 
         Args:
             content: Content 对象
+            log_tools_available: 本轮是否给 AI 提供了日志工具（只有 Agentic 且
+                有可读日志时为 True）。为 False 时不能提工具名：RAG / 运维模式下
+                AI 并没有这些工具，提了就是对 AI 说假话。
 
         Returns:
             API content part 列表（不支持的类型返回空列表）
@@ -1051,8 +1061,8 @@ class AnthropicProvider(AIProvider):
             }]
 
         if content.type == "log_file" and isinstance(content.data, dict):
-            # 日志文件以文本形式注入：小文件带正文，大文件/压缩包只给路径，
-            # 由 AI 用代码排查工具按需读取，避免整包日志塞爆上下文。
+            # 日志文件以文本形式注入：小文件带正文，大文件只内联开头，压缩包只给
+            # 路径与清单，由 AI 用日志工具（tools/log_tools.py）按需检索。
             name = content.data.get("name", "attachment")
             path = content.data.get("path", "")
             note = content.data.get("note", "")
@@ -1062,10 +1072,16 @@ class AnthropicProvider(AIProvider):
                 parts.append(f"本地路径: {path}")
             if note:
                 parts.append(note)
+            if path and log_tools_available:
+                # 有内联正文时也要提示：大文件只内联前 inline_chars 字符，
+                # 原先只在 text 为空时提示，41.5MB 的 .log 一句提示都拿不到。
+                # 放在正文之前，避免被几万字的内联开头淹没。
+                from ai_assistant.tools.log_tools import LOG_TOOLS_ATTACHMENT_HINT
+                parts.append(LOG_TOOLS_ATTACHMENT_HINT)
+            elif path and not text and not note:
+                parts.append("（内容未内联，本轮无法读取全文）")
             if text:
                 parts.append(f"文件内容:\n{text}")
-            elif path and not note:
-                parts.append("（内容未内联，可用代码排查工具读取上述路径）")
             return [{"type": "text", "text": "\n".join(parts)}]
 
         return []
@@ -1097,6 +1113,25 @@ class AnthropicProvider(AIProvider):
                         continue
                     return True
         return False
+
+    @staticmethod
+    def _current_turn_has_readable_log(messages: List[Message]) -> bool:
+        """
+        当前这一轮是否带"日志工具读得到"的日志附件（path 非空且仍存在）。
+
+        与 _current_turn_has_attachment 不同，它只用于"无 Git 工具时要不要进
+        工具模式"：超限/保存失败的说明块（path 为空）、已被定时清理的文件都不算，
+        否则会发一个只有空工具列表的工具模式请求。
+
+        Args:
+            messages: 消息列表
+
+        Returns:
+            当前轮是否含可读日志附件
+        """
+        from ai_assistant.tools.log_tools import LogTools, collect_current_turn_log_paths
+
+        return LogTools(collect_current_turn_log_paths(messages)).has_roots
 
     def _has_explicit_operations_command(self, messages: List[Message]) -> bool:
         """
@@ -1287,10 +1322,21 @@ class AnthropicProvider(AIProvider):
             metadata 包含 tool_rounds（实际工具调用轮数）
         """
         from ai_assistant.tools.git_tools import GIT_TOOLS_SCHEMA
+        from ai_assistant.tools.log_tools import (
+            LOG_TOOL_NAMES, LOG_TOOLS_SCHEMA, LogTools, collect_log_paths,
+        )
+
+        # 日志工具的白名单 = 本次调用 messages 里所有 log_file 的路径（含引用回查并入的）。
+        # 必须是局部变量、经参数传给 _execute_tool，不能挂到 self 上：provider 是单例，
+        # 被线程池并发调用，挂上去会让并发处理的另一个群读到本群的日志。
+        log_tools = LogTools(collect_log_paths(messages))
+        if not log_tools.has_roots:
+            log_tools = None
+        has_git = bool(self.git_tools_enabled and self.git_tools)
 
         # 构建工具列表（多仓库时追加 switch_repo 工具）
-        tools_schema = list(GIT_TOOLS_SCHEMA)
-        if self.repo_manager and len(self.repo_manager.list_repos()) > 1:
+        tools_schema = list(GIT_TOOLS_SCHEMA) if has_git else []
+        if has_git and self.repo_manager and len(self.repo_manager.list_repos()) > 1:
             tools_schema.append({
                 "name": "switch_repo",
                 "description": "切换当前代码排查的目标仓库。切换后，search_code、find_files、read_file、list_dir、run_git_command 等工具将在新仓库中执行。注意：本工具会改变全局状态，必须单独一轮调用，不要和查询类工具放在同一轮。",
@@ -1305,13 +1351,22 @@ class AnthropicProvider(AIProvider):
                     "required": ["repo_name"]
                 }
             })
+        if log_tools is not None:
+            tools_schema.extend(LOG_TOOLS_SCHEMA)
+        if not tools_schema:
+            # 正常走不到：_should_use_agentic_mode 在无 Git 工具时要求当前轮有可读日志。
+            # 兜底是防判定与执行之间文件恰好被定时清理，tools=[] 的请求没有意义。
+            logger.warning("Agentic 模式无可用工具（无 Git 工具、日志附件已不可读），改走标准模式")
+            return self._send_with_context_standard(messages, doc_context, session_id)
 
         # 转换消息格式
         api_messages = []
         for msg in messages:
             content_parts = []
             for content in msg.content:
-                content_parts.extend(self._content_to_api_parts(content))
+                content_parts.extend(
+                    self._content_to_api_parts(content, log_tools_available=log_tools is not None)
+                )
 
             if content_parts:
                 api_messages.append({"role": msg.role, "content": content_parts})
@@ -1445,8 +1500,37 @@ class AnthropicProvider(AIProvider):
             "- 优先使用并行工具调用减少总轮数，提升响应速度"
         ]
 
-        # 注入版本号→分支映射提示
-        if self.branch_hint:
+        # 无 Git 工具时的覆盖说明：上面的列表是按"有代码仓库"写的，这里明确告诉
+        # AI 那部分不适用，避免它在回复里声称查过代码（工具列表里本就没有 git 工具）
+        if not has_git:
+            system_parts.append("")
+            system_parts.append(
+                "【本轮工具范围（优先于上文）】本轮没有接入代码仓库，上文关于 search_code、"
+                "find_files、read_file、list_dir、run_git_command、switch_repo 等代码工具的"
+                "说明都不适用，不要调用它们。不要声称看过源码，也不要给出代码文件和行号；"
+                "结论基于日志和文档，并在回复中注明未核对代码。"
+            )
+
+        # 注入日志工具策略（仅当本轮带可读日志附件）
+        if log_tools is not None:
+            system_parts.append("")
+            system_parts.append(
+                "【日志附件工具】用户上传了日志文件，你可以用以下只读工具查看完整内容：\n"
+                "- search_log：按关键词（字面子串，不支持正则）搜索，多个关键词任一命中即返回该行\n"
+                "- read_log_lines：读取指定文件的行范围，用于查看命中行前后的上下文\n"
+                "- list_log_files：列出可读的日志文件（zip 包里的全部文本文件，含轮转文件）\n"
+                "使用要求：\n"
+                "- 大日志只内联了开头，zip 包只给了文件清单。必须先从用户提问里提取关键词"
+                "（案号、单号、traceId、报错类名、时间点等）用 search_log 搜索，再用 "
+                "read_log_lines 读命中行前后 20~50 行，不能只看内联的开头部分就下结论\n"
+                "- 用户问了多个对象（如多个案号）时，一次 search_log 传多个关键词，或并行调用\n"
+                "- 命中被截断（有 omitted）时换更具体的关键词或用 path 限定文件；"
+                "没有命中时换写法再搜（去掉前后缀、只保留数字部分等），不要直接断定日志里没有\n"
+                "- 回答时说明依据的是哪个文件的哪几行"
+            )
+
+        # 注入版本号→分支映射提示（只在有代码仓库时有意义）
+        if has_git and self.branch_hint:
             system_parts.append("")
             system_parts.append("版本号与分支映射规则：")
             system_parts.append(self.branch_hint)
@@ -1462,7 +1546,7 @@ class AnthropicProvider(AIProvider):
             system_parts.append(feedback_prompt)
 
         # 注入多仓库描述（帮助 AI 判断该去哪个仓库查）
-        if self.repo_manager and len(self.repo_manager.list_repos()) > 1:
+        if has_git and self.repo_manager and len(self.repo_manager.list_repos()) > 1:
             system_parts.append("")
             system_parts.append(self.repo_manager.get_repo_descriptions())
 
@@ -1569,7 +1653,7 @@ class AnthropicProvider(AIProvider):
                 tool_results = []
 
                 # 纯读工具可安全并行（无共享状态）；switch_repo 会改变当前仓库，必须串行
-                PARALLEL_SAFE = {"search_code", "find_files", "read_file", "list_dir"}
+                PARALLEL_SAFE = {"search_code", "find_files", "read_file", "list_dir"} | LOG_TOOL_NAMES
                 all_readonly = all(tool_use.name in PARALLEL_SAFE for tool_use in tool_uses)
                 can_parallel = all_readonly and len(tool_uses) >= 2
 
@@ -1581,7 +1665,9 @@ class AnthropicProvider(AIProvider):
                     with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(tool_uses), 5)) as executor:
                         futures = {}
                         for tool_use in tool_uses:
-                            future = executor.submit(self._execute_tool, tool_use.name, tool_use.input)
+                            future = executor.submit(
+                                self._execute_tool, tool_use.name, tool_use.input, log_tools=log_tools
+                            )
                             futures[future] = tool_use
 
                         for future in concurrent.futures.as_completed(futures):
@@ -1616,10 +1702,16 @@ class AnthropicProvider(AIProvider):
                     for tool_use in tool_uses:
                         tool_name = tool_use.name
                         tool_input = tool_use.input
-                        logger.info(f"执行工具: {tool_name}({tool_input})")
+                        # 日志工具的参数是用户的案号/单号等关键词，结果是日志正文，都不落盘；
+                        # 规模与耗时由 LogTools.execute 自己记
+                        is_log_tool = tool_name in LOG_TOOL_NAMES
+                        if is_log_tool:
+                            logger.info(f"执行工具: {tool_name}")
+                        else:
+                            logger.info(f"执行工具: {tool_name}({tool_input})")
 
                         try:
-                            result = self._execute_tool(tool_name, tool_input)
+                            result = self._execute_tool(tool_name, tool_input, log_tools=log_tools)
                             result_str = json.dumps(result, ensure_ascii=False)
                             # 多仓库模式下，工具结果前缀加当前仓库名
                             if self.repo_manager and len(self.repo_manager.list_repos()) > 1:
@@ -1637,7 +1729,9 @@ class AnthropicProvider(AIProvider):
                             # 打进日志，既违反「不记录完整内容」，也把流程日志冲没了。
                             # 与并行分支保持一致（原先并行只打长度、串行打全文）。
                             logger.info(f"工具 {tool_name} 完成: {len(result_str)} 字符")
-                            logger.debug("工具 {} 结果: {}", tool_name, summarize_obj(result))
+                            if not is_log_tool:
+                                # summarize_obj 对 80 字符内的单行字符串原样透传，日志命中行会整行落盘
+                                logger.debug("工具 {} 结果: {}", tool_name, summarize_obj(result))
 
                             # === 智能检测逻辑（仅监控，不注入额外消息避免API错误）===
                             # 1. 检测连续搜索失败
@@ -1769,17 +1863,27 @@ class AnthropicProvider(AIProvider):
         timeout_msg = "⚠️ 排查过程较复杂，已达到总时间限制。以上是目前的分析结果，如需继续请提供更多信息。" if timeout_mode == "time" else "⚠️ 排查过程较复杂，已达到最大分析轮数。以上是目前的分析结果，如需继续请提供更多信息。"
         return timeout_msg, {"mode": "agentic", "tool_rounds": round_num, "timeout": True}
 
-    def _execute_tool(self, tool_name: str, tool_input: Dict[str, Any]) -> Any:
+    def _execute_tool(self, tool_name: str, tool_input: Dict[str, Any], log_tools=None) -> Any:
         """
         执行工具调用，带智能批量优化
 
         Args:
             tool_name: 工具名称
             tool_input: 工具参数
+            log_tools: 本次调用的 LogTools 实例（白名单 = 本次 messages 的日志附件），
+                由 _send_with_context_agentic 按调用构造后传入；None 表示本轮无日志附件
 
         Returns:
             工具执行结果（可能包含批量扩展的结果）
         """
+        # 日志工具必须在 git_tools 判断之前分发：未启用代码排查时 git_tools 为 None，
+        # 但带日志附件的消息照样要能用日志工具
+        from ai_assistant.tools.log_tools import LOG_TOOL_NAMES
+        if tool_name in LOG_TOOL_NAMES:
+            if log_tools is None:
+                return {"error": "本轮没有可读的日志附件"}
+            return log_tools.execute(tool_name, tool_input)
+
         if not self.git_tools:
             return {"error": "Git 工具未初始化"}
 
