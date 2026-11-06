@@ -45,6 +45,11 @@ _ERROR_PROFILES: Dict[str, Tuple[str, str, str]] = {
 
 _DEFAULT_PROFILE = ("未知错误", "red", "查看日志中的完整堆栈与响应体。")
 
+# log_summary.summarize_text 给超长内容附的内容指纹字段（`sha1=67b7b6d9`）。
+# 只认 `sha1=` 前缀，不能泛化成"所有十六进制串"：网关 request id 等十六进制
+# 内容能区分不同故障，抹掉会把它们合并抑制。
+_SUMMARY_SHA1_RE = re.compile(r"sha1=[0-9a-f]+")
+
 
 def _signature(error_type: str, detail: str) -> str:
     """
@@ -52,8 +57,14 @@ def _signature(error_type: str, detail: str) -> str:
 
     把数字统一替换掉，让"剩余额度 1.74/需要 2.12"这类每次都变的数值
     不会绕过抑制，从而把同一个故障识别为同一类。
+
+    Provider 写进 error_detail 的上游文案是 summarize_text 摘要，自带 sha1 指纹。
+    数值一变指纹就变，而指纹里的 a~f 字母不受数字替换影响，且落在前 120 字符
+    窗口内，额度耗尽时会让每次提问都发一条告警。所以先抹 sha1 字段，再替换数字
+    （顺序不能反：先换数字会把 `sha1=` 拆成 `shaN=`，再也匹配不上）。
     """
-    normalized = re.sub(r"\d+", "N", detail or "")[:120]
+    normalized = _SUMMARY_SHA1_RE.sub("sha1=*", detail or "")
+    normalized = re.sub(r"\d+", "N", normalized)[:120]
     return f"{error_type}|{normalized}"
 
 
