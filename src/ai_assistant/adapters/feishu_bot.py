@@ -339,13 +339,33 @@ class FeishuBotAdapter(IMAdapter):
 
             path = manager.save_bytes(chat_id, file_name, data)
             if not path:
-                # 落地失败或超过大小上限：告知 AI 这一情况，不静默丢弃
-                contents.append(Content(type="log_file", data={
-                    "name": file_name,
-                    "path": "",
-                    "text": "",
-                    "note": "文件超过大小上限或保存失败，未能读取内容",
-                }))
+                # 落地失败或超过大小上限：告知 AI 这一情况，不静默丢弃。
+                # save_bytes 两种情况都返回 None，这里用同一个上限值区分；超限时把
+                # 实际大小与上限挂在 data 上，主流程据此在回复末尾给用户追加提示
+                # （build_oversize_notice）。引用回查缓存的是这个 Content 本身，
+                # 缓存命中时提示照样出现。
+                limit = manager.max_size_bytes
+                if len(data) > limit:
+                    contents.append(Content(type="log_file", data={
+                        "name": file_name,
+                        "path": "",
+                        "text": "",
+                        "note": (
+                            f"文件超过大小上限（{len(data) / 1024 / 1024:.1f}MB，"
+                            f"上限 {limit / 1024 / 1024:.0f}MB），未读取任何内容。"
+                            f"请勿假装分析过该日志，回答时说明未能读取它。"
+                        ),
+                        "oversize": True,
+                        "size_bytes": len(data),
+                        "limit_bytes": limit,
+                    }))
+                else:
+                    contents.append(Content(type="log_file", data={
+                        "name": file_name,
+                        "path": "",
+                        "text": "",
+                        "note": "文件保存失败，未能读取内容",
+                    }))
                 continue
 
             if path.lower().endswith(".zip"):

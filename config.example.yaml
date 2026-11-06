@@ -26,7 +26,7 @@ context:
 log_files:
   enabled: true
   dir: "./data/log_files"      # 落地目录，按会话分子目录存放
-  max_size_mb: 20              # 单文件大小上限（MB），超限跳过并告知 AI
+  max_size_mb: 50              # 单文件大小上限（MB），超限跳过并告知 AI
   inline_chars: 20000          # 直接注入 AI 的正文字符上限；超出只给本地路径，
                                # 由 AI 用代码排查工具按需读取，避免塞爆上下文
   cleanup_hour: 23             # 每日清理时刻（0-23，本地时间）

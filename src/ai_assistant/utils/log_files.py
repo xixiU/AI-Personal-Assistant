@@ -7,7 +7,7 @@ AI 上下文，大文件/压缩包只告知 AI 本地路径，让它用代码排
 
 设计要点：
 - 只接受白名单扩展名，避免把可执行文件、办公文档等无关附件拉下来。
-- 单文件大小上限（默认 20MB），超限跳过并在上下文中说明，不静默丢弃。
+- 单文件大小上限（默认 50MB），超限跳过并在上下文中说明，不静默丢弃。
 - zip 解压做了防护：拒绝绝对路径与 ../ 穿越条目（zip slip），限制解压总量与条目数。
 - 按会话分子目录存放，便于定位与整体清理。
 - 定时清理（默认每天 23:00 清理超过 24 小时的文件），避免磁盘无限增长。
@@ -153,6 +153,41 @@ def sanitize_filename(name: str, fallback: str = "attachment") -> str:
     return cleaned[: max(1, _MAX_NAME_LEN - len(ext))] + ext
 
 
+def build_oversize_notice(contents) -> str:
+    """
+    从内容块中找出因超过大小上限被跳过的日志附件，生成附在回复末尾给用户看的提示。
+
+    提示由程序确定性追加，不交给 AI 决定说不说：原先超限只在服务端打 WARNING、
+    给 AI 塞一条 note，用户前台完全不知道文件没被读过。
+
+    Args:
+        contents: Content 列表（只看 type == "log_file" 且 data["oversize"] 为真的块）
+
+    Returns:
+        提示文本；没有超限附件时返回空串
+    """
+    lines = []
+    for c in contents or []:
+        data = getattr(c, "data", None)
+        if getattr(c, "type", "") != "log_file" or not isinstance(data, dict):
+            continue
+        if not data.get("oversize"):
+            continue
+        lines.append(
+            f"- {data.get('name') or 'attachment'}："
+            f"{data.get('size_bytes', 0) / 1024 / 1024:.1f}MB，"
+            f"上限 {data.get('limit_bytes', 0) / 1024 / 1024:.0f}MB"
+        )
+    if not lines:
+        return ""
+    return (
+        "**⚠️ 以下附件超过大小上限，未被读取，上面的回答没有参考其内容：**\n"
+        + "\n".join(lines)
+        + "\n建议精简文件、突出重点后重新上传，例如只截取报错时间点前后的日志，"
+        "或只保留相关模块 / 关键词的行。"
+    )
+
+
 class LogFileManager:
     """日志文件附件的落地、读取与定时清理"""
 
@@ -160,7 +195,7 @@ class LogFileManager:
         self,
         enabled: bool = True,
         base_dir: str = "./data/log_files",
-        max_size_mb: int = 20,
+        max_size_mb: int = 50,
         inline_chars: int = 20000,
         cleanup_hour: int = 23,
         retention_hours: int = 24,

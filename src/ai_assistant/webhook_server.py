@@ -555,7 +555,7 @@ class WebhookServer:
         if len(files) > _MAX_WEB_LOG_FILES:
             return [], f"一次最多上传 {_MAX_WEB_LOG_FILES} 个文件，当前 {len(files)} 个"
 
-        max_size_bytes = getattr(manager, "max_size_bytes", 20 * 1024 * 1024)
+        max_size_bytes = getattr(manager, "max_size_bytes", 50 * 1024 * 1024)
         contents: List[Any] = []
 
         # 两阶段处理：先把所有文件校验完，再统一落地。
@@ -609,12 +609,13 @@ class WebhookServer:
 
             path = manager.save_bytes(session_id, safe_name, data)
             if not path:
-                # 落地失败：告知 AI 这一情况，不静默丢弃
+                # 落地失败：告知 AI 这一情况，不静默丢弃。
+                # 超限已在上面的校验阶段返回 400（前端 toast 可见），走到这里只可能是写盘失败
                 contents.append(Content(type="log_file", data={
                     "name": safe_name,
                     "path": "",
                     "text": "",
-                    "note": "文件超过大小上限或保存失败，未能读取内容",
+                    "note": "文件保存失败，未能读取内容",
                 }))
                 continue
 
@@ -660,7 +661,7 @@ class WebhookServer:
         }
 
         files 仅接受 .log/.txt/.out/.err/.zip，单文件大小上限由 LogFileManager
-        配置决定（默认 20MB）。带日志文件的提问会自动进入代码排查（Agentic）模式。
+        配置决定（默认 50MB）。带日志文件的提问会自动进入代码排查（Agentic）模式。
 
         响应格式：
         {

@@ -616,8 +616,13 @@
 
         // ---- 日志文件上传约束（与后端 LogFileManager 保持一致）----
         const LOG_FILE_EXTS = ['.log', '.txt', '.out', '.err', '.zip'];
-        const MAX_FILE_SIZE = 20 * 1024 * 1024;   // 单文件 20MB
+        const MAX_FILE_SIZE = 50 * 1024 * 1024;   // 单文件 50MB
         const MAX_FILE_COUNT = 5;                 // 单次最多 5 个
+        // 单次所选文件总大小上限（原始字节）。必须保证 base64 膨胀（×4/3）后，
+        // 加上图片（≤10MB）与 JSON 外壳仍小于 webhook_server.py:27 的 _MAX_CONTENT_LENGTH
+        // （150MB）：100MB×4/3 + 10MB×4/3 ≈ 146.7MB < 150MB。超出时后端回 413，
+        // 前端只能看到一句看不懂的报错，所以在添加文件时就拦下
+        const MAX_TOTAL_FILE_SIZE = 100 * 1024 * 1024;
 
         function isLogFileName(name) {
             const lower = (name || '').toLowerCase();
@@ -703,10 +708,14 @@
                 return;
             }
             if (file.size > MAX_FILE_SIZE) {
-                showError(`文件 ${file.name} 超过 20MB 上限`);
+                showError(`文件 ${file.name} 超过 ${MAX_FILE_SIZE / 1024 / 1024}MB 上限`);
                 return;
             }
             if (file.size === 0) { showError(`文件 ${file.name} 为空`); return; }
+            const totalTooLarge = () =>
+                pendingFiles.reduce((n, f) => n + f.size, 0) + file.size > MAX_TOTAL_FILE_SIZE;
+            const totalError = `所选文件总大小超过 ${MAX_TOTAL_FILE_SIZE / 1024 / 1024}MB，请精简后重新上传`;
+            if (totalTooLarge()) { showError(totalError); return; }
             const reader = new FileReader();
             reader.onload = (ev) => {
                 // Bug #4 修复：异步回调里再次检查数量，防止并发读取导致超限
@@ -729,6 +738,8 @@
                     showError(`已达到 ${MAX_FILE_COUNT} 个文件上限，无法添加 ${file.name}`);
                     return;
                 }
+                // 与数量同理：并发读取时前面的判断可能已过时，入列前再判一次总量
+                if (totalTooLarge()) { showError(totalError); return; }
                 pendingFiles.push({
                     name: file.name,
                     size: file.size,

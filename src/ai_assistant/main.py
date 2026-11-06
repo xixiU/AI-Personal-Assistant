@@ -302,7 +302,7 @@ class AIAssistant:
         self.log_file_manager = LogFileManager(
             enabled=getattr(self.config, "log_files_enabled", True),
             base_dir=getattr(self.config, "log_files_dir", "./data/log_files"),
-            max_size_mb=getattr(self.config, "log_files_max_size_mb", 20),
+            max_size_mb=getattr(self.config, "log_files_max_size_mb", 50),
             inline_chars=getattr(self.config, "log_files_inline_chars", 20000),
             cleanup_hour=getattr(self.config, "log_files_cleanup_hour", 23),
             retention_hours=getattr(self.config, "log_files_retention_hours", 24),
@@ -743,6 +743,12 @@ class AIAssistant:
                     context_key=context_key,
                     chain_info=chain_info,
                 )
+                # 附件超限时由程序在回复末尾追加提示，不依赖 AI 自己决定要不要说。
+                # content_parts 已并入 pending/own/quoted 三路附件（含引用缓存命中的块）。
+                from ai_assistant.utils.log_files import build_oversize_notice
+                oversize_notice = build_oversize_notice(content_parts)
+                if oversize_notice:
+                    reply = f"{reply}\n\n{oversize_notice}"
             except DocIndexingInProgressError:
                 # 文档索引更新中，加入延迟重试队列
                 logger.info(f"文档索引更新中，将消息加入延迟重试队列: session={session_id}")
