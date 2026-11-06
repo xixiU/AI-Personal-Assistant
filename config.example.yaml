@@ -197,6 +197,8 @@ troubleshoot:
   # - time 模式：从第一轮开始计时，超过 max_time 秒终止（推荐，更公平）
   # - rounds 模式：最多执行 max_rounds 轮（兼容旧配置）
   # - 单个工具仍受 tool_timeout 限制
+  # - max_time / max_rounds 也限制 OpenAI 通道的日志工具循环（两者同时生效，不看 timeout_mode）；
+  #   仅在 enabled: true 时读取，否则用默认值 300 秒 / 6 轮
 
   # ====== 多仓库配置（推荐） ======
   # 支持同时配置多个代码仓库，AI 可在排查时切换仓库

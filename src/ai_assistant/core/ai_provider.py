@@ -401,7 +401,7 @@ _IMAGE_UNSUPPORTED_PLACEHOLDER = (
 )
 
 
-def flatten_content_to_text(content: Content) -> str:
+def flatten_content_to_text(content: Content, log_tools_available: bool = False) -> str:
     """
     把单个 Content 块拍平成纯文本，供纯文本通道（OpenAI 兼容 API）使用。
 
@@ -422,6 +422,9 @@ def flatten_content_to_text(content: Content) -> str:
 
     Args:
         content: 单个 Content 内容块
+        log_tools_available: 本轮是否给 AI 提供了日志工具（OpenAI 通道当前轮带可读
+            日志且服务端接受 tools 时为 True）。为 False 时不能提工具名，提了就是
+            对 AI 说假话（原先这里写"可用代码排查工具读取"，而本通道根本没有工具）。
 
     Returns:
         拍平后的文本；无法表达的内容块返回空字符串
@@ -446,10 +449,14 @@ def flatten_content_to_text(content: Content) -> str:
             parts.append(f"本地路径: {path}")
         if note:
             parts.append(note)
+        if path and log_tools_available:
+            # 与 _content_to_api_parts 同序：提示放在正文之前，免得被几万字的内联开头淹没
+            from ai_assistant.tools.log_tools import LOG_TOOLS_ATTACHMENT_HINT
+            parts.append(LOG_TOOLS_ATTACHMENT_HINT)
+        elif path and not text and not note:
+            parts.append("（内容未内联，本轮无法读取全文）")
         if text:
             parts.append(f"文件内容:\n{text}")
-        elif path and not note:
-            parts.append("（内容未内联，可用代码排查工具读取上述路径）")
 
         logger.info(f"日志文件已注入 prompt: {content.summary()}")
         return "\n".join(parts)
@@ -467,7 +474,7 @@ def flatten_content_to_text(content: Content) -> str:
     return ""
 
 
-def flatten_message_text(msg: Message) -> str:
+def flatten_message_text(msg: Message, log_tools_available: bool = False) -> str:
     """
     把一条 Message 的所有内容块拍平成单段文本。
 
@@ -476,11 +483,12 @@ def flatten_message_text(msg: Message) -> str:
 
     Args:
         msg: 消息对象
+        log_tools_available: 透传给 flatten_content_to_text
 
     Returns:
         该消息的纯文本表示（可能为空字符串）
     """
-    parts = [flatten_content_to_text(c) for c in msg.content]
+    parts = [flatten_content_to_text(c, log_tools_available) for c in msg.content]
     return "\n".join(p for p in parts if p)
 
 

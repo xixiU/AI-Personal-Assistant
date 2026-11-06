@@ -129,6 +129,17 @@ AI 会先按提问里的案号、单号、traceId、报错类名、时间点搜�
   单次读取最多 200 行；大文件逐行流式读取；UTF-8 / GBK 自动识别。
 - 服务端日志只记工具名、命中条数、行数、耗时，不记关键词和日志正文。
 
+**OpenAI 兼容通道**（`provider: "openai"`，含 Ollama、各类网关、本地模型）同样提供这三个工具，
+走 OpenAI function calling（`tools` / `tool_calls` / `role: "tool"`）。只接日志工具，代码排查仍需 Anthropic Provider。
+
+- 只有当前这次提问带可读日志时才发送 `tools`；不带日志附件时，请求与普通问答完全一样。
+- 服务端不支持 function calling（如 400 且报错涉及 tools/function）时，自动去掉 `tools` 重试一次，
+  AI 会被告知「本轮无法读取全文」，服务端日志打一条 WARNING。认证失败、额度不足、限流不重试。
+- 循环上限：`troubleshoot.max_rounds` 与 `troubleshoot.max_time` 同时生效（仅 `troubleshoot.enabled: true`
+  时读取，否则默认 6 轮 / 300 秒），到达上限返回固定提示。
+- 已知局限：服务端静默忽略 `tools`、或把工具调用当普通文本 JSON 输出（部分本地模型）时，
+  会被当作最终回复，无法识别；到达上限时与 Anthropic 一致只返回固定提示，已拿到的中间结论不保留。
+
 ### 运维操作助手（新功能）
 
 **触发方式**：发送 `/运维` 或 `/ops` 开头的指令
