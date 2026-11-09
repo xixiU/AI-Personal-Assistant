@@ -16,6 +16,10 @@ from loguru import logger
 class GitTools:
     """Git 只读代码工具集"""
 
+    # git grep -P 依赖编译时带 libpcre2，是 git 程序本身的属性，进程内探测一次即可。
+    # None 表示尚未探测
+    _pcre_supported: Optional[bool] = None
+
     def __init__(self, repo_path: str, default_ref: str = "origin/main"):
         """
         初始化 Git 工具
@@ -35,6 +39,26 @@ class GitTools:
 
         logger.info(f"GitTools 初始化: repo={self.repo_path}, default_ref={default_ref}")
 
+    @staticmethod
+    def _english_messages_env() -> Dict[str, str]:
+        """
+        只把报错文案固定为英文，字符集设置保持不变。
+
+        _is_pattern_error 按英文关键字识别模式错误，zh_CN 环境下报错被翻译就会失效。
+        不能直接 LC_ALL=C：Linux 上 LC_CTYPE=C 会让正则按字节匹配，'资.训' 这类
+        中文正则会静默漏搜。LC_ALL 优先级最高、会盖住 LC_MESSAGES，所以把它的值
+        下放到影响匹配的 LC_CTYPE / LC_COLLATE 后再删掉。
+        """
+        env = dict(os.environ)
+        lc_all = env.pop("LC_ALL", None)
+        if lc_all:
+            # LC_ALL 原本就盖住了这两项，直接覆盖才与原行为一致
+            env["LC_CTYPE"] = lc_all
+            env["LC_COLLATE"] = lc_all
+        env["LC_MESSAGES"] = "C"
+        env["LANGUAGE"] = "C"
+        return env
+
     def _run_git_command(self, args: List[str], timeout: int = 30) -> str:
         """
         执行 git 命令（只读操作）
@@ -52,21 +76,24 @@ class GitTools:
         """
         try:
             result = subprocess.run(
-                ["git"] + args,
+                # core.quotePath 默认 true，中文路径会输出成 "\345\211\215..." 八进制转义，
+                # AI 拿去 read_file 必然找不到；部署环境不一定有全局配置，这里统一关掉
+                ["git", "-c", "core.quotePath=false"] + args,
                 cwd=str(self.repo_path),
                 capture_output=True,
                 text=True,
                 timeout=timeout,
                 check=False,  # 不自动抛异常，让调用者处理退出码
                 encoding='utf-8',
-                errors='replace'  # 替换无法解码的字符，避免崩溃
+                errors='replace',  # 替换无法解码的字符，避免崩溃
+                env=self._english_messages_env() if args[0] == "grep" else None,
             )
             # 检查退出码，但 grep 的1（没匹配）不算错误
             if result.returncode != 0:
                 # git grep 返回1表示没匹配，属于正常情况
                 if args[0] == "grep" and result.returncode == 1:
                     return ""  # 返回空字符串表示没结果
-                # grep 返回 128 多为正则语法无效，调用方会退回字面量重试，
+                # grep 返回 128 多为正则语法无效，调用方会换写法降级重试，
                 # 这里不按 ERROR 记录，避免正常的重试流程看起来像故障
                 if args[0] == "grep" and result.returncode == 128:
                     logger.debug(f"Git grep 正则无效: {' '.join(args)}, stderr={result.stderr}")
@@ -176,30 +203,374 @@ class GitTools:
             specs.append("*" + spec.rstrip("/") + "/*")
         return specs
 
+    def _pcre_available(self) -> bool:
+        """
+        探测当前 git 是否支持 grep -P（结果进程级缓存）。
+
+        用一个只有 PCRE 才认的模式对暂存区跑一次：退出码 0/1（有/无匹配）说明支持；
+        128 说明没编译 libpcre2 或不认 -P。--cached 不依赖 HEAD，空仓库也能探测。
+        超时不缓存，下次再探。
+        """
+        if GitTools._pcre_supported is None:
+            try:
+                self._run_git_command(
+                    ["grep", "-P", "-q", "-e", r"(?i)\d(?:x)*?", "--cached"], timeout=10)
+                GitTools._pcre_supported = True
+            except subprocess.CalledProcessError:
+                GitTools._pcre_supported = False
+            except subprocess.TimeoutExpired:
+                return False
+            logger.info(f"git grep -P 支持情况: {GitTools._pcre_supported}")
+        return GitTools._pcre_supported
+
+    @staticmethod
+    def _is_pattern_error(e: subprocess.CalledProcessError, patterns: List[str]) -> bool:
+        """
+        判断 grep 失败是否由模式本身引起（只有这种才值得降级换写法重试）。
+
+        坏 ref、坏 pathspec 同样返回 128，降级换写法也救不回来，不能算作模式错误。
+        git 报模式错误时会把模式加单引号带进 stderr（"-e option, '<模式>': ..."），
+        要连引号一起比，否则 'a' 这类短模式会在任何报错文字里"命中"。
+        PCRE 运行期错误（如回溯超限）带 "pcre" 字样。
+        """
+        if e.returncode != 128:
+            return False
+        stderr = (e.stderr or "").lower()
+        if any(p and f"'{p.lower()}'" in stderr for p in patterns):
+            return True
+        return any(k in stderr for k in ("pcre", "regex", "regular expression"))
+
+    @staticmethod
+    def _perl_to_ere(pattern: str) -> Optional[str]:
+        """
+        把常见的 Perl 风格写法转成 POSIX ERE。
+
+        只做等价或只会放宽匹配的转换（多搜到无妨，漏搜会让 AI 误判"代码里没有"）：
+        \\d \\s \\w → 字符类；(?: / 命名组 / 原子组 → (；懒惰/占有量词去掉后缀；
+        \\b \\B 去掉（放宽）；开头的 (?i) 等内联标记去掉（search_code 固定 -i）。
+        遇到无法等价表达的（反向引用、环视、\\x 转义、(?x) 等）返回 None，交给下一级。
+
+        Returns:
+            ERE 模式；无法安全转换时返回 None
+        """
+        classes = {
+            "d": "[0-9]", "D": "[^0-9]",
+            "s": "[[:space:]]", "S": "[^[:space:]]",
+            "w": "[[:alnum:]_]", "W": "[^[:alnum:]_]",
+        }
+        in_bracket = {"d": "0-9", "s": "[:space:]", "w": "[:alnum:]_"}
+        ere_meta = set(".[]()*+?{}|^$\\")
+        out: List[str] = []
+        depth = 0
+        i, n = 0, len(pattern)
+        after_quantifier = False
+
+        while i < n:
+            c = pattern[i]
+            if after_quantifier and c in "?+":
+                # 懒惰（*?）或占有（*+）后缀：判断"这一行是否匹配"时与贪婪等价
+                i += 1
+                after_quantifier = False
+                continue
+            after_quantifier = False
+
+            if c == "\\":
+                if i + 1 >= n:
+                    return None
+                e = pattern[i + 1]
+                i += 2
+                if e in classes:
+                    out.append(classes[e])
+                elif e in "bB":
+                    pass  # 单词边界只收窄匹配，去掉即放宽
+                elif e == "A":
+                    out.append("^")
+                elif e in "zZ":
+                    out.append("$")
+                elif e == "t":
+                    out.append("\t")
+                elif e.isalnum():
+                    return None  # \x \p \n \1 \K 等，ERE 无等价写法
+                elif e in ere_meta:
+                    out.append("\\" + e)
+                else:
+                    # \- \< \/ 等：Perl 里就是该字符本身。ERE 里 \< 是词首，要去掉反斜杠
+                    out.append(e)
+                continue
+
+            if c == "[":
+                j = i + 1
+                body = ["["]
+                if j < n and pattern[j] == "^":
+                    body.append("^")
+                    j += 1
+                if j < n and pattern[j] == "]":
+                    body.append("]")
+                    j += 1
+                while j < n and pattern[j] != "]":
+                    if pattern[j] == "\\":
+                        if j + 1 >= n:
+                            return None
+                        e = pattern[j + 1]
+                        if e in in_bracket:
+                            body.append(in_bracket[e])
+                        elif not e.isalnum() and e not in "]\\^-[":
+                            body.append(e)
+                        else:
+                            return None  # 方括号内 \] \\ \- 等在 ERE 里写法不同，不冒险
+                        j += 2
+                    elif pattern.startswith("[:", j):
+                        end = pattern.find(":]", j + 2)
+                        if end < 0:
+                            return None
+                        body.append(pattern[j:end + 2])
+                        j = end + 2
+                    else:
+                        body.append(pattern[j])
+                        j += 1
+                if j >= n:
+                    return None
+                body.append("]")
+                out.append("".join(body))
+                i = j + 1
+                continue
+
+            if c == "(":
+                if pattern.startswith("(?", i):
+                    flags = re.match(r"\(\?([a-zA-Z]*)(?:-([a-zA-Z]*))?(:|\))", pattern[i:])
+                    named = re.match(r"\(\?(?:P?<[A-Za-z_]\w*>|'[A-Za-z_]\w*')", pattern[i:])
+                    if flags:
+                        if "x" in (flags.group(1) or "") + (flags.group(2) or ""):
+                            return None  # (?x) 会忽略模式里的空白，去掉它会改变含义
+                        i += flags.end()
+                        if flags.group(3) == ":":
+                            out.append("(")
+                            depth += 1
+                        continue  # 单独的 (?i) 等直接去掉
+                    if named:
+                        out.append("(")
+                        depth += 1
+                        i += named.end()
+                        continue
+                    if pattern.startswith("(?>", i):
+                        out.append("(")
+                        depth += 1
+                        i += 3
+                        continue
+                    return None  # 环视、条件组、注释等
+                out.append("(")
+                depth += 1
+                i += 1
+                continue
+
+            if c == ")":
+                depth -= 1
+                if depth < 0:
+                    return None
+                out.append(")")
+                i += 1
+                continue
+
+            if c in "*+?":
+                out.append(c)
+                after_quantifier = True
+                i += 1
+                continue
+
+            if c == "{":
+                interval = re.match(r"\{\d+(?:,\d*)?\}", pattern[i:])
+                if interval:
+                    out.append(interval.group(0))
+                    after_quantifier = True
+                    i += interval.end()
+                else:
+                    out.append("[{]")  # Perl 里非区间的 { 是字面量
+                    i += 1
+                continue
+
+            if c == "}":
+                out.append("[}]")
+                i += 1
+                continue
+
+            out.append(c)
+            i += 1
+
+        if depth != 0:
+            return None
+        return "".join(out)
+
+    @staticmethod
+    def _extract_keywords(pattern: str, limit: int = 10) -> List[str]:
+        """
+        从正则里提取有意义的字面片段，作为"任一命中"的关键词。
+
+        按元字符（| . * ( ) [ ] 等）切开连续的字面字符；量词 ? * {0,..} 让前一个
+        字符变成可选，把它从片段里去掉；否定环视里的内容是"不能出现"的，丢弃。
+        长度小于 2 或不含字母数字/汉字的片段丢弃，大小写不敏感去重。
+
+        Returns:
+            关键词列表（可能为空）
+        """
+        fragments: List[str] = []
+        run: List[str] = []
+        negative_stack: List[bool] = []
+        skip_depth = 0  # 处于否定环视内时 > 0
+        i, n = 0, len(pattern)
+
+        def flush():
+            if run and skip_depth == 0:
+                fragments.append("".join(run))
+            run.clear()
+
+        while i < n:
+            c = pattern[i]
+            if c == "\\" and i + 1 < n:
+                e = pattern[i + 1]
+                i += 2
+                if not e.isalnum():
+                    run.append(e)  # \( \. 等转义的字面字符
+                    continue
+                flush()
+                if e in "pPxu" and i < n and pattern[i] == "{":
+                    end = pattern.find("}", i)
+                    i = end + 1 if end >= 0 else n
+                continue
+            if c == "[":
+                flush()
+                j = i + 1
+                if j < n and pattern[j] == "^":
+                    j += 1
+                if j < n and pattern[j] == "]":
+                    j += 1
+                while j < n and pattern[j] != "]":
+                    j += 2 if pattern[j] == "\\" else 1
+                i = j + 1
+                continue
+            if c == "(":
+                flush()
+                header = re.match(r"\(\?(?:<?[=!]|[a-zA-Z]*(?:-[a-zA-Z]*)?[:)]|P?<\w+>|'\w+'|>|)",
+                                  pattern[i:])
+                consumed = header.end() if header else 1
+                is_negative = "!" in pattern[i:i + consumed]
+                if pattern[i:i + consumed].endswith(")") and consumed > 1:
+                    i += consumed  # 单独的 (?i) 标记，没有开组
+                    continue
+                negative_stack.append(is_negative)
+                if is_negative:
+                    skip_depth += 1
+                i += consumed
+                continue
+            if c == ")":
+                flush()
+                if negative_stack and negative_stack.pop():
+                    skip_depth -= 1
+                i += 1
+                continue
+            if c in "?*" or (c == "{" and re.match(r"\{0?,", pattern[i:])):
+                if run:
+                    run.pop()  # 前一个字符可选
+                flush()
+                if c == "{":
+                    end = pattern.find("}", i)
+                    i = end + 1 if end >= 0 else n
+                else:
+                    i += 1
+                continue
+            if c in "+|.^$":
+                flush()
+                i += 1
+                continue
+            if c == "{":
+                flush()
+                interval = re.match(r"\{\d+(?:,\d*)?\}", pattern[i:])
+                i += interval.end() if interval else 1
+                continue
+            run.append(c)
+            i += 1
+        flush()
+
+        keywords: List[str] = []
+        seen = set()
+        for frag in fragments:
+            frag = frag.strip()
+            if len(frag) < 2 or not any(ch.isalnum() for ch in frag):
+                continue
+            if frag.lower() in seen:
+                continue
+            seen.add(frag.lower())
+            keywords.append(frag)
+            if len(keywords) >= limit:
+                break
+        return keywords
+
     def _grep_with_fallback(self, args_prefix: List[str], query: str, ref: str,
                             pathspecs: List[str]) -> tuple:
         """
-        先按正则（-E）搜索，若 git 报"坏正则"（退出码 128）再退回字面量（-F）搜索。
+        按多级策略执行 git grep，只有"模式本身执行不了"才降到下一级：
 
-        原实现按"是否含特殊字符"猜测，导致 'class.*Service' 这类真正的正则被当作
-        字面量搜索，永远匹配不到内容却只返回"无结果"。
+        1. pcre：-P，AI 习惯的 Perl 风格写法（(?i) \\d \\b 懒惰量词等）直接可用；
+           需要 git 带 libpcre2，进程内探测一次
+        2. ere：-E，Perl 写法经 _perl_to_ere 转换（合法 ERE 原样不变）
+        3. keywords：-F 多个 -e，按正则里提取的字面片段搜任一命中
+        4. literal：-F，整串当字面量（提取不出关键词时才用）
+
+        "无匹配"（退出码 1）不是失败，不降级，否则一个正确但确实没结果的正则会被
+        逐级放宽，搜出一堆无关内容。
+
+        历史教训：原实现按"是否含特殊字符"猜测，导致 'class.*Service' 这类真正的
+        正则被当作字面量搜索。现在合法的正则一定在第 1 或第 2 级按正则执行。
+
+        模式一律用 -e 传入，避免以 "-" 开头的 query 被 git 当成选项。
 
         Returns:
-            (输出文本, 实际使用的模式)
+            (输出文本, 实际使用的策略名, 第 3 级使用的关键词列表)
         """
-        for mode in ("-E", "-F"):
-            args = ["grep", mode] + args_prefix + [query, ref]
+        attempts = []
+        if self._pcre_available():
+            attempts.append(("pcre", "-P", [query]))
+        ere = self._perl_to_ere(query)
+        if ere is not None:
+            attempts.append(("ere", "-E", [ere]))
+        keywords = self._extract_keywords(query)
+        if keywords:
+            attempts.append(("keywords", "-F", keywords))
+        else:
+            attempts.append(("literal", "-F", [query]))
+
+        last_error = None
+        for strategy, flag, patterns in attempts:
+            args = ["grep", flag] + args_prefix
+            for p in patterns:
+                args += ["-e", p]
+            args.append(ref)
             if pathspecs:
                 args += ["--"] + pathspecs
             try:
-                return self._run_git_command(args), mode
+                return self._run_git_command(args), strategy, keywords
             except subprocess.CalledProcessError as e:
-                # 128 = 正则语法错误；此时退回字面量再试一次
-                if e.returncode == 128 and mode == "-E":
-                    logger.info(f"正则搜索失败，退回字面量搜索: query='{query}'")
-                    continue
-                raise
-        return "", "-F"
+                if not self._is_pattern_error(e, patterns):
+                    raise
+                logger.info(f"grep 策略 {strategy} 无法执行该模式，降级: query='{query}'")
+                last_error = e
+        raise last_error
+
+    @staticmethod
+    def _strategy_notice(strategy: str, keywords: List[str]) -> Optional[str]:
+        """
+        生成给 AI 看的降级说明；按原正则执行（pcre）时返回 None。
+
+        AI 拿到空结果容易误判"代码里没有这个功能"，降级后必须让它知道实际搜了什么。
+        """
+        if strategy == "ere":
+            return "当前环境不支持 Perl 风格正则，已转换为等价的 POSIX 扩展正则执行（\\b 等边界会被放宽）。"
+        if strategy == "keywords":
+            return (f"原正则无法执行，已改为按关键词 {'、'.join(keywords)} 搜索（命中任一即返回）；"
+                    "结果为空不代表代码里没有，请换成更简单的关键词重试。")
+        if strategy == "literal":
+            return ("原正则无法执行，也提取不出关键词，已把整串当普通文本搜索；"
+                    "结果为空不代表代码里没有，请换成更简单的关键词重试。")
+        return None
 
     def search_code(
         self,
@@ -213,7 +584,7 @@ class GitTools:
         在代码中搜索关键词（git grep）
 
         Args:
-            query: 搜索关键词（支持正则，失败自动退回字面量）
+            query: 搜索关键词（支持正则，执行不了时逐级降级，见 _grep_with_fallback）
             ref: git 引用（分支/tag），为 None 时使用默认
             path_filter: 可选的路径过滤（如 "*.py"；裸文件名会自动补全匹配）
             max_results: 最大返回结果数
@@ -234,11 +605,18 @@ class GitTools:
                 args_prefix += ["-C", str(context)]
 
             pathspecs = self._normalize_pathspec(path_filter) if path_filter else []
-            output, mode = self._grep_with_fallback(args_prefix, query, ref, pathspecs)
+            output, strategy, keywords = self._grep_with_fallback(
+                args_prefix, query, ref, pathspecs)
+            # 降级说明放在 results 前面，让 AI 先看到"实际是怎么搜的"
+            meta = {"query": query, "ref": ref, "strategy": strategy}
+            notice = self._strategy_notice(strategy, keywords)
+            if notice:
+                meta["notice"] = notice
 
             if not output:
-                logger.info(f"search_code: query='{query}', ref={ref}, no results")
-                return {"query": query, "ref": ref, "results": [], "total": 0}
+                logger.info(
+                    f"search_code: query='{query}', ref={ref}, strategy={strategy}, no results")
+                return {**meta, "results": [], "total": 0}
 
             lines = output.strip().split("\n") if output.strip() else []
 
@@ -293,12 +671,11 @@ class GitTools:
                     pending_context.append(entry)
 
             logger.info(
-                f"search_code: query='{query}', ref={ref}, mode={mode}, "
+                f"search_code: query='{query}', ref={ref}, strategy={strategy}, "
                 f"results={len(results)}"
             )
             return {
-                "query": query,
-                "ref": ref,
+                **meta,
                 "results": results,
                 "total": len(results),
                 "truncated": truncated
@@ -563,7 +940,7 @@ GIT_TOOLS_SCHEMA = [
     },
     {
         "name": "search_code",
-        "description": "在指定分支/tag 的代码中搜索关键词（如异常类名、错误信息、函数名）。返回匹配的文件、行号和代码片段。支持正则（若正则语法无效会自动退回字面量搜索）。用 context 参数可同时拿到匹配行周围的代码，省去再调 read_file。",
+        "description": "在指定分支/tag 的代码中搜索关键词（如异常类名、错误信息、函数名）。返回匹配的文件、行号和代码片段。支持常见正则写法（优先按 Perl 风格执行，环境不支持时自动转换或拆成关键词，结果里的 notice 会说明实际怎么搜的）；不区分大小写，不需要写 (?i)。用 context 参数可同时拿到匹配行周围的代码，省去再调 read_file。",
         "input_schema": {
             "type": "object",
             "properties": {
