@@ -848,6 +848,199 @@ class GitTools:
             logger.error(f"list_dir 异常: {e}")
             return {"error": str(e)}
 
+    # run_git_command 的只读子命令白名单。grep/remote/reflog 带参数就能执行命令或改写仓库
+    # （grep -O、remote add、reflog expire），搜索改用 search_code。
+    # branch/tag 保留是为了 --contains 查"修复进了哪些版本"，只放行列表模式，见 _REF_LIST_*
+    _READONLY_COMMANDS = {
+        'log', 'show', 'diff', 'blame', 'annotate',
+        'ls-files', 'ls-tree', 'cat-file',
+        'rev-parse', 'rev-list', 'describe', 'status',
+        'branch', 'tag',
+    }
+
+    # branch/tag 只放行这些参数，按全名精确匹配：缩写可能被解析成 --delete 之类的写操作。
+    # 不在名单里的（-d/-D/-m/-M/-c/-C/-f/-u/--edit-description/tag -a/-s/-v/-F 等）一律拒绝
+    _REF_LIST_LONG_OPTIONS = {
+        'branch': {
+            '--list', '--remotes', '--all', '--verbose', '--ignore-case', '--show-current',
+            '--contains', '--no-contains', '--merged', '--no-merged', '--points-at',
+            '--sort', '--format', '--color', '--no-color', '--column', '--no-column',
+            '--abbrev', '--no-abbrev', '--omit-empty',
+        },
+        'tag': {
+            '--list', '--ignore-case',
+            '--contains', '--no-contains', '--merged', '--no-merged', '--points-at',
+            '--sort', '--format', '--color', '--column', '--no-column', '--omit-empty',
+        },
+    }
+    # 不用 = 写时会吃掉下一个参数作为取值（与 git parse-options 一致）
+    _REF_LIST_VALUE_OPTIONS = {
+        '--contains', '--no-contains', '--merged', '--no-merged', '--points-at',
+        '--sort', '--format',
+    }
+    # 合并短参数只能由这些字母组成；tag 的 -a/-v 是建签名标签/验签，不能沿用 branch 的
+    _REF_LIST_SHORT_OPTIONS = {'branch': 'rlavi', 'tag': 'lin'}
+    # 列表模式开关：出现时非选项参数是过滤模式，否则是要创建的分支/标签名
+    _REF_LIST_SWITCHES = {'--list', '-l'}
+
+    # 能执行命令、写文件、读仓库外文件或读服务端 stdin 的长参数，所有子命令一律拒绝。
+    # parse-options 接受无歧义缩写（--cont 即 --contents），所以按"是否为其前缀"判断
+    _DENIED_LONG_OPTIONS = (
+        '--output',                # log/show/diff: 写任意文件
+        '--output-directory',      # format-patch 系: 写任意目录
+        '--no-index',              # diff: 比较任意两个文件，等于读仓库外文件
+        '--open-files-in-pager',   # grep: 执行任意命令
+        '--exec-path',
+        '--upload-pack',
+        '--receive-pack',
+        '--ext-diff',              # log/show/diff: 执行配置的外部 diff 程序
+        '--textconv',              # log/show/diff/blame/cat-file: 执行配置的转换程序
+        '--filters',               # cat-file: 执行配置的 clean/smudge 过滤器
+        '--contents',              # blame/annotate: 读任意文件当作工作区内容
+        '--ignore-revs-file',      # blame/annotate: 读任意文件
+        '--exclude-from',          # ls-files: 读任意文件
+        '--exclude-per-directory',  # ls-files: 文件名可带 ../ 跳出仓库
+        '--orderfile',             # 同 -O
+        '--stdin',                 # log/rev-list/diff: 读服务进程的 stdin
+        '--parseopt',              # rev-parse: 读 stdin
+    )
+    # 以此开头的整族参数都拒绝：cat-file 的 --batch、--batch-check、--batch-command 都读 stdin
+    _DENIED_LONG_FAMILIES = ('--batch',)
+
+    # 恰好是危险参数前缀、但本身就是该子命令真实参数的写法，精确匹配时放行
+    # （缩写匹配时精确名优先，不会被解析成危险参数）
+    _SAFE_EXACT_OPTIONS = {
+        'log': {'--text', '--exclude'}, 'show': {'--text', '--exclude'}, 'diff': {'--text'},
+        'blame': {'--ignore-rev'}, 'annotate': {'--ignore-rev'},
+        'ls-files': {'--exclude'},
+        'rev-list': {'--exclude', '--filter'},
+        'rev-parse': {'--exclude'},
+    }
+
+    # 危险短参数：-O<文件> 在 log/show/diff 是读 orderfile、在 grep 是执行命令；
+    # blame 的 -S <文件> 读 revs-file；ls-files 的 -X <文件> 读排除规则文件
+    _DIFF_FAMILY = ('log', 'show', 'diff', 'rev-list')
+    _DENIED_SHORT_OPTIONS = {
+        **{c: 'O' for c in _DIFF_FAMILY},
+        'blame': 'OS', 'annotate': 'OS',
+        'ls-files': 'OX',
+    }
+    # 合并短参数里，这些字母之后的字符是它的取值而不是新参数（-L1,3:f、-Sfoo、-M50%）
+    _VALUE_SHORT_OPTIONS = {
+        **{c: 'LSGUMCBlnI' for c in _DIFF_FAMILY},
+        'blame': 'LCM', 'annotate': 'LCM',
+        'ls-files': 'x',
+    }
+
+    def _find_denied_ref_list_arg(self, args: List[str]) -> Optional[str]:
+        """
+        branch/tag 只允许列表模式：白名单参数及其取值，加上 --list 之后的过滤模式
+
+        Args:
+            args: git 命令参数列表，args[0] 为 'branch' 或 'tag'
+
+        Returns:
+            不允许的参数名（不含取值），全部允许时返回 None
+        """
+        command = args[0]
+        allowed_long = self._REF_LIST_LONG_OPTIONS[command]
+        allowed_short = self._REF_LIST_SHORT_OPTIONS[command]
+        positionals = False
+        list_mode = False
+        options_done = False
+        i = 1
+        while i < len(args):
+            arg = args[i]
+            i += 1
+            if options_done or not arg.startswith('-') or arg == '-':
+                positionals = True
+            elif arg == '--':
+                options_done = True
+            elif arg.startswith('--'):
+                name, has_value, _ = arg.partition('=')
+                if name not in allowed_long:
+                    return name
+                list_mode = list_mode or name in self._REF_LIST_SWITCHES
+                if name in self._REF_LIST_VALUE_OPTIONS and not has_value and i < len(args):
+                    i += 1  # 下一个参数是取值（提交号、排序键、格式串）
+            else:
+                for ch in arg[1:]:
+                    if command == 'tag' and ch == 'n':
+                        break  # tag -n<行数>：之后是取值
+                    if ch not in allowed_short:
+                        return f"-{ch}"
+                list_mode = list_mode or 'l' in arg[1:]
+        # 非列表模式下的位置参数会创建分支/标签（git 允许 --list 写在模式后面）
+        if positionals and not list_mode:
+            return "位置参数（不带 --list 时会创建分支/标签）"
+        return None
+
+    def _is_outside_repo_path(self, arg: str) -> bool:
+        """
+        判断 diff 的非选项参数是否指向仓库外的路径
+
+        diff 的非选项参数大多是版本（HEAD~1、origin/dev-4.3.6、a..b、HEAD:f），不是路径。
+        只有绝对路径、含 .. 路径段、或在文件系统上存在且解析后落在仓库外时才算。
+        'a1b2..c3d4' 是版本范围，按分隔符切开后没有 '..' 段，不算
+
+        Args:
+            arg: diff 的一个非选项参数
+
+        Returns:
+            指向仓库外时返回 True
+        """
+        if os.path.isabs(arg) or arg.startswith(('/', '\\')):
+            return True
+        if '..' in re.split(r'[\\/]', arg):
+            return True
+        candidate = self.repo_path / arg
+        try:
+            if candidate.exists() or candidate.is_symlink():
+                return not candidate.resolve().is_relative_to(self.repo_path)
+        except (OSError, ValueError):
+            return True
+        return False
+
+    def _find_denied_git_arg(self, args: List[str]) -> Optional[str]:
+        """
+        找出 run_git_command 参数里第一个不允许的参数
+
+        Args:
+            args: git 命令参数列表（args[0] 已确认在白名单内）
+
+        Returns:
+            不允许的参数名（不含取值），全部允许时返回 None
+        """
+        command = args[0]
+        if command in self._REF_LIST_LONG_OPTIONS:
+            return self._find_denied_ref_list_arg(args)
+        safe_exact = self._SAFE_EXACT_OPTIONS.get(command, set())
+        denied_short = self._DENIED_SHORT_OPTIONS.get(command, 'O')
+        value_short = self._VALUE_SHORT_OPTIONS.get(command, '')
+
+        for arg in args[1:]:
+            if arg.startswith('--'):
+                name = arg.split('=', 1)[0]
+                if name == '--' or name in safe_exact:
+                    continue
+                for denied in self._DENIED_LONG_OPTIONS:
+                    if denied.startswith(name):
+                        return denied
+                for family in self._DENIED_LONG_FAMILIES:
+                    if name.startswith(family) or family.startswith(name):
+                        return family
+            elif arg.startswith('-') and len(arg) > 1:
+                for ch in arg[1:]:
+                    if ch in denied_short:
+                        return f"-{ch}"
+                    if ch in value_short:
+                        break
+            elif command == 'diff':
+                # diff 给出的路径有一个在仓库外时会自动按 --no-index 比较，等于读任意文件
+                if self._is_outside_repo_path(arg):
+                    return "仓库外路径"
+        return None
+
     def run_git_command(self, args: List[str]) -> Dict[str, Any]:
         """
         执行任意只读 git 命令（白名单控制）
@@ -858,17 +1051,18 @@ class GitTools:
         Returns:
             包含 output 和 error 的字典
         """
-        # 只读命令白名单（排除所有写操作）
-        readonly_commands = {
-            'log', 'show', 'diff', 'blame', 'annotate',
-            'ls-files', 'ls-tree', 'cat-file',
-            'rev-parse', 'rev-list', 'describe',
-            'branch', 'tag', 'reflog',
-            'grep', 'status', 'remote',
-        }
+        readonly_commands = self._READONLY_COMMANDS
 
-        if not args or args[0] not in readonly_commands:
-            return {"error": f"不允许的命令: {args[0] if args else '(空)'}，仅支持只读命令: {', '.join(sorted(readonly_commands))}"}
+        if not args or not all(isinstance(a, str) for a in args):
+            return {"error": "args 必须是非空的字符串列表"}
+        if args[0] not in readonly_commands:
+            return {"error": f"不允许的命令: {args[0]}，仅支持只读命令: {', '.join(sorted(readonly_commands))}。搜索代码请用 search_code"}
+
+        denied = self._find_denied_git_arg(args)
+        if denied:
+            # 只记命令名和参数名，参数值可能是攻击者给的路径或命令
+            logger.warning(f"run_git_command 拒绝参数: command={args[0]}, denied={denied}")
+            return {"error": f"不允许的参数: {denied}（会执行命令、改写仓库、写文件或读取仓库外文件），请去掉它换用其它写法"}
 
         # 修正常见的参数冲突：-L 与 --follow 不兼容
         # git log -L <start>,<end>:<file> 本身就会追踪行的历史，不需要 --follow
@@ -919,7 +1113,7 @@ GIT_TOOLS_SCHEMA = [
                 "args": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "git 命令参数列表（不含'git'本身）。只支持只读命令：log, show, diff, blame, annotate, ls-files, ls-tree, cat-file, rev-parse, rev-list, describe, branch, tag, reflog, grep, status, remote。"
+                    "description": "git 命令参数列表（不含'git'本身）。只支持只读命令：log, show, diff, blame, annotate, ls-files, ls-tree, cat-file, rev-parse, rev-list, describe, status, branch, tag。branch/tag 仅限列表模式，如 ['branch', '-r', '--contains', '<sha>'] 查提交进了哪些分支、['tag', '--contains', '<sha>'] 查进了哪些版本，按名字过滤需带 --list。搜索代码用 search_code。--output、--no-index、--contents、--ext-diff、--textconv、-O 等会写文件、执行命令或读仓库外文件的参数会被拒绝。"
                 }
             },
             "required": ["args"]

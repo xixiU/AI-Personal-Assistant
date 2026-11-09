@@ -1487,7 +1487,7 @@ class AnthropicProvider(AIProvider):
             "- 小文件（<200行）直接全读；只看注解或类定义时只读前 50 行",
             "",
             "【查提交历史/作者】",
-            "- 用 run_git_command，例如：",
+            "- 用 run_git_command（仅只读子命令，branch/tag 只能列出，查修复进了哪些版本用 ['tag', '--contains', '<sha>']），例如：",
             "  · 谁改的、什么时候：['log', '--oneline', '-10', '--', '<文件路径>']",
             "  · 某几行是谁写的：['blame', '-L', '520,540', '--', '<文件路径>']",
             "  · 按提交信息找改动：['log', '--all', '--grep=log4j', '--oneline']",
