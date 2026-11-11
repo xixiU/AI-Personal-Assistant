@@ -1640,7 +1640,7 @@ class AnthropicProvider(AIProvider):
                     for block in response.content:
                         if hasattr(block, 'text'):
                             final_text += block.text
-                    logger.info(f"Agentic 完成: 总轮数={round_num}, 最终回复={len(final_text)}字符")
+                    logger.info(f"Agentic 完成: 总轮数={round_num}, 最终回复={len(final_text)}字符, preview={final_text[:100]!r}")
 
                     # 构建 metadata（Agentic 模式）
                     metadata = {
@@ -2214,7 +2214,7 @@ class AnthropicProvider(AIProvider):
                     for block in response.content:
                         if hasattr(block, 'text'):
                             final_text += block.text
-                    logger.info(f"Operations 完成: 总轮数={round_num}, 最终回复={len(final_text)}字符")
+                    logger.info(f"Operations 完成: 总轮数={round_num}, 最终回复={len(final_text)}字符, preview={final_text[:100]!r}")
 
                     # 构建 metadata（Operations 模式）
                     metadata = {
@@ -2667,7 +2667,8 @@ class AnthropicProvider(AIProvider):
                 reply = "抱歉，未能生成有效回复。"
             logger.info(
                 f"Claude 回复已接收: {len(reply)} 字符, "
-                f"tokens(input:{response.usage.input_tokens}, output:{response.usage.output_tokens})"
+                f"tokens(input:{response.usage.input_tokens}, output:{response.usage.output_tokens}), "
+                f"preview={reply[:100]!r}"
             )
 
             # 构建 metadata（标准 RAG 模式）
