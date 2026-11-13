@@ -102,6 +102,15 @@ def test_agentic_system_prompt_prefers_config_data_and_ops_audience(provider_and
     # 排查方向的先验
     assert "绝大多数是配置、数据、环境或用法问题" in system
     assert "只有排除了以上原因、并且有代码证据时，才下\"代码 bug\"的结论" in system
+    # 版本与数据库方言视角（绑条目前缀，避免被其他段落的同类词蒙过）
+    assert "· 版本：产品版本与配置/脚本不匹配，升级后漏执行数据库升级脚本" in system
+    assert "· 数据库方言/版本：现场数据库有达梦（DM）、MySQL、人大金仓（Kingbase）" in system
+    assert "给 SQL 时注明适用哪种库" in system
+    # 代码改动时间判据：带当天日期，老代码优先查现场；确认 bug 转研发
+    assert f"看报错处代码的最后改动时间（今天是 {datetime.now().strftime('%Y-%m-%d')}）" in system
+    assert "3 个月以上没改过：这段代码已在各现场稳定运行，大概率不是代码问题" in system
+    assert "排查建议必须结合现场日志：指出日志里哪一行、哪个参数值说明了问题" in system
+    assert "结论写明\"疑似代码问题，请联系研发处理\"" in system
     # 读代码是手段
     assert "读代码是为了查清是哪个配置项、哪张表、哪条数据导致的" in system
     # 回复结构：伪代码展示取数逻辑、给现场查询 SQL
@@ -143,6 +152,9 @@ def test_rag_system_prompt_targets_ops_audience(provider_and_calls):
 
     assert metadata["mode"] == "rag"
     system = calls[0]["system"]
-    assert "提问的多是交付、运维人员，问题大多是配置、数据或使用咨询" in system
+    # 与 OpenAI 通道共用同一常量，防止两边文案漂移
+    from ai_assistant.core.ai_provider import ANSWER_PERSPECTIVE_PROMPT
+    assert ANSWER_PERSPECTIVE_PROMPT in system
+    assert "提问的多是交付、运维人员，问题大多是配置、版本、数据或使用咨询" in system
     assert "不要轻易归结为产品 bug" in system
-    assert "不要大段贴代码" in system
+    assert "不要大段贴代码；用户明确要求看代码时可按需给出" in system

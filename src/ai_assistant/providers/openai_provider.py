@@ -31,6 +31,7 @@ from ai_assistant.core.ai_provider import (
     parse_doc_index_list,
     log_subcall_degraded,
     flatten_message_text,
+    ANSWER_PERSPECTIVE_PROMPT,
 )
 from ai_assistant.core.models import Message
 from ai_assistant.utils.log_summary import summarize_text
@@ -371,20 +372,19 @@ class OpenAIProvider(AIProvider):
     def _build_api_messages(
         self, messages: List[Message], doc_context: str, log_tools_available: bool = False
     ) -> List[Dict[str, Any]]:
-        """把 Message 列表转成 OpenAI messages（文档上下文作为首条 system 消息）"""
-        api_messages = []
-
-        # 如果有文档上下文，插入 system 消息
+        """把 Message 列表转成 OpenAI messages（回答视角 + 文档上下文合成首条 system 消息）"""
+        # 回答视角无论有无文档都要带上，与 Anthropic RAG 共用同一常量
+        system_content = ANSWER_PERSPECTIVE_PROMPT
         if doc_context:
-            system_content = (
-                f"{doc_context}\n\n"
+            system_content += (
+                f"\n\n{doc_context}\n\n"
                 "请基于以上文档内容回答用户的问题。如果文档中没有相关信息，请如实告知。\n"
                 "回答完成后，在末尾附加参考文档链接（除非用户明确要求不附加），格式如下：\n"
                 "---\n"
                 "📎 参考文档：\n"
                 "- [文档标题](原文链接)"
             )
-            api_messages.append({"role": "system", "content": system_content})
+        api_messages: List[Dict[str, Any]] = [{"role": "system", "content": system_content}]
 
         for msg in messages:
             # 必须走 flatten_message_text 而不是只取 text 块：

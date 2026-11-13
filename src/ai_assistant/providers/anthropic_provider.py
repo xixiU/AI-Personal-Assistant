@@ -34,6 +34,8 @@ from ai_assistant.core.ai_provider import (
     parse_doc_index_list,
     log_subcall_degraded,
     _join_prefill,
+    ANSWER_PERSPECTIVE_PROMPT,
+    DB_DIALECT_GUIDANCE,
 )
 from ai_assistant.core.models import Message
 from ai_assistant.utils.log_summary import summarize_obj, summarize_text
@@ -1439,12 +1441,25 @@ class AnthropicProvider(AIProvider):
             "【排查方向 —— 很重要】",
             "- 标准版产品的 bug 基本都已及时修复，用户遇到的问题绝大多数是配置、数据、环境或用法问题，",
             "  按以下方向优先怀疑：",
-            "  · 配置：配置项缺失或填错、版本与配置不匹配",
+            "  · 配置：配置项缺失或填错",
+            "  · 版本：产品版本与配置/脚本不匹配，升级后漏执行数据库升级脚本",
+            f"  · 数据库方言/版本：{DB_DIALECT_GUIDANCE}",
             "  · 数据：初始化/基础数据缺失、脏数据、数据与配置不一致",
             "  · 环境/部署：服务未启动、网络不通、依赖组件（数据库、中间件等）异常",
             "  · 用法/咨询：操作方式不对，或功能本身就是这样设计的",
             "- 只有排除了以上原因、并且有代码证据时，才下\"代码 bug\"的结论，"
             "同时写明已排除了哪些配置/数据原因",
+            f"- 看报错处代码的最后改动时间（今天是 {time.strftime('%Y-%m-%d')}）："
+            "用 run_git_command 执行 blame -L <起>,<止> <当前排查的分支> -- <文件>，"
+            "或 log -1 --format=%ad <当前排查的分支> -- <文件>。",
+            "  · 3 个月以上没改过：这段代码已在各现场稳定运行，大概率不是代码问题，"
+            "重点从现场日志、配置、数据、版本找原因",
+            "  · 近期刚改过：可能是新改动引入的问题，结合改动内容和现场版本判断，但仍要先排除配置/数据原因",
+            "- 排查建议必须结合现场日志：指出日志里哪一行、哪个参数值说明了问题，"
+            "给出现场能执行的具体检查项（查哪个配置、执行哪条 SQL、看哪个服务的哪段日志）",
+            "- 确认是代码 bug 时：结论写明\"疑似代码问题，请联系研发处理\"，"
+            "附上报错的类名和方法名（这种情况可以写出来，供转给研发）、代码最后改动时间、复现条件；"
+            "不要让交付、运维自己改代码",
             "",
             "工作流程：",
             "1. 【默认先动手排查，不要先反问】用户发日志截图就是要你分析。",
@@ -1459,7 +1474,7 @@ class AnthropicProvider(AIProvider):
             "3. 用 search_code / find_files 定位异常抛出点（可与第 2 步的多个关键词并行搜索）",
             "4. 用 read_file 读取定位到的文件，查看上下文代码（建议读取抛错位置前后 30 行）",
             "5. 沿调用链向上追（谁调用了它、超时/参数/数据从哪来：哪个配置项、哪张表），"
-            "必要时用 run_git_command 看改动历史",
+            "并用 run_git_command 查报错处代码的最后改动时间（见上方排查方向）",
             "6. 综合日志和代码，把原因落到具体的配置项/数据表/服务上，给出交付、运维能照着做的处理步骤",
             "",
             "【回复质量要求 —— 很重要】",
@@ -1472,7 +1487,7 @@ class AnthropicProvider(AIProvider):
             "  不要讲代码执行过程",
             "- 如果排查后仍无法确定根因，说明已排除了什么、还剩哪些可能、下一步怎么验证",
             "- 回复写给交付、运维看，按以下结构：",
-            "  · 结论：一两句话，说清是配置/数据/环境/用法哪一类问题",
+            "  · 结论：一两句话，说清是配置/版本/数据/环境/用法哪一类问题",
             "  · 原因：用业务和运维的语言说明（哪个配置项、哪张表缺了什么数据、哪个服务），",
             "    并用 3~8 行伪代码展示程序按什么条件取数据，让交付、运维看懂判断逻辑，不讲执行过程",
             "  · 查询 SQL：根据读过的配置和代码给出查询 SQL，写成\"请在现场执行以下 SQL 并反馈结果\"",
@@ -1611,7 +1626,6 @@ class AnthropicProvider(AIProvider):
         system_prompt = "\n".join(system_parts)
 
         # Agentic 循环
-        import time
         start_time = time.time()
         round_num = 0
 
@@ -2190,7 +2204,6 @@ class AnthropicProvider(AIProvider):
         system_prompt = "\n".join(system_parts)
 
         # Operations Agentic 循环
-        import time
         start_time = time.time()
         round_num = 0
         # (工具名, 规范化参数) -> 失败次数，用于拦截完全相同参数的重复失败调用
@@ -2673,9 +2686,7 @@ class AnthropicProvider(AIProvider):
             # 构建 system prompt
             system_parts = [
                 "你是一个智能助手，帮助用户回答问题。你必须始终使用中文回答，包括技术术语的解释也要用中文。即使用户用英文提问，你也要用中文回答。",
-                "提问的多是交付、运维人员，问题大多是配置、数据或使用咨询，优先从这些方面回答，"
-                "不要轻易归结为产品 bug。用他们能看懂的话说明怎么配置、怎么操作、怎么验证；"
-                "可以贴几行关键配置或 SQL，不要大段贴代码。",
+                ANSWER_PERSPECTIVE_PROMPT,
             ]
 
             # 注入文档内容（由基类传入）

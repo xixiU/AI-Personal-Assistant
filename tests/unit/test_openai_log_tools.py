@@ -36,6 +36,7 @@ import pytest
 import requests
 from loguru import logger
 
+from ai_assistant.core import ai_provider
 from ai_assistant.core.ai_provider import flatten_content_to_text
 from ai_assistant.core.models import Content, Message
 from ai_assistant.providers import openai_provider
@@ -235,7 +236,8 @@ def test_to_openai_tools_converts_from_single_schema(lt):
 def test_openai_no_log_payload_byte_identical():
     """
     无日志附件时 url / headers / payload / timeout 与接入日志工具前（HEAD 3b2d708 的
-    openai_provider.py）的字面量完全一致：不多带任何字段，抽出的 _headers() 不得改变请求头
+    openai_provider.py）的字面量完全一致：不多带任何字段，抽出的 _headers() 不得改变请求头。
+    唯一有意的变化：system 消息头部加了共享的回答视角 ANSWER_PERSPECTIVE_PROMPT。
     """
     p = _provider()
     msgs = [_msg(Content(type="text", data="为啥报错"))]
@@ -250,7 +252,7 @@ def test_openai_no_log_payload_byte_identical():
             {
                 "role": "system",
                 "content": (
-                    "DOC\n\n"
+                    ai_provider.ANSWER_PERSPECTIVE_PROMPT + "\n\nDOC\n\n"
                     "请基于以上文档内容回答用户的问题。如果文档中没有相关信息，请如实告知。\n"
                     "回答完成后，在末尾附加参考文档链接（除非用户明确要求不附加），格式如下：\n"
                     "---\n"
