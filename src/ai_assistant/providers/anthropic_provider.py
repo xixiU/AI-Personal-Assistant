@@ -12,6 +12,7 @@ from loguru import logger
 import anthropic
 import json
 import re
+import time
 
 from ai_assistant.core.ai_provider import (
     AIProvider,
@@ -808,6 +809,62 @@ class AnthropicProvider(AIProvider):
         self.operations_enabled = enabled
         logger.info(f"运维工具已{'启用' if enabled else '禁用'}")
 
+    def _call_with_retry(self, mode: str, **api_kwargs):
+        """
+        带通用错误重试的 API 调用包装器
+
+        针对临时性错误（timeout、connection、5xx）重试 1 次，间隔 2 秒。
+        不重试的错误：auth、quota、rate_limit、400 等。
+
+        Args:
+            mode: 模式标识（用于日志）
+            **api_kwargs: 传递给 self.client.messages.create 的参数
+
+        Returns:
+            (response, None) 成功时
+            (None, error_tuple) 失败时，error_tuple = (error_message, metadata_dict)
+        """
+        for attempt in range(2):
+            try:
+                response = self.client.messages.create(**api_kwargs)
+                return response, None
+
+            except anthropic.APITimeoutError as e:
+                if attempt == 0:
+                    logger.warning(f"{mode} 模式 API 请求超时，2 秒后重试")
+                    time.sleep(2)
+                    continue
+                logger.error(f"{mode} 模式 API 请求超时（重试后仍失败）")
+                return None, (
+                    "⏱️ AI 服务响应超时，请稍后重试",
+                    {"mode": mode.lower(), "error": "timeout", "error_detail": f"APITimeoutError: {e}"}
+                )
+
+            except anthropic.APIConnectionError as e:
+                if attempt == 0:
+                    logger.warning(f"{mode} 模式 API 连接失败，2 秒后重试: {e}")
+                    time.sleep(2)
+                    continue
+                logger.error(f"{mode} 模式 API 连接失败（重试后仍失败）: {e}")
+                return None, (
+                    "🔌 AI 服务连接失败，请检查网络或稍后重试",
+                    {"mode": mode.lower(), "error": "connection", "error_detail": f"APIConnectionError: {e}"}
+                )
+
+            except anthropic.APIStatusError as e:
+                # 5xx 错误可重试
+                if e.status_code >= 500 and attempt == 0:
+                    logger.warning(f"{mode} 模式 API 服务端错误 {e.status_code}，2 秒后重试")
+                    time.sleep(2)
+                    continue
+
+                # 5xx 重试后仍失败，或其他状态码错误（不重试）
+                if e.status_code >= 500:
+                    logger.error(f"{mode} 模式 API 服务端错误 {e.status_code}（重试后仍失败）")
+
+                # 其他错误不重试，直接向上抛出让调用方处理
+                raise
+
     def _call_subcall(
         self,
         system_prompt: str,
@@ -1600,13 +1657,19 @@ class AnthropicProvider(AIProvider):
                 logger.debug(f"请求体骨架(round={round_num}): {describe_api_messages(api_messages)}")
 
             try:
-                response = self.client.messages.create(
+                # 通用错误重试：timeout、connection、5xx 重试 1 次
+                response, error_result = self._call_with_retry(
+                    mode="Agentic",
                     model=self.model,
                     max_tokens=4096,
                     system=system_prompt,
                     messages=api_messages,
                     tools=tools_schema,
                 )
+
+                # 如果重试后仍失败（timeout/connection），直接返回
+                if error_result:
+                    return error_result
 
                 # input_tokens 必须跟着打：兼容网关常把它回成 0 或固定小值
                 # （现场 3442 字符提问 + 长 system prompt 却报 input:4），
@@ -1763,18 +1826,6 @@ class AnthropicProvider(AIProvider):
                 # 将工具结果加入对话历史
                 api_messages.append({"role": "user", "content": tool_results})
 
-            except anthropic.APITimeoutError as e:
-                logger.error("Anthropic API 请求超时")
-                return "⏱️ AI 服务响应超时，请稍后重试", {
-                    "mode": "agentic", "error": "timeout",
-                    "error_detail": f"APITimeoutError: {e}",
-                }
-            except anthropic.APIConnectionError as e:
-                logger.error(f"Anthropic API 连接失败: {e}")
-                return "🔌 AI 服务连接失败，请检查网络或稍后重试", {
-                    "mode": "agentic", "error": "connection",
-                    "error_detail": f"APIConnectionError: {e}",
-                }
             except anthropic.APIStatusError as e:
                 post_issues = audit_api_messages(api_messages)
                 log_api_status_error(
@@ -2178,13 +2229,19 @@ class AnthropicProvider(AIProvider):
                 logger.debug(f"请求体骨架(round={round_num}): {describe_api_messages(api_messages)}")
 
             try:
-                response = self.client.messages.create(
+                # 通用错误重试：timeout、connection、5xx 重试 1 次
+                response, error_result = self._call_with_retry(
+                    mode="Operations",
                     model=self.model,
                     max_tokens=4096,
                     system=system_prompt,
                     messages=api_messages,
                     tools=tools_schema,
                 )
+
+                # 如果重试后仍失败（timeout/connection），直接返回
+                if error_result:
+                    return error_result
 
                 logger.info(
                     f"Claude 响应: stop_reason={response.stop_reason}, "
@@ -2289,18 +2346,6 @@ class AnthropicProvider(AIProvider):
                 # 将工具结果加入对话历史
                 api_messages.append({"role": "user", "content": tool_results})
 
-            except anthropic.APITimeoutError as e:
-                logger.error("Anthropic API 请求超时")
-                return "⏱️ AI 服务响应超时，请稍后重试", {
-                    "mode": "operations", "error": "timeout",
-                    "error_detail": f"APITimeoutError: {e}",
-                }
-            except anthropic.APIConnectionError as e:
-                logger.error(f"Anthropic API 连接失败: {e}")
-                return "🔌 AI 服务连接失败，请检查网络或稍后重试", {
-                    "mode": "operations", "error": "connection",
-                    "error_detail": f"APIConnectionError: {e}",
-                }
             except anthropic.APIStatusError as e:
                 post_issues = audit_api_messages(api_messages)
                 log_api_status_error(
@@ -2651,13 +2696,18 @@ class AnthropicProvider(AIProvider):
 
             system_prompt = "\n\n".join(system_parts)
 
-            # 调用 Anthropic API
-            response = self.client.messages.create(
+            # 通用错误重试：timeout、connection、5xx 重试 1 次
+            response, error_result = self._call_with_retry(
+                mode="RAG",
                 model=self.model,
                 max_tokens=4096,
                 system=system_prompt,
                 messages=api_messages,
             )
+
+            # 如果重试后仍失败（timeout/connection），直接返回
+            if error_result:
+                return error_result
 
             reply = ""
             for block in response.content:
@@ -2687,18 +2737,6 @@ class AnthropicProvider(AIProvider):
 
             return reply, metadata
 
-        except anthropic.APITimeoutError as e:
-            logger.error("Anthropic API 请求超时")
-            return "⏱️ AI 服务响应超时，请稍后重试", {
-                "mode": "rag", "error": "timeout",
-                "error_detail": f"APITimeoutError: {e}",
-            }
-        except anthropic.APIConnectionError as e:
-            logger.error(f"Anthropic API 连接失败: {e}")
-            return "🔌 AI 服务连接失败，请检查网络或稍后重试", {
-                "mode": "rag", "error": "connection",
-                "error_detail": f"APIConnectionError: {e}",
-            }
         except anthropic.APIStatusError as e:
             status_code = e.status_code
             # 原来这里把响应体原样打出来（可能回显用户提问），改用统一诊断函数：
