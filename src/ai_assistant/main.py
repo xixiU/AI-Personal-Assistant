@@ -731,6 +731,17 @@ class AIAssistant:
                 "root_id": root_id,
             }
 
+            # 获取用户信息（飞书通讯录 API，失败不阻断流程）
+            feishu_user_id = parsed.get("sender_id", "")
+            feishu_user_name = ""
+            if feishu_user_id:
+                try:
+                    feishu_user_name = adapter.get_user_name(feishu_user_id)
+                    if feishu_user_name:
+                        logger.info(f"获取用户信息: user_id={feishu_user_id[:8]}..., name={feishu_user_name}")
+                except Exception as e:
+                    logger.warning(f"获取用户信息失败（不影响回复）: {e}")
+
             # 调用 AI 生成回复
             ai_start = time_mod.time()
             record_id = None
@@ -742,6 +753,8 @@ class AIAssistant:
                     source="feishu",
                     context_key=context_key,
                     chain_info=chain_info,
+                    user_id=feishu_user_id,
+                    user_name=feishu_user_name,
                 )
                 # 附件超限时由程序在回复末尾追加提示，不依赖 AI 自己决定要不要说。
                 # content_parts 已并入 pending/own/quoted 三路附件（含引用缓存命中的块）。

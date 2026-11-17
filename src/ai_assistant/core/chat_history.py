@@ -32,6 +32,8 @@ class ChatHistoryManager:
         metadata: Optional[dict] = None,
         context_key: str = "",
         chain_info: Optional[dict] = None,
+        user_id: Optional[str] = None,
+        user_name: Optional[str] = None,
     ) -> str:
         """
         保存一条对话记录
@@ -47,6 +49,8 @@ class ChatHistoryManager:
                 重建完整历史。同一条引用链的所有轮共享同一 context_key。
             chain_info: 引用链排查字段（message_id / parent_id / root_id），仅用于
                 核对飞书 root_id 行为，不参与检索。
+            user_id: 用户标识（飞书 open_id、web session user 等），用于核对操作者
+            user_name: 用户昵称（飞书通讯录姓名等），用于核对操作者
 
         Returns:
             record_id: 本条记录的唯一标识
@@ -61,6 +65,12 @@ class ChatHistoryManager:
             "answer": answer,
             "latency_ms": latency_ms,
         }
+
+        # 用户信息（飞书场景通过通讯录 API 获取，获取失败或其他来源时为空）
+        if user_id:
+            record["user_id"] = user_id
+        if user_name:
+            record["user_name"] = user_name
 
         # 引用链标识（路径 B：按引用链重建完整历史的检索键）
         if context_key:
