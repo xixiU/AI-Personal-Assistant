@@ -303,6 +303,10 @@ class FeishuBotAdapter(IMAdapter):
             if msg_type == "text":
                 content_data = json.loads(content_str) if content_str else {}
                 text = content_data.get("text", "").strip()
+                # 去掉飞书 @ 占位符（与 main.py 保存历史时的处理保持一致）
+                if text:
+                    import re
+                    text = re.sub(r"@_user_\d+\s*", "", text).strip()
                 return text if text else None
 
             # image 类型：附件消息的默认提问（与 main.py _DEFAULT_ATTACHMENT_QUESTION 一致）
@@ -338,6 +342,10 @@ class FeishuBotAdapter(IMAdapter):
                                     text_parts.append(text)
 
                 combined = " ".join(text_parts).strip()
+                # 去掉飞书 @ 占位符（与 main.py 保存历史时的处理保持一致）
+                if combined:
+                    import re
+                    combined = re.sub(r"@_user_\d+\s*", "", combined).strip()
                 return combined if combined else None
 
             # interactive 类型（AI 回复的卡片）：通过 parent_id 查找原始提问
@@ -1454,24 +1462,31 @@ class FeishuBotAdapter(IMAdapter):
             if not record_id:
                 logger.warning(f"⚠️ record_id not found in cache for message_id={message_id}, trying API fallback...")
                 try:
-                    # API 容错：调用 get_message 获取消息原文
-                    message_data = self.get_message(message_id)
-                    if message_data:
-                        # 从消息数据提取 query
-                        query = self._extract_query_from_message(message_data)
-                        if query:
-                            # 从 chat_history 查 record_id
-                            from ai_assistant.core.chat_history import ChatHistoryManager
-                            history_mgr = ChatHistoryManager(history_dir="data/chat_history")
-                            record_id = history_mgr.find_record_by_query(chat_id, query, source="feishu")
-                            if record_id:
-                                logger.info(f"✅ Found record_id={record_id} via API fallback")
-                            else:
-                                logger.warning(f"⚠️ No matching record found for query (first 50 chars): {query[:50]}...")
-                        else:
-                            logger.warning("⚠️ Failed to extract query from message")
+                    from ai_assistant.core.chat_history import ChatHistoryManager
+                    history_mgr = ChatHistoryManager(history_dir="data/chat_history")
+
+                    # 优先通过 message_id 精确查找
+                    record_id = history_mgr.find_record_by_message_id(message_id, source="feishu")
+
+                    if record_id:
+                        logger.info(f"✅ Found record_id={record_id} via message_id lookup")
                     else:
-                        logger.warning("⚠️ Failed to get message from API")
+                        # 兜底：通过 query 匹配查找
+                        logger.debug("message_id 查找失败，尝试通过 query 匹配")
+                        message_data = self.get_message(message_id)
+                        if message_data:
+                            # 从消息数据提取 query
+                            query = self._extract_query_from_message(message_data)
+                            if query:
+                                record_id = history_mgr.find_record_by_query(chat_id, query, source="feishu")
+                                if record_id:
+                                    logger.info(f"✅ Found record_id={record_id} via query fallback")
+                                else:
+                                    logger.warning(f"⚠️ No matching record found for query (first 50 chars): {query[:50]}...")
+                            else:
+                                logger.warning("⚠️ Failed to extract query from message")
+                        else:
+                            logger.warning("⚠️ Failed to get message from API")
                 except Exception as e:
                     logger.warning(f"⚠️ API fallback failed: {e}")
 

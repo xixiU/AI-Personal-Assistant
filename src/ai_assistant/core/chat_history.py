@@ -34,6 +34,7 @@ class ChatHistoryManager:
         chain_info: Optional[dict] = None,
         user_id: Optional[str] = None,
         user_name: Optional[str] = None,
+        message_id: Optional[str] = None,
     ) -> str:
         """
         保存一条对话记录
@@ -51,6 +52,8 @@ class ChatHistoryManager:
                 核对飞书 root_id 行为，不参与检索。
             user_id: 用户标识（飞书 open_id、web session user 等），用于核对操作者
             user_name: 用户昵称（飞书通讯录姓名等），用于核对操作者
+            message_id: AI 回复的消息 ID（飞书场景传 AI 回复的 message_id，用于反馈
+                按钮点击时精确查找 record_id；其他来源不传）
 
         Returns:
             record_id: 本条记录的唯一标识
@@ -78,6 +81,10 @@ class ChatHistoryManager:
         # 引用链排查字段（便于核对飞书 root_id 行为）
         if chain_info:
             record["chain_info"] = chain_info
+
+        # 消息 ID（飞书场景的 AI 回复消息 ID，用于反馈按钮精确查找 record_id）
+        if message_id:
+            record["message_id"] = message_id
 
         # 添加 metadata（如果有）
         if metadata:
@@ -296,3 +303,127 @@ class ChatHistoryManager:
                     continue
 
         return None
+
+    def find_record_by_message_id(
+        self, message_id: str, source: str = "feishu", days: int = 7, max_scan: int = 500
+    ) -> Optional[str]:
+        """
+        根据 message_id 精确查找 record_id（飞书反馈按钮专用）
+
+        从 JSONL 文件倒序读取（最新消息优先），返回第一个匹配的 record_id。
+        用于飞书反馈按钮场景：容器重启后缓存丢失，通过 AI 回复的 message_id
+        从持久化历史精确查找对应的 record_id。
+
+        Args:
+            message_id: 飞书消息 ID（AI 回复的消息 ID）
+            source: 来源（默认 "feishu"）
+            days: 向前回溯的天数（默认 7 天）
+            max_scan: 最多扫描条数（默认 500 条，message_id 重复概率极低）
+
+        Returns:
+            找到返回 record_id，否则返回 None
+        """
+        if not message_id:
+            return None
+
+        scanned = 0
+        with self._lock:
+            # 从今天往前遍历
+            for days_ago in range(days):
+                if scanned >= max_scan:
+                    break
+
+                date = (datetime.now() - timedelta(days=days_ago)).strftime("%Y-%m-%d")
+                file_path = self.history_dir / f"{date}.jsonl"
+
+                if not file_path.exists():
+                    continue
+
+                try:
+                    # 读取整个文件并倒序处理（最新消息优先）
+                    with open(file_path, "r", encoding="utf-8") as f:
+                        lines = f.readlines()
+
+                    # 倒序遍历
+                    for line in reversed(lines):
+                        if scanned >= max_scan:
+                            break
+
+                        scanned += 1
+                        try:
+                            record = json.loads(line.strip())
+                            # 匹配条件：message_id + source（精确匹配）
+                            if (
+                                record.get("message_id") == message_id
+                                and record.get("source") == source
+                            ):
+                                return record.get("record_id")
+                        except json.JSONDecodeError:
+                            # 跳过损坏的行
+                            continue
+                except Exception as e:
+                    logger.warning(f"读取历史文件 {file_path} 失败: {e}")
+                    continue
+
+        return None
+
+
+    def update_message_id(self, record_id: str, message_id: str, days: int = 7) -> bool:
+        """
+        更新已保存记录的 message_id（飞书场景专用）
+
+        用于飞书场景：AI 回复生成并保存历史后，发送消息成功才能拿到 message_id，
+        需要追加更新到已保存的历史记录中。
+
+        Args:
+            record_id: 记录唯一标识
+            message_id: 飞书消息 ID（AI 回复的 message_id）
+            days: 向前回溯的天数（默认 7 天）
+
+        Returns:
+            更新成功返回 True，未找到记录返回 False
+        """
+        if not record_id or not message_id:
+            return False
+
+        with self._lock:
+            # 从今天往前遍历最多 days 天
+            for days_ago in range(days):
+                date = (datetime.now() - timedelta(days=days_ago)).strftime("%Y-%m-%d")
+                file_path = self.history_dir / f"{date}.jsonl"
+
+                if not file_path.exists():
+                    continue
+
+                try:
+                    # 读取所有行
+                    with open(file_path, "r", encoding="utf-8") as f:
+                        lines = f.readlines()
+
+                    # 查找并更新目标记录
+                    updated = False
+                    for i, line in enumerate(lines):
+                        try:
+                            record = json.loads(line.strip())
+                            if record.get("record_id") == record_id:
+                                # 找到目标记录，添加 message_id
+                                record["message_id"] = message_id
+                                lines[i] = json.dumps(record, ensure_ascii=False) + "\n"
+                                updated = True
+                                break
+                        except json.JSONDecodeError:
+                            # 跳过损坏的行
+                            continue
+
+                    # 如果找到并更新了，写回文件
+                    if updated:
+                        with open(file_path, "w", encoding="utf-8") as f:
+                            f.writelines(lines)
+                        logger.debug(f"更新 record_id={record_id} 的 message_id={message_id}")
+                        return True
+
+                except Exception as e:
+                    logger.warning(f"更新历史文件 {file_path} 失败: {e}")
+                    continue
+
+        return False

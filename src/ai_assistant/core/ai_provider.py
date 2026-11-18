@@ -926,6 +926,7 @@ class AIProvider(ABC):
         chain_info: Optional[dict] = None,
         user_id: Optional[str] = None,
         user_name: Optional[str] = None,
+        message_id: Optional[str] = None,
     ) -> Tuple[str, Optional[str], dict]:
         """
         统一入口：记录日志 + 计时 + 调用 send_message + 保存历史
@@ -941,6 +942,8 @@ class AIProvider(ABC):
             chain_info: 引用链排查字段（message_id/parent_id/root_id），随历史落盘用于核对。
             user_id: 用户标识（飞书 open_id、web session user 等），用于核对操作者
             user_name: 用户昵称（飞书通讯录姓名等），用于核对操作者
+            message_id: AI 回复的消息 ID（飞书场景传 AI 回复的 message_id，用于反馈
+                按钮点击时精确查找 record_id；其他来源不传）
 
         Returns:
             (reply, record_id, metadata) 元组。
@@ -1059,6 +1062,7 @@ class AIProvider(ABC):
                         chain_info=chain_info,
                         user_id=user_id,
                         user_name=user_name,
+                        message_id=message_id,
                     )
             except Exception as e:
                 logger.warning(f"保存对话历史失败: {e}")

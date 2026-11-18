@@ -1816,6 +1816,14 @@ class AIAssistant:
             if success and new_message_id and record_id:
                 if hasattr(adapter, "cache_message_record"):
                     adapter.cache_message_record(new_message_id, record_id)
+
+                # 更新历史记录中的 message_id（用于容器重启后通过 message_id 精确查找）
+                try:
+                    from ai_assistant.core.chat_history import ChatHistoryManager
+                    history_mgr = ChatHistoryManager(history_dir="data/chat_history")
+                    history_mgr.update_message_id(record_id, new_message_id)
+                except Exception as e:
+                    logger.warning(f"更新历史记录 message_id 失败（不影响回复）: {e}")
         except Exception as e:
             logger.error(f"Error sending feishu reply: {e}")
 
