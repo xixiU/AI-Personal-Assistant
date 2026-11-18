@@ -340,6 +340,21 @@ class FeishuBotAdapter(IMAdapter):
                 combined = " ".join(text_parts).strip()
                 return combined if combined else None
 
+            # interactive 类型（AI 回复的卡片）：通过 parent_id 查找原始提问
+            elif msg_type == "interactive":
+                parent_id = message_data.get("parent_id")
+                if parent_id:
+                    logger.debug(f"interactive 消息，通过 parent_id={parent_id} 查找原始提问")
+                    parent_data = self.get_message(parent_id)
+                    if parent_data:
+                        # 递归提取父消息的 query
+                        return self._extract_query_from_message(parent_data)
+                    else:
+                        logger.warning(f"无法获取 parent_id={parent_id} 的消息")
+                else:
+                    logger.warning("interactive 消息缺少 parent_id")
+                return None
+
             else:
                 logger.warning(f"不支持提取 query 的消息类型: {msg_type}")
                 return None
