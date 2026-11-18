@@ -227,3 +227,72 @@ class ChatHistoryManager:
             matched = matched[-max_records:]
 
         return matched
+
+    def find_record_by_query(
+        self, session_id: str, query: str, source: str = "feishu", days: int = 7, max_scan: int = 1000
+    ) -> Optional[str]:
+        """
+        根据 session_id、query 和 source 查找 record_id（用于缓存未命中时的反馈容错）
+
+        从 JSONL 文件倒序读取（最新消息优先），返回第一个匹配的 record_id。
+        用于飞书反馈按钮场景：缓存未命中时通过 API 获取消息原文，提取 query 后
+        从持久化历史查找对应的 record_id。
+
+        Args:
+            session_id: 会话 ID（飞书群 chat_id）
+            query: 用户提问文本（需与保存时的 query 完全一致，strip 后精确匹配）
+            source: 来源（默认 "feishu"）
+            days: 向前回溯的天数（默认 7 天）
+            max_scan: 最多扫描条数（默认 1000 条，避免全文件扫描）
+
+        Returns:
+            找到返回 record_id，否则返回 None
+        """
+        if not query:
+            return None
+
+        query_normalized = query.strip()
+        if not query_normalized:
+            return None
+
+        scanned = 0
+        with self._lock:
+            # 从今天往前遍历
+            for days_ago in range(days):
+                if scanned >= max_scan:
+                    break
+
+                date = (datetime.now() - timedelta(days=days_ago)).strftime("%Y-%m-%d")
+                file_path = self.history_dir / f"{date}.jsonl"
+
+                if not file_path.exists():
+                    continue
+
+                try:
+                    # 读取整个文件并倒序处理（最新消息优先）
+                    with open(file_path, "r", encoding="utf-8") as f:
+                        lines = f.readlines()
+
+                    # 倒序遍历
+                    for line in reversed(lines):
+                        if scanned >= max_scan:
+                            break
+
+                        scanned += 1
+                        try:
+                            record = json.loads(line.strip())
+                            # 匹配条件：session_id + source + query
+                            if (
+                                record.get("session_id") == session_id
+                                and record.get("source") == source
+                                and record.get("query", "").strip() == query_normalized
+                            ):
+                                return record.get("record_id")
+                        except json.JSONDecodeError:
+                            # 跳过损坏的行
+                            continue
+                except Exception as e:
+                    logger.warning(f"读取历史文件 {file_path} 失败: {e}")
+                    continue
+
+        return None

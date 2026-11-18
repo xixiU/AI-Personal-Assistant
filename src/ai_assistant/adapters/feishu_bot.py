@@ -278,6 +278,76 @@ class FeishuBotAdapter(IMAdapter):
             logger.error(f"回查消息详情异常: message_id={message_id}, {e}")
             return None
 
+    def _extract_query_from_message(self, message_data: dict) -> Optional[str]:
+        """
+        从飞书消息数据中提取 query（用户提问），用于反馈容错时的记录查找
+
+        从 get_message() 返回的消息数据中提取用户提问文本，必须与 main.py
+        的 _process_event() 保持一致（那里决定了保存到 chat_history 的 query）。
+
+        Args:
+            message_data: get_message() 返回的消息数据（items[0]）
+
+        Returns:
+            提取到的 query，失败返回 None
+        """
+        if not message_data:
+            return None
+
+        msg_type = message_data.get("msg_type")
+        body = message_data.get("body") or {}
+        content_str = body.get("content", "") or ""
+
+        try:
+            # text 类型：从 JSON content 里取 text 字段
+            if msg_type == "text":
+                content_data = json.loads(content_str) if content_str else {}
+                text = content_data.get("text", "").strip()
+                return text if text else None
+
+            # image 类型：附件消息的默认提问（与 main.py _DEFAULT_ATTACHMENT_QUESTION 一致）
+            elif msg_type == "image":
+                # 导入常量以保持一致性
+                from ai_assistant.main import AIAssistant
+                return AIAssistant._DEFAULT_ATTACHMENT_QUESTION
+
+            # file 类型：同样使用默认附件提问
+            elif msg_type == "file":
+                from ai_assistant.main import AIAssistant
+                return AIAssistant._DEFAULT_ATTACHMENT_QUESTION
+
+            # post 类型（富文本）：提取纯文本内容
+            elif msg_type == "post":
+                content_data = json.loads(content_str) if content_str else {}
+                # post 格式：{"zh_cn": {"title": "", "content": [[{"tag": "text", "text": "..."}]]}}
+                # 提取所有文本节点
+                text_parts = []
+                for lang_key, lang_content in content_data.items():
+                    if not isinstance(lang_content, dict):
+                        continue
+                    content_blocks = lang_content.get("content", [])
+                    for block in content_blocks:
+                        if not isinstance(block, list):
+                            continue
+                        for node in block:
+                            if not isinstance(node, dict):
+                                continue
+                            if node.get("tag") == "text":
+                                text = node.get("text", "").strip()
+                                if text:
+                                    text_parts.append(text)
+
+                combined = " ".join(text_parts).strip()
+                return combined if combined else None
+
+            else:
+                logger.warning(f"不支持提取 query 的消息类型: {msg_type}")
+                return None
+
+        except Exception as e:
+            logger.error(f"提取消息 query 失败: msg_type={msg_type}, error={e}")
+            return None
+
     def download_file(self, message_id: str, file_key: str) -> Optional[bytes]:
         """
         下载飞书消息中的文件附件
@@ -1353,7 +1423,30 @@ class FeishuBotAdapter(IMAdapter):
                 record_id = self.message_cache.get(message_id)
 
             if not record_id:
-                logger.warning(f"⚠️ record_id not found in cache for message_id={message_id}")
+                logger.warning(f"⚠️ record_id not found in cache for message_id={message_id}, trying API fallback...")
+                try:
+                    # API 容错：调用 get_message 获取消息原文
+                    message_data = self.get_message(message_id)
+                    if message_data:
+                        # 从消息数据提取 query
+                        query = self._extract_query_from_message(message_data)
+                        if query:
+                            # 从 chat_history 查 record_id
+                            from ai_assistant.core.chat_history import ChatHistoryManager
+                            history_mgr = ChatHistoryManager(history_dir="data/chat_history")
+                            record_id = history_mgr.find_record_by_query(chat_id, query, source="feishu")
+                            if record_id:
+                                logger.info(f"✅ Found record_id={record_id} via API fallback")
+                            else:
+                                logger.warning(f"⚠️ No matching record found for query (first 50 chars): {query[:50]}...")
+                        else:
+                            logger.warning("⚠️ Failed to extract query from message")
+                    else:
+                        logger.warning("⚠️ Failed to get message from API")
+                except Exception as e:
+                    logger.warning(f"⚠️ API fallback failed: {e}")
+
+            if not record_id:
                 return {"toast": {"type": "error", "content": "暂无法提交反馈，请稍后再试"}}
 
             logger.info(f"✅ Found record_id={record_id} for message_id={message_id}")
