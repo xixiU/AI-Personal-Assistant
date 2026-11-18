@@ -1,13 +1,14 @@
 """
 日志文件附件处理测试
 
-覆盖：扩展名白名单、大小上限、zip 安全解压（zip slip / 解压炸弹防护）、
+覆盖：扩展名白名单、大小上限、zip/tar 安全解压（zip/tar slip / 解压炸弹防护）、
 正文截断、定时清理的保留期判定。
 
-安全重点：zip 条目可能包含 ../ 或绝对路径试图写到目录外（zip slip），
-必须拒绝并且不在目标目录外留下任何文件。
+安全重点：zip/tar 条目可能包含 ../ 或绝对路径试图写到目录外（zip/tar slip），
+必须拒绝并且不在目标目录外留下任何文件。tar 还需防护符号链接。
 """
 import os
+import tarfile
 import time
 import zipfile
 
@@ -49,6 +50,9 @@ def test_allowed_extensions(manager):
     assert manager.is_allowed("app.log")
     assert manager.is_allowed("out.TXT")
     assert manager.is_allowed("logs.zip")
+    assert manager.is_allowed("logs.tar")
+    assert manager.is_allowed("logs.tar.gz")
+    assert manager.is_allowed("logs.tgz")
 
 
 def test_disallowed_extensions(manager):
@@ -188,3 +192,69 @@ def test_cleanup_hour_clamped(tmp_path):
     """非法清理时刻被夹到合法范围，避免调度线程永不触发"""
     assert LogFileManager(base_dir=str(tmp_path / "a"), cleanup_hour=99).cleanup_hour == 23
     assert LogFileManager(base_dir=str(tmp_path / "b"), cleanup_hour=-5).cleanup_hour == 0
+
+
+# ============ tar 解压与安全防护 ============
+
+def _make_tar(path, entries, compression=''):
+    """创建 tar 文件用于测试
+
+    Args:
+        path: tar 文件路径
+        entries: [(name, data), ...] 条目列表
+        compression: 'gz' 表示 gzip 压缩，空字符串表示不压缩
+    """
+    mode = 'w:gz' if compression == 'gz' else 'w'
+    with tarfile.open(path, mode) as tf:
+        for name, data in entries:
+            import io
+            info = tarfile.TarInfo(name=name)
+            info.size = len(data)
+            tf.addfile(info, io.BytesIO(data.encode() if isinstance(data, str) else data))
+
+
+def test_extract_tar_collects_text_logs(manager, tmp_path):
+    """tar 正常解压并收集文本日志"""
+    t = tmp_path / "logs.tar"
+    _make_tar(t, [("a.log", "line1"), ("sub/b.txt", "line2"), ("c.bin", "x")])
+    out_dir, extracted = manager.extract_tar(str(t))
+    assert out_dir is not None
+    # 只收集文本日志，.bin 不计入
+    assert len(extracted) == 2
+    assert all(os.path.isfile(p) for p in extracted)
+
+
+def test_extract_tar_gz_collects_text_logs(manager, tmp_path):
+    """tar.gz 正常解压并收集文本日志"""
+    t = tmp_path / "logs.tar.gz"
+    _make_tar(t, [("a.log", "line1"), ("nested/dir/b.txt", "line2")], compression='gz')
+    out_dir, extracted = manager.extract_tar(str(t))
+    assert out_dir is not None
+    assert len(extracted) == 2
+    assert all(os.path.isfile(p) for p in extracted)
+
+
+def test_extract_tar_rejects_path_traversal(manager, tmp_path):
+    """tar slip 防护：../ 条目必须被拒绝，且目录外不留文件"""
+    t = tmp_path / "evil.tar"
+    _make_tar(t, [("../escaped.log", "pwned"), ("safe.log", "ok")])
+    out_dir, extracted = manager.extract_tar(str(t))
+    assert not os.path.exists(str(tmp_path / "escaped.log")), "路径穿越条目被写到了目录外"
+    # 安全条目仍正常解出
+    assert any(p.endswith("safe.log") for p in extracted)
+
+
+def test_extract_tar_rejects_absolute_path(manager, tmp_path):
+    """绝对路径条目同样被拒绝"""
+    t = tmp_path / "abs.tar"
+    _make_tar(t, [("/tmp/abs_escaped.log", "pwned"), ("safe.log", "ok")])
+    out_dir, extracted = manager.extract_tar(str(t))
+    assert not any("abs_escaped" in p for p in extracted)
+
+
+def test_extract_tar_on_non_tar(manager):
+    """非 tar 文件返回失败"""
+    path = manager.save_bytes("oc_chat1", "fake.tar", b"not a tar at all")
+    out_dir, extracted = manager.extract_tar(path)
+    assert out_dir is None
+    assert extracted == []

@@ -452,6 +452,20 @@ class FeishuBotAdapter(IMAdapter):
                         f"这是一个压缩包，已解压到 {out_dir or path}，未发现文本日志文件。"
                     ),
                 }))
+            elif path.lower().endswith((".tar", ".tar.gz", ".tgz")):
+                out_dir, extracted = manager.extract_tar(path)
+                listing = "\n".join(f"- {p}" for p in extracted[:50])
+                contents.append(Content(type="log_file", data={
+                    "name": file_name,
+                    "path": out_dir or path,
+                    "text": "",
+                    "note": (
+                        f"这是一个日志压缩包，已解压到本地目录 {out_dir or path}。"
+                        f"其中文本日志 {len(extracted)} 个：\n{listing}"
+                        if extracted else
+                        f"这是一个压缩包，已解压到 {out_dir or path}，未发现文本日志文件。"
+                    ),
+                }))
             else:
                 contents.append(Content(type="log_file", data={
                     "name": file_name,

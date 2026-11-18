@@ -15,6 +15,7 @@ AI 上下文，大文件/压缩包只告知 AI 本地路径，让它用代码排
 import os
 import re
 import shutil
+import tarfile
 import threading
 import time
 import zipfile
@@ -23,8 +24,8 @@ from typing import List, Optional, Tuple
 
 from loguru import logger
 
-# 默认允许的扩展名：以文本日志为主，zip 用于整包日志
-_DEFAULT_ALLOWED_EXT = [".log", ".txt", ".out", ".err", ".zip"]
+# 默认允许的扩展名：以文本日志为主，zip/tar 用于整包日志
+_DEFAULT_ALLOWED_EXT = [".log", ".txt", ".out", ".err", ".zip", ".tar", ".tar.gz", ".tgz"]
 
 # zip 解压防护上限
 _ZIP_MAX_ENTRIES = 200
@@ -240,7 +241,17 @@ class LogFileManager:
         用 split_name_ext 而非 os.path.splitext：后者对被净化过的名字会取错后缀
         （"log" 取不到 ".log"），且不剥 NTFS 数据流后缀。调用方既可以传原始名
         也可以传清洗后的名字，判定结果一致。
+
+        特殊处理双后缀（.tar.gz, .tgz）：这些在白名单中但 split_name_ext 识别不出。
         """
+        # 先检查双后缀
+        name_lower = (file_name or "").lower()
+        if name_lower.endswith(".tar.gz") and ".tar.gz" in self.allowed_ext:
+            return True
+        if name_lower.endswith(".tgz") and ".tgz" in self.allowed_ext:
+            return True
+
+        # 再走原来的单后缀逻辑
         return split_name_ext(file_name or "")[1].lower() in self.allowed_ext
 
     # ============ 落地 ============
@@ -340,6 +351,96 @@ class LogFileManager:
             return out_dir, extracted
         except Exception as e:
             logger.warning(f"zip 解压失败: path={zip_path}, error={e}")
+            return None, []
+
+    def extract_tar(self, tar_path: str) -> Tuple[Optional[str], List[str]]:
+        """
+        解压 tar/tar.gz/tgz 到同名子目录，带 tar slip 与解压炸弹防护。
+
+        Args:
+            tar_path: tar 文件路径（支持 .tar, .tar.gz, .tgz）
+
+        Returns:
+            (解压目录, 解压出的文本日志文件路径列表)；失败时 (None, [])
+        """
+        # 判断文件扩展名以确定解压目录名
+        if tar_path.lower().endswith(('.tar.gz', '.tgz')):
+            # .tar.gz 和 .tgz 去掉双后缀
+            if tar_path.lower().endswith('.tar.gz'):
+                out_dir = tar_path[:-7] + "_unzipped"
+            else:  # .tgz
+                out_dir = tar_path[:-4] + "_unzipped"
+        else:
+            # .tar 单后缀
+            out_dir = os.path.splitext(tar_path)[0] + "_unzipped"
+
+        extracted: List[str] = []
+        try:
+            # 尝试打开 tar 文件（自动检测压缩格式）
+            if not tarfile.is_tarfile(tar_path):
+                logger.warning(f"不是有效的 tar 文件: {tar_path}")
+                return None, []
+
+            os.makedirs(out_dir, exist_ok=True)
+            out_root = os.path.abspath(out_dir)
+            total = 0
+            entry_count = 0
+
+            with tarfile.open(tar_path, mode='r:*') as tf:
+                members = tf.getmembers()
+
+                if len(members) > _ZIP_MAX_ENTRIES:
+                    logger.warning(f"tar 条目过多({len(members)})，只处理前 {_ZIP_MAX_ENTRIES} 个")
+                    members = members[:_ZIP_MAX_ENTRIES]
+
+                for member in members:
+                    entry_count += 1
+
+                    # 跳过目录
+                    if member.isdir():
+                        continue
+
+                    # 符号链接防护：tar 特有风险，一律拒绝
+                    if member.issym() or member.islnk():
+                        logger.warning(f"跳过符号链接 tar 条目: {member.name}")
+                        continue
+
+                    # tar slip 防护：拒绝绝对路径与 ../ 穿越
+                    name = member.name.replace("\\", "/")
+                    if name.startswith("/") or ".." in name.split("/"):
+                        logger.warning(f"跳过可疑 tar 条目（路径穿越）: {member.name}")
+                        continue
+
+                    # 解压炸弹防护：累加大小
+                    total += member.size
+                    if total > _ZIP_MAX_TOTAL_BYTES:
+                        logger.warning("tar 解压总量超过上限，停止解压（疑似解压炸弹）")
+                        break
+
+                    target = os.path.abspath(os.path.join(out_root, name))
+
+                    # 双重校验：解析后的目标必须仍在 out_root 内
+                    if not target.startswith(out_root + os.sep) and target != out_root:
+                        logger.warning(f"跳过越界 tar 条目: {member.name}")
+                        continue
+
+                    # 只处理普通文件
+                    if not member.isfile():
+                        continue
+
+                    # 创建父目录并解压
+                    os.makedirs(os.path.dirname(target), exist_ok=True)
+                    with tf.extractfile(member) as src:
+                        if src:  # extractfile 可能返回 None
+                            with open(target, "wb") as dst:
+                                shutil.copyfileobj(src, dst)
+                            if self._is_text_log(target):
+                                extracted.append(target)
+
+            logger.info(f"tar 已解压: {tar_path} → {out_dir}, 文本日志 {len(extracted)} 个")
+            return out_dir, extracted
+        except Exception as e:
+            logger.warning(f"tar 解压失败: path={tar_path}, error={e}")
             return None, []
 
     @staticmethod
