@@ -255,4 +255,44 @@ troubleshoot:
   # 4. 所有操作都是只读的，不会修改工作目录，支持并发查询不同分支
   # 5. 后台 fetch 失败不影响已有代码的排查，只是无法看到最新提交
 
+# 数据库配置（账号体系和历史记录持久化）
+database:
+  # 数据库类型: sqlite / mysql / postgresql
+  type: "sqlite"
+
+  # SQLite 配置（默认，无需额外安装）
+  sqlite:
+    path: "./data/ai_assistant.db"
+
+  # MySQL 配置（type 为 mysql 时使用）
+  mysql:
+    host: "localhost"
+    port: 3306
+    database: "ai_assistant"
+    user: "root"
+    password: "your_password"
+
+  # PostgreSQL 配置（type 为 postgresql 时使用）
+  postgresql:
+    host: "localhost"
+    port: 5432
+    database: "ai_assistant"
+    user: "postgres"
+    password: "your_password"
+
+  # 调试选项
+  echo: false  # 是否打印 SQL 语句（调试用）
+
+# 管理员账号配置
+admin:
+  username: "admin"           # 管理员登录用户名
+  password: "change_me_123"   # 管理员初始密码（首次启动时创建，请务必修改）
+
+# 前端地址（用于飞书通知消息中的登录链接）
+frontend_url: "http://localhost:8080"  # 生产环境改为实际域名，如 https://ai-assistant.example.com
+
+# JWT 配置（用于 Web 界面登录认证）
+jwt:
+  secret: "change_this_secret_key_in_production"  # JWT 密钥（生产环境请使用随机生成的长密钥）
+  expires_in: 86400  # Token 过期时间（秒），默认 24 小时
 

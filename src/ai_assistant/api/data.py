@@ -1,0 +1,277 @@
+"""
+数据查询接口
+
+提供问答历史和反馈数据的查询接口
+"""
+
+from flask import Blueprint, request, jsonify
+from loguru import logger
+from functools import wraps
+import jwt
+
+from ai_assistant.api import success_response, error_response, decode_token
+
+# 创建数据查询 Blueprint
+data_bp = Blueprint('data', __name__, url_prefix='/api')
+
+# 全局变量（由 webhook_server 注入）
+_chat_history_db = None
+_feedback_manager = None
+_jwt_secret = None
+
+
+def init_data(chat_history_db, feedback_manager, jwt_secret: str):
+    """
+    初始化数据查询模块
+
+    Args:
+        chat_history_db: ChatHistoryDB 实例
+        feedback_manager: FeedbackManager 实例
+        jwt_secret: JWT 密钥
+    """
+    global _chat_history_db, _feedback_manager, _jwt_secret
+    _chat_history_db = chat_history_db
+    _feedback_manager = feedback_manager
+    _jwt_secret = jwt_secret
+    logger.info("数据查询模块初始化完成")
+
+
+def require_auth(f):
+    """
+    认证装饰器：验证 Token 有效性
+    """
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        auth_header = request.headers.get('Authorization', '')
+        if not auth_header.startswith('Bearer '):
+            return jsonify(error_response("缺少认证 Token", "MISSING_TOKEN")), 401
+
+        token = auth_header[7:]
+        try:
+            payload = decode_token(token, _jwt_secret)
+            request.current_user = payload
+            return f(*args, **kwargs)
+        except jwt.ExpiredSignatureError:
+            return jsonify(error_response("Token 已过期，请重新登录", "TOKEN_EXPIRED")), 401
+        except jwt.InvalidTokenError:
+            return jsonify(error_response("Token 无效", "INVALID_TOKEN")), 401
+
+    return decorated_function
+
+
+@data_bp.route('/chat-history', methods=['GET'])
+@require_auth
+def get_chat_history():
+    """
+    查询问答历史
+
+    请求参数：
+    - page: 页码（默认 1）
+    - page_size: 每页数量（默认 20，最大 100）
+    - user_id: 用户 ID 过滤（可选，管理员可查所有用户）
+    - session_id: 会话 ID 过滤（可选）
+    - start_time: 开始时间（可选，ISO 8601 格式）
+    - end_time: 结束时间（可选，ISO 8601 格式）
+    - source: 来源过滤（可选，feishu/web）
+
+    响应：
+    {
+        "success": true,
+        "message": "Success",
+        "data": {
+            "records": [
+                {
+                    "record_id": "uuid",
+                    "session_id": "session-123",
+                    "user_id": "user-456",
+                    "user_name": "张三",
+                    "query": "用户问题",
+                    "response": "AI 回复",
+                    "mode": "rag",
+                    "source": "feishu",
+                    "created_at": "2024-01-01T12:00:00",
+                    "has_feedback": true
+                }
+            ],
+            "total": 100,
+            "page": 1,
+            "page_size": 20
+        }
+    }
+    """
+    try:
+        # 获取查询参数
+        page = request.args.get('page', 1, type=int)
+        page_size = request.args.get('page_size', 20, type=int)
+        user_id = request.args.get('user_id', None, type=str)
+        session_id = request.args.get('session_id', None, type=str)
+        start_time = request.args.get('start_time', None, type=str)
+        end_time = request.args.get('end_time', None, type=str)
+        source = request.args.get('source', None, type=str)
+
+        # 参数验证
+        if page < 1:
+            return jsonify(error_response("页码必须大于 0", "INVALID_PARAMETER")), 400
+        if page_size < 1 or page_size > 100:
+            return jsonify(error_response("每页数量必须在 1-100 之间", "INVALID_PARAMETER")), 400
+        if source and source not in ['feishu', 'web']:
+            return jsonify(error_response("来源参数无效", "INVALID_PARAMETER")), 400
+
+        # 权限检查：普通用户只能查自己的数据
+        current_user = request.current_user
+        if current_user.get('role') != 'admin':
+            if user_id and user_id != current_user.get('user_id'):
+                return jsonify(error_response("无权查询其他用户的数据", "PERMISSION_DENIED")), 403
+            user_id = current_user.get('user_id')  # 强制只查自己的
+
+        # 查询问答历史
+        if not _chat_history_db:
+            return jsonify(error_response("问答历史服务未初始化", "SERVICE_UNAVAILABLE")), 503
+
+        # TODO: 等待 Backend-DB-Agent 实现查询方法
+        # offset = (page - 1) * page_size
+        # records = _chat_history_db.query(
+        #     user_id=user_id,
+        #     session_id=session_id,
+        #     start_time=start_time,
+        #     end_time=end_time,
+        #     source=source,
+        #     limit=page_size,
+        #     offset=offset
+        # )
+        # total = _chat_history_db.count(...)
+
+        logger.warning(f"查询问答历史（待实现）: page={page}, user_id={user_id}, session={session_id}")
+
+        # 临时返回空数据
+        records = []
+        total = 0
+
+        return jsonify(success_response({
+            "records": records,
+            "total": total,
+            "page": page,
+            "page_size": page_size
+        })), 200
+
+    except Exception as e:
+        logger.error(f"查询问答历史异常: {e}", exc_info=True)
+        return jsonify(error_response("服务器内部错误", "INTERNAL_ERROR")), 500
+
+
+@data_bp.route('/feedback', methods=['GET'])
+@require_auth
+def get_feedback():
+    """
+    查询反馈数据
+
+    请求参数：
+    - page: 页码（默认 1）
+    - page_size: 每页数量（默认 20，最大 100）
+    - user_id: 用户 ID 过滤（可选，管理员可查所有用户）
+    - session_id: 会话 ID 过滤（可选）
+    - feedback_type: 反馈类型过滤（可选，like/dislike）
+    - start_time: 开始时间（可选，ISO 8601 格式）
+    - end_time: 结束时间（可选，ISO 8601 格式）
+    - source: 来源过滤（可选，feishu/web）
+
+    响应：
+    {
+        "success": true,
+        "message": "Success",
+        "data": {
+            "feedbacks": [
+                {
+                    "feedback_id": "uuid",
+                    "record_id": "chat-record-uuid",
+                    "session_id": "session-123",
+                    "user_id": "user-456",
+                    "user_name": "张三",
+                    "feedback_type": "like",
+                    "feedback_text": "回答很有帮助",
+                    "source": "feishu",
+                    "created_at": "2024-01-01T12:00:00",
+                    "query": "原问题",
+                    "response": "AI 回复"
+                }
+            ],
+            "total": 50,
+            "page": 1,
+            "page_size": 20,
+            "stats": {
+                "like_count": 30,
+                "dislike_count": 20,
+                "like_rate": 0.6
+            }
+        }
+    }
+    """
+    try:
+        # 获取查询参数
+        page = request.args.get('page', 1, type=int)
+        page_size = request.args.get('page_size', 20, type=int)
+        user_id = request.args.get('user_id', None, type=str)
+        session_id = request.args.get('session_id', None, type=str)
+        feedback_type = request.args.get('feedback_type', None, type=str)
+        start_time = request.args.get('start_time', None, type=str)
+        end_time = request.args.get('end_time', None, type=str)
+        source = request.args.get('source', None, type=str)
+
+        # 参数验证
+        if page < 1:
+            return jsonify(error_response("页码必须大于 0", "INVALID_PARAMETER")), 400
+        if page_size < 1 or page_size > 100:
+            return jsonify(error_response("每页数量必须在 1-100 之间", "INVALID_PARAMETER")), 400
+        if feedback_type and feedback_type not in ['like', 'dislike']:
+            return jsonify(error_response("反馈类型参数无效", "INVALID_PARAMETER")), 400
+        if source and source not in ['feishu', 'web']:
+            return jsonify(error_response("来源参数无效", "INVALID_PARAMETER")), 400
+
+        # 权限检查：普通用户只能查自己的数据
+        current_user = request.current_user
+        if current_user.get('role') != 'admin':
+            if user_id and user_id != current_user.get('user_id'):
+                return jsonify(error_response("无权查询其他用户的数据", "PERMISSION_DENIED")), 403
+            user_id = current_user.get('user_id')
+
+        # 查询反馈数据
+        if not _feedback_manager:
+            return jsonify(error_response("反馈服务未初始化", "SERVICE_UNAVAILABLE")), 503
+
+        # TODO: 等待 Backend-DB-Agent 实现查询方法
+        # offset = (page - 1) * page_size
+        # feedbacks = _feedback_manager.query(
+        #     user_id=user_id,
+        #     session_id=session_id,
+        #     feedback_type=feedback_type,
+        #     start_time=start_time,
+        #     end_time=end_time,
+        #     source=source,
+        #     limit=page_size,
+        #     offset=offset
+        # )
+        # total = _feedback_manager.count(...)
+        # stats = _feedback_manager.get_stats(...)
+
+        logger.warning(f"查询反馈数据（待实现）: page={page}, user_id={user_id}, type={feedback_type}")
+
+        # 临时返回空数据
+        feedbacks = []
+        total = 0
+        stats = {
+            "like_count": 0,
+            "dislike_count": 0,
+            "like_rate": 0.0
+        }
+
+        return jsonify(success_response({
+            "feedbacks": feedbacks,
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+            "stats": stats
+        })), 200
+
+    except Exception as e:
+        logger.error(f"查询反馈数据异常: {e}", exc_info=True)
+        return jsonify(error_response("服务器内部错误", "INTERNAL_ERROR")), 500

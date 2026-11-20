@@ -99,6 +99,30 @@ class AIAssistant:
         from ai_assistant.core.feedback_manager import FeedbackManager
         self.feedback_manager = FeedbackManager()
 
+        # 初始化数据库和用户管理器
+        from ai_assistant.core.database import DatabaseManager
+        from ai_assistant.core.user_manager import UserManager
+
+        # 从配置读取数据库设置
+        db_config = getattr(self.config, 'database', {})
+        self.db_manager = DatabaseManager(
+            db_type=db_config.get('type', 'sqlite'),
+            db_path=db_config.get('path', './data/ai_assistant.db'),
+            echo=db_config.get('echo', False)
+        )
+
+        # 创建数据库表
+        self.db_manager.create_tables()
+
+        # 初始化用户管理器
+        admin_config = getattr(self.config, 'admin', {})
+        self.user_manager = UserManager(
+            db_manager=self.db_manager,
+            admin_config=admin_config
+        )
+
+        logger.info("数据库和用户管理器初始化完成")
+
         # 初始化 AI Provider
         provider_type = self.config.ai_primary_provider
 
@@ -741,6 +765,18 @@ class AIAssistant:
                         logger.info(f"获取用户信息: user_id={feishu_user_id[:8]}..., name={feishu_user_name}")
                 except Exception as e:
                     logger.warning(f"获取用户信息失败（不影响回复）: {e}")
+
+            # 飞书用户自动注册（首次使用时自动创建账号）
+            if feishu_user_id and hasattr(self, 'user_manager'):
+                try:
+                    self._auto_register_feishu_user(
+                        feishu_user_id,
+                        feishu_user_name,
+                        adapter
+                    )
+                except Exception as e:
+                    # 自动注册失败不影响正常问答流程（降级处理）
+                    logger.error(f"飞书用户自动注册失败（不影响回复）: {e}", exc_info=True)
 
             # 调用 AI 生成回复
             ai_start = time_mod.time()
@@ -1760,6 +1796,136 @@ class AIAssistant:
         text = re.sub(r"@_user_\d+\s*", "", text).strip()
 
         return text, image_keys, files
+
+    def _auto_register_feishu_user(
+        self,
+        feishu_open_id: str,
+        feishu_user_name: str,
+        adapter
+    ):
+        """
+        飞书用户自动注册
+
+        首次使用时自动创建账号，并通过飞书私聊通知用户登录信息。
+
+        Args:
+            feishu_open_id: 飞书用户 open_id
+            feishu_user_name: 飞书用户昵称
+            adapter: 飞书适配器（用于发送通知消息）
+        """
+        # TODO: 等待 Backend-DB-Agent 完成数据库模型后实现
+        #
+        # 实现逻辑：
+        # 1. 检查用户是否已存在（通过 feishu_open_id 查询）
+        # 2. 如果不存在，则创建新用户：
+        #    - username: 使用 feishu_user_name 或 feishu_open_id
+        #    - password: 随机生成 8 位密码
+        #    - 关联 feishu_open_id
+        # 3. 发送飞书通知消息（包含登录名、密码、前端地址）
+        # 4. 失败时记录日志但不抛异常（降级处理，不影响问答）
+        #
+        # 示例代码（等待数据库模型后取消注释）：
+        #
+        # # 检查用户是否已存在
+        # existing_user = self.user_manager.get_user_by_feishu_open_id(feishu_open_id)
+        # if existing_user:
+        #     logger.debug(f"飞书用户已注册: open_id={feishu_open_id[:8]}...")
+        #     return
+        #
+        # # 生成用户名和密码
+        # username = feishu_user_name or f"feishu_{feishu_open_id[:8]}"
+        # password = UserManager.generate_random_password(8)
+        #
+        # # 创建用户
+        # user_id = self.user_manager.create_user(
+        #     username=username,
+        #     password=password,
+        #     feishu_open_id=feishu_open_id,
+        #     display_name=feishu_user_name,
+        #     role="user"
+        # )
+        #
+        # if not user_id:
+        #     logger.error(f"创建飞书用户失败: open_id={feishu_open_id[:8]}...")
+        #     return
+        #
+        # logger.info(f"飞书用户自动注册成功: user_id={user_id}, username={username}")
+        #
+        # # 发送飞书通知消息
+        # try:
+        #     from ai_assistant.utils.feishu_notifier import FeishuNotifier
+        #     notifier = FeishuNotifier(adapter.bot_config)
+        #
+        #     # 从配置读取前端地址
+        #     frontend_url = getattr(self.config, 'frontend_url', None)
+        #
+        #     # 优先使用卡片消息（更美观），失败降级为文本消息
+        #     success = notifier.send_card_message(
+        #         open_id=feishu_open_id,
+        #         username=username,
+        #         password=password,
+        #         frontend_url=frontend_url
+        #     )
+        #
+        #     if success:
+        #         logger.info(f"账号通知消息发送成功: username={username}")
+        #     else:
+        #         logger.warning(f"账号通知消息发送失败: username={username}")
+        #
+        # except Exception as e:
+        #     logger.error(f"发送账号通知消息异常: {e}", exc_info=True)
+
+        # 检查用户是否已存在
+        existing_user = self.user_manager.get_user_by_feishu_open_id(feishu_open_id)
+        if existing_user:
+            logger.debug(f"飞书用户已注册: open_id={feishu_open_id[:8]}...")
+            return
+
+        # 生成用户名和密码
+        username = feishu_user_name or f"feishu_{feishu_open_id[:8]}"
+        # 确保用户名至少3个字符（User模型验证要求）
+        if len(username) < 3:
+            username = f"user_{feishu_open_id[:8]}"
+        password = self.user_manager.generate_random_password(8)
+
+        # 创建用户
+        user_id = self.user_manager.create_user(
+            username=username,
+            password=password,
+            feishu_open_id=feishu_open_id,
+            display_name=feishu_user_name,
+            role="user"
+        )
+
+        if not user_id:
+            logger.error(f"创建飞书用户失败: open_id={feishu_open_id[:8]}...")
+            return
+
+        logger.info(f"飞书用户自动注册成功: user_id={user_id}, username={username}")
+
+        # 发送飞书通知消息
+        try:
+            from ai_assistant.utils.feishu_notifier import FeishuNotifier
+            notifier = FeishuNotifier(adapter.bot_config)
+
+            # 从配置读取前端地址
+            frontend_url = getattr(self.config, 'frontend_url', None)
+
+            # 优先使用卡片消息（更美观），失败降级为文本消息
+            success = notifier.send_card_message(
+                open_id=feishu_open_id,
+                username=username,
+                password=password,
+                frontend_url=frontend_url
+            )
+
+            if success:
+                logger.info(f"账号通知消息发送成功: username={username}")
+            else:
+                logger.warning(f"账号通知消息发送失败: username={username}")
+
+        except Exception as e:
+            logger.error(f"发送账号通知消息异常: {e}", exc_info=True)
 
     def _send_feishu_reply(
         self,

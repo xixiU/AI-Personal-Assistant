@@ -1,0 +1,367 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>用户管理 - AI 助手管理系统</title>
+    <link rel="stylesheet" href="css/admin.css">
+</head>
+<body>
+    <div class="admin-layout">
+        <!-- 侧边栏 -->
+        <aside class="admin-sidebar">
+            <div class="admin-sidebar-header">
+                <a href="/static/index.html" class="admin-logo">
+                    <div class="admin-logo-icon">⚖</div>
+                    <div class="admin-logo-text">AI 助手</div>
+                </a>
+            </div>
+
+            <nav class="admin-nav">
+                <a href="/static/index.html" class="nav-item">
+                    <span class="nav-icon">💬</span>
+                    <span>返回聊天</span>
+                </a>
+                <a href="/static/user-profile.html" class="nav-item">
+                    <span class="nav-icon">👤</span>
+                    <span>用户中心</span>
+                </a>
+                <a href="/static/admin-users.html" class="nav-item active">
+                    <span class="nav-icon">👥</span>
+                    <span>用户管理</span>
+                </a>
+                <a href="/static/admin-data.html" class="nav-item">
+                    <span class="nav-icon">📊</span>
+                    <span>数据查看</span>
+                </a>
+            </nav>
+
+            <div class="admin-sidebar-footer">
+                <div class="user-info">
+                    <div class="user-avatar" id="userAvatar">👨‍💼</div>
+                    <div>
+                        <div style="color: white; font-weight: 500;" id="userNickname">管理员</div>
+                        <div style="font-size: 12px;" id="userRole">管理员</div>
+                    </div>
+                </div>
+                <button class="logout-btn" id="logoutBtn">退出登录</button>
+            </div>
+        </aside>
+
+        <!-- 主内容区 -->
+        <main class="admin-main">
+            <header class="admin-header">
+                <h1 class="admin-header-title">用户管理</h1>
+                <button class="btn btn-primary btn-sm" id="createUserBtn">
+                    ➕ 新建用户
+                </button>
+            </header>
+
+            <div class="admin-content">
+                <!-- 工具栏 -->
+                <div class="toolbar">
+                    <div class="search-box">
+                        <input
+                            type="text"
+                            class="search-input"
+                            id="searchInput"
+                            placeholder="搜索用户名或昵称..."
+                        >
+                        <button class="btn btn-secondary btn-sm" id="searchBtn">搜索</button>
+                    </div>
+                    <button class="btn btn-secondary btn-sm" id="exportBtn">导出数据</button>
+                </div>
+
+                <!-- 用户列表 -->
+                <div class="card">
+                    <div class="table-container">
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>ID</th>
+                                    <th>用户名</th>
+                                    <th>昵称</th>
+                                    <th>角色</th>
+                                    <th>状态</th>
+                                    <th>注册时间</th>
+                                    <th>最后登录</th>
+                                    <th>操作</th>
+                                </tr>
+                            </thead>
+                            <tbody id="userTableBody">
+                                <tr>
+                                    <td colspan="8" style="text-align: center; padding: 40px;">
+                                        加载中...
+                                    </td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+
+                    <!-- 分页 -->
+                    <div class="pagination" id="pagination"></div>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <!-- 创建/编辑用户弹窗（简化版，使用 prompt/confirm） -->
+    <script src="js/auth.js"></script>
+    <script src="js/admin.js"></script>
+    <script>
+        // 权限检查
+        if (!requireAdmin()) {
+            // 非管理员会自动跳转
+        }
+
+        const user = Auth.getUser();
+        if (user) {
+            document.getElementById('userNickname').textContent = user.nickname || user.username;
+        }
+
+        // 登出
+        document.getElementById('logoutBtn').addEventListener('click', () => {
+            if (confirm('确定要退出登录吗？')) {
+                Auth.logout();
+            }
+        });
+
+        // 分页状态
+        let currentPage = 1;
+        const pageSize = 20;
+        let searchKeyword = '';
+
+        // 加载用户列表
+        async function loadUsers() {
+            try {
+                const result = await AdminAPI.getUserList(currentPage, pageSize, searchKeyword);
+
+                if (result.success) {
+                    renderUserTable(result.data.users);
+                    renderPagination(result.data.total);
+                } else {
+                    showToast(result.message, 'error');
+                }
+            } catch (error) {
+                showToast('加载用户列表失败：' + error.message, 'error');
+            }
+        }
+
+        // 渲染用户表格
+        function renderUserTable(users) {
+            const tbody = document.getElementById('userTableBody');
+
+            if (users.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="8" style="text-align: center; padding: 40px;">暂无数据</td></tr>';
+                return;
+            }
+
+            tbody.innerHTML = users.map(u => `
+                <tr>
+                    <td>${u.id}</td>
+                    <td>${u.username}</td>
+                    <td>${u.nickname || '-'}</td>
+                    <td>
+                        <span class="badge ${u.role === 'admin' ? 'badge-danger' : 'badge-info'}">
+                            ${u.role === 'admin' ? '管理员' : '普通用户'}
+                        </span>
+                    </td>
+                    <td>
+                        <span class="badge ${u.status === 'active' ? 'badge-success' : 'badge-warning'}">
+                            ${u.status === 'active' ? '正常' : '已禁用'}
+                        </span>
+                    </td>
+                    <td>${formatDateTime(u.created_at)}</td>
+                    <td>${formatDateTime(u.last_login)}</td>
+                    <td>
+                        <div class="action-btns">
+                            <button class="btn btn-secondary btn-sm" onclick="editUser(${u.id}, '${u.username}', '${u.nickname || ''}', '${u.role}', '${u.status}')">
+                                编辑
+                            </button>
+                            <button class="btn btn-secondary btn-sm" onclick="resetUserPassword(${u.id}, '${u.username}')">
+                                重置密码
+                            </button>
+                            ${u.id !== 1 ? `
+                                <button class="btn btn-danger btn-sm" onclick="deleteUser(${u.id}, '${u.username}')">
+                                    删除
+                                </button>
+                            ` : ''}
+                        </div>
+                    </td>
+                </tr>
+            `).join('');
+        }
+
+        // 渲染分页
+        function renderPagination(total) {
+            const totalPages = Math.ceil(total / pageSize);
+            const pagination = document.getElementById('pagination');
+
+            if (totalPages <= 1) {
+                pagination.innerHTML = '';
+                return;
+            }
+
+            let html = `
+                <button class="page-btn" ${currentPage === 1 ? 'disabled' : ''} onclick="goToPage(${currentPage - 1})">
+                    上一页
+                </button>
+            `;
+
+            // 显示页码（最多显示7个）
+            let startPage = Math.max(1, currentPage - 3);
+            let endPage = Math.min(totalPages, currentPage + 3);
+
+            for (let i = startPage; i <= endPage; i++) {
+                html += `
+                    <button class="page-btn ${i === currentPage ? 'active' : ''}" onclick="goToPage(${i})">
+                        ${i}
+                    </button>
+                `;
+            }
+
+            html += `
+                <button class="page-btn" ${currentPage === totalPages ? 'disabled' : ''} onclick="goToPage(${currentPage + 1})">
+                    下一页
+                </button>
+            `;
+
+            pagination.innerHTML = html;
+        }
+
+        // 翻页
+        window.goToPage = function(page) {
+            currentPage = page;
+            loadUsers();
+        };
+
+        // 搜索
+        document.getElementById('searchBtn').addEventListener('click', () => {
+            searchKeyword = document.getElementById('searchInput').value.trim();
+            currentPage = 1;
+            loadUsers();
+        });
+
+        document.getElementById('searchInput').addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') {
+                document.getElementById('searchBtn').click();
+            }
+        });
+
+        // 创建用户
+        document.getElementById('createUserBtn').addEventListener('click', async () => {
+            const username = prompt('请输入用户名：');
+            if (!username) return;
+
+            const password = prompt('请输入密码（至少6位）：');
+            if (!password || password.length < 6) {
+                showToast('密码长度不能少于6位', 'error');
+                return;
+            }
+
+            const nickname = prompt('请输入昵称（可选）：') || '';
+            const role = confirm('是否设为管理员？\n点击"确定"设为管理员，点击"取消"设为普通用户') ? 'admin' : 'user';
+
+            try {
+                const result = await AdminAPI.createUser({ username, password, nickname, role });
+
+                if (result.success) {
+                    showToast(result.message, 'success');
+                    loadUsers();
+                } else {
+                    showToast(result.message, 'error');
+                }
+            } catch (error) {
+                showToast('创建失败：' + error.message, 'error');
+            }
+        });
+
+        // 编辑用户
+        window.editUser = async function(id, username, nickname, role, status) {
+            const newNickname = prompt('请输入新昵称：', nickname) || '';
+            if (newNickname === null) return;
+
+            const newRole = confirm('是否设为管理员？\n当前：' + (role === 'admin' ? '管理员' : '普通用户')) ? 'admin' : 'user';
+            const newStatus = confirm('是否启用该用户？\n当前：' + (status === 'active' ? '正常' : '已禁用')) ? 'active' : 'disabled';
+
+            try {
+                const result = await AdminAPI.updateUser(id, {
+                    nickname: newNickname,
+                    role: newRole,
+                    status: newStatus
+                });
+
+                if (result.success) {
+                    showToast(result.message, 'success');
+                    loadUsers();
+                } else {
+                    showToast(result.message, 'error');
+                }
+            } catch (error) {
+                showToast('更新失败：' + error.message, 'error');
+            }
+        };
+
+        // 重置密码
+        window.resetUserPassword = async function(id, username) {
+            const newPassword = prompt(`重置用户 ${username} 的密码：`);
+            if (!newPassword) return;
+
+            if (newPassword.length < 6) {
+                showToast('密码长度不能少于6位', 'error');
+                return;
+            }
+
+            if (!confirm(`确定要重置用户 ${username} 的密码吗？`)) return;
+
+            try {
+                const result = await AdminAPI.resetPassword(id, newPassword);
+
+                if (result.success) {
+                    showToast(result.message, 'success');
+                } else {
+                    showToast(result.message, 'error');
+                }
+            } catch (error) {
+                showToast('重置失败：' + error.message, 'error');
+            }
+        };
+
+        // 删除用户
+        window.deleteUser = async function(id, username) {
+            if (!confirm(`确定要删除用户 ${username} 吗？此操作不可恢复！`)) return;
+
+            try {
+                const result = await AdminAPI.deleteUser(id);
+
+                if (result.success) {
+                    showToast(result.message, 'success');
+                    loadUsers();
+                } else {
+                    showToast(result.message, 'error');
+                }
+            } catch (error) {
+                showToast('删除失败：' + error.message, 'error');
+            }
+        };
+
+        // 导出数据
+        document.getElementById('exportBtn').addEventListener('click', async () => {
+            try {
+                const result = await AdminAPI.exportData('users', { search: searchKeyword });
+
+                if (result.success) {
+                    showToast(result.message, 'success');
+                } else {
+                    showToast(result.message, 'error');
+                }
+            } catch (error) {
+                showToast('导出失败：' + error.message, 'error');
+            }
+        });
+
+        // 初始加载
+        loadUsers();
+    </script>
+</body>
+</html>

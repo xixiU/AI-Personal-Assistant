@@ -73,6 +73,10 @@ class WebhookServer:
         # 初始化 FeedbackManager
         self.feedback_manager = FeedbackManager()
 
+        # 用于存储 API 相关组件
+        self.user_manager = None
+        self.chat_history_db = None
+
         # ===== 始终注册：飞书 webhook 与健康检查（不受前端开关影响）=====
         self.app.add_url_rule(
             "/webhook/feishu",
@@ -121,6 +125,10 @@ class WebhookServer:
         else:
             logger.info("自有前端 Web 已禁用（无鉴权，默认关闭）；仅飞书 webhook 与 /health 可用")
 
+        # ===== 注册认证和管理 API（需要 JWT 鉴权，始终注册）=====
+        # 这些接口通过 JWT Token 鉴权，不依赖 web_frontend_enabled 开关
+        self._register_api_blueprints()
+
         # 用于存储 AI Provider 和 Context Manager 的引用
         self.ai_provider = None
         self.context_manager = None
@@ -136,6 +144,52 @@ class WebhookServer:
         except Exception as e:
             logger.error(f"Error serving index.html: {e}")
             return jsonify({"error": "index.html not found"}), 404
+
+    def _register_api_blueprints(self):
+        """
+        注册 API Blueprint（认证、管理员、数据查询接口）
+
+        这些接口通过 JWT Token 鉴权，始终注册（不受 web_frontend_enabled 影响）
+        """
+        from ai_assistant.api.auth import auth_bp
+        from ai_assistant.api.admin import admin_bp
+        from ai_assistant.api.data import data_bp
+
+        self.app.register_blueprint(auth_bp)
+        self.app.register_blueprint(admin_bp)
+        self.app.register_blueprint(data_bp)
+
+        logger.info("API Blueprint 已注册（认证、管理员、数据查询接口）")
+
+    def set_api_components(
+        self,
+        user_manager,
+        chat_history_db,
+        jwt_secret: str,
+        jwt_expires_in: int = 86400
+    ):
+        """
+        设置 API 组件（用于认证和数据查询接口）
+
+        Args:
+            user_manager: UserManager 实例
+            chat_history_db: ChatHistoryDB 实例
+            jwt_secret: JWT 密钥
+            jwt_expires_in: Token 过期时间（秒，默认 24 小时）
+        """
+        from ai_assistant.api.auth import init_auth
+        from ai_assistant.api.admin import init_admin
+        from ai_assistant.api.data import init_data
+
+        self.user_manager = user_manager
+        self.chat_history_db = chat_history_db
+
+        # 初始化各个 API 模块
+        init_auth(user_manager, jwt_secret, jwt_expires_in)
+        init_admin(user_manager, jwt_secret)
+        init_data(chat_history_db, self.feedback_manager, jwt_secret)
+
+        logger.info("API 组件已注入（UserManager, ChatHistoryDB, JWT）")
 
     def set_feishu_adapter(self, adapter):
         """

@@ -15,6 +15,7 @@
 - **多模态支持**：支持图片输入（日志截图、流程图等）与日志文件输入（`.log`/`.txt`/`.zip` 等）
 - **对话历史持久化**：用户提问和回复自动保存到本地文件
 - **用户反馈机制**：飞书/Web 端点赞点踩，支持文字反馈，record_id 关联对话历史
+- **账号体系**：飞书用户首次使用自动注册，支持用户名密码登录、密码修改、管理后台
 
 ### Agentic 代码排查（新功能）
 
@@ -540,6 +541,42 @@ log_files:
 
 > 未配置时按以上默认值运行。`config.yaml` 在 `.gitignore` 内，部署到新环境需手动同步。
 > 用法见上方「日志文件排查」。
+
+#### 账号体系（可选）
+```yaml
+# 数据库配置
+database:
+  type: "sqlite"                    # 数据库类型: sqlite / mysql / postgresql
+  sqlite:
+    path: "./data/ai_assistant.db"  # SQLite 文件路径
+  echo: false                       # 是否打印 SQL 语句（调试用）
+
+# 管理员账号
+admin:
+  username: "admin"                 # 管理员登录用户名
+  password: "change_me_123"         # 管理员初始密码（请务必修改）
+
+# 前端地址（用于飞书通知消息中的登录链接）
+frontend_url: "http://localhost:8080"  # 生产环境改为实际域名
+
+# JWT 配置
+jwt:
+  secret: "change_this_secret_key_in_production"  # JWT 密钥（请使用随机生成的长密钥）
+  expires_in: 86400                 # Token 过期时间（秒），24 小时
+```
+
+**功能说明**：
+- **飞书用户自动注册**：用户首次与机器人对话时自动创建账号，并通过飞书私聊通知用户名和密码
+- **Web 登录**：访问 `http://localhost:8080/login.html` 使用用户名密码登录
+- **用户管理**：管理员可通过 Web 后台创建/管理用户、重置密码
+- **密码修改**：用户可在个人信息页面修改密码
+
+**数据库选择**：
+- **SQLite**（默认）：无需额外安装，适合开发和小规模部署
+- **PostgreSQL**（推荐生产环境）：高并发、数据一致性保证，需 Docker 或手动安装
+- **MySQL**（可选）：兼容性好，需手动安装
+
+详细部署文档见 `docs/deployment/account-system-deployment.md`
 
 ### 3. 飞书 Bot 配置
 
