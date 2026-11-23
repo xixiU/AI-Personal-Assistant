@@ -366,3 +366,47 @@ class ChatHistoryDBQuery:
         except Exception as e:
             logger.error(f"获取活跃用户数失败: {e}", exc_info=True)
             return 0
+
+    def get_all_queries(self, user_id: Optional[str] = None, days: Optional[int] = None, limit: int = 1000) -> List[str]:
+        """
+        获取所有问题文本（用于词云分析）
+
+        Args:
+            user_id: 用户 ID 过滤（可选，不传则获取所有用户）
+            days: 统计最近 N 天（可选，不传则获取全部）
+            limit: 最多返回条数（默认 1000）
+
+        Returns:
+            问题文本列表
+        """
+        try:
+            with self.db_manager.get_session() as session:
+                # 构建查询
+                query_obj = session.query(ChatHistoryDB.query)
+
+                # 用户过滤
+                if user_id:
+                    query_obj = query_obj.filter(ChatHistoryDB.user_id == user_id)
+
+                # 时间范围过滤
+                if days:
+                    start_date = datetime.now() - timedelta(days=days)
+                    query_obj = query_obj.filter(ChatHistoryDB.timestamp >= start_date)
+
+                # 只获取非空问题
+                query_obj = query_obj.filter(
+                    ChatHistoryDB.query.isnot(None),
+                    ChatHistoryDB.query != ''
+                )
+
+                # 按时间倒序，限制数量
+                query_obj = query_obj.order_by(desc(ChatHistoryDB.timestamp)).limit(limit)
+
+                results = query_obj.all()
+
+                # 返回文本列表
+                return [row.query for row in results]
+
+        except Exception as e:
+            logger.error(f"获取问题文本失败: {e}", exc_info=True)
+            return []

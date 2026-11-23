@@ -298,3 +298,61 @@ def get_feedback():
     except Exception as e:
         logger.error(f"查询反馈数据异常: {e}", exc_info=True)
         return jsonify(error_response("服务器内部错误", "INTERNAL_ERROR")), 500
+
+
+@data_bp.route('/wordcloud', methods=['GET'])
+@require_auth
+def get_user_wordcloud():
+    """
+    获取用户个人词云数据
+
+    请求参数：
+    - days: 统计最近 N 天（可选，不传则获取全部）
+    - limit: 最多返回词数（可选，默认 50）
+
+    响应：
+    {
+        "success": true,
+        "message": "Success",
+        "data": [
+            {"word": "部署", "count": 50},
+            {"word": "配置", "count": 30}
+        ]
+    }
+    """
+    try:
+        # 获取查询参数
+        days = request.args.get('days', None, type=int)
+        limit = request.args.get('limit', 50, type=int)
+
+        # 参数验证
+        if limit < 1 or limit > 200:
+            return jsonify(error_response("词数限制必须在 1-200 之间", "INVALID_PARAMETER")), 400
+
+        # 获取当前用户
+        current_user = request.current_user
+        user_id = current_user.get('user_id')
+
+        # 需要注入的数据库查询模块
+        from ai_assistant.core.wordcloud_analyzer import WordCloudAnalyzer
+
+        if not _chat_history_db:
+            return jsonify(error_response("数据服务未初始化", "SERVICE_UNAVAILABLE")), 503
+
+        # 获取该用户的所有问题
+        queries = _chat_history_db.get_all_queries(user_id=user_id, days=days)
+
+        if not queries:
+            return jsonify(success_response([])), 200
+
+        # 分析词云
+        analyzer = WordCloudAnalyzer()
+        wordcloud_data = analyzer.extract_keywords(queries, top_n=limit)
+
+        logger.info(f"生成用户词云: user_id={user_id}, {len(queries)} 条问题 -> {len(wordcloud_data)} 个关键词")
+
+        return jsonify(success_response(wordcloud_data)), 200
+
+    except Exception as e:
+        logger.error(f"生成用户词云异常: {e}", exc_info=True)
+        return jsonify(error_response("服务器内部错误", "INTERNAL_ERROR")), 500
