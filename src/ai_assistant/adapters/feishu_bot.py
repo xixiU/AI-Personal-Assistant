@@ -693,8 +693,44 @@ class FeishuBotAdapter(IMAdapter):
                     self._user_name_cache[open_id] = ""  # 缓存空串，避免重复失败请求
                 return ""
         except Exception as e:
-            logger.warning(f"调用飞书用户信息 API 异常（不影响反馈保存）: {e}")
+            logger.error(f"获取用户昵称异常: {e}", exc_info=True)
+            with self._cache_lock:
+                self._user_name_cache[open_id] = ""
             return ""
+
+    def get_user_info(self, open_id: str) -> Optional[Dict[str, Any]]:
+        """
+        获取飞书用户完整信息（用于自动注册时提取域账号）
+
+        Args:
+            open_id: 用户 open_id
+
+        Returns:
+            用户信息字典，包含 name, email, enterprise_email 等字段，失败返回 None
+        """
+        if not open_id:
+            return None
+
+        try:
+            token = self.get_tenant_access_token()
+            url = f"{self.base_url}/open-apis/contact/v3/users/{open_id}"
+            headers = {"Authorization": f"Bearer {token}"}
+            params = {"user_id_type": "open_id"}
+            response = requests.get(url, headers=headers, params=params, timeout=10)
+            result = response.json()
+
+            if result.get("code") == 0:
+                user_data = result.get("data", {}).get("user", {})
+                logger.debug(f"获取用户信息成功: open_id={open_id[:8]}..., fields={list(user_data.keys())}")
+                return user_data
+            else:
+                logger.warning(
+                    f"获取用户信息失败: code={result.get('code')}, msg={result.get('msg')}"
+                )
+                return None
+        except Exception as e:
+            logger.error(f"获取用户信息异常: {e}", exc_info=True)
+            return None
 
     def _decrypt(self, encrypt_str: str) -> Dict[str, Any]:
         """

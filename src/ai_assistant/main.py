@@ -1824,82 +1824,48 @@ class AIAssistant:
 
         Args:
             feishu_open_id: 飞书用户 open_id
-            feishu_user_name: 飞书用户昵称
+            feishu_user_name: 飞书用户昵称（中文名）
             adapter: 飞书适配器（用于发送通知消息）
         """
-        # TODO: 等待 Backend-DB-Agent 完成数据库模型后实现
-        #
-        # 实现逻辑：
-        # 1. 检查用户是否已存在（通过 feishu_open_id 查询）
-        # 2. 如果不存在，则创建新用户：
-        #    - username: 使用 feishu_user_name 或 feishu_open_id
-        #    - password: 随机生成 8 位密码
-        #    - 关联 feishu_open_id
-        # 3. 发送飞书通知消息（包含登录名、密码、前端地址）
-        # 4. 失败时记录日志但不抛异常（降级处理，不影响问答）
-        #
-        # 示例代码（等待数据库模型后取消注释）：
-        #
-        # # 检查用户是否已存在
-        # existing_user = self.user_manager.get_user_by_feishu_open_id(feishu_open_id)
-        # if existing_user:
-        #     logger.debug(f"飞书用户已注册: open_id={feishu_open_id[:8]}...")
-        #     return
-        #
-        # # 生成用户名和密码
-        # username = feishu_user_name or f"feishu_{feishu_open_id[:8]}"
-        # password = UserManager.generate_random_password(8)
-        #
-        # # 创建用户
-        # user_id = self.user_manager.create_user(
-        #     username=username,
-        #     password=password,
-        #     feishu_open_id=feishu_open_id,
-        #     display_name=feishu_user_name,
-        #     role="user"
-        # )
-        #
-        # if not user_id:
-        #     logger.error(f"创建飞书用户失败: open_id={feishu_open_id[:8]}...")
-        #     return
-        #
-        # logger.info(f"飞书用户自动注册成功: user_id={user_id}, username={username}")
-        #
-        # # 发送飞书通知消息
-        # try:
-        #     from ai_assistant.utils.feishu_notifier import FeishuNotifier
-        #     notifier = FeishuNotifier(adapter.bot_config)
-        #
-        #     # 从配置读取前端地址
-        #     frontend_url = getattr(self.config, 'frontend_url', None)
-        #
-        #     # 优先使用卡片消息（更美观），失败降级为文本消息
-        #     success = notifier.send_card_message(
-        #         open_id=feishu_open_id,
-        #         username=username,
-        #         password=password,
-        #         frontend_url=frontend_url
-        #     )
-        #
-        #     if success:
-        #         logger.info(f"账号通知消息发送成功: username={username}")
-        #     else:
-        #         logger.warning(f"账号通知消息发送失败: username={username}")
-        #
-        # except Exception as e:
-        #     logger.error(f"发送账号通知消息异常: {e}", exc_info=True)
-
         # 检查用户是否已存在
         existing_user = self.user_manager.get_user_by_feishu_open_id(feishu_open_id)
         if existing_user:
             logger.debug(f"飞书用户已注册: open_id={feishu_open_id[:8]}...")
             return
 
-        # 生成用户名和密码
-        username = feishu_user_name or f"feishu_{feishu_open_id[:8]}"
+        # 获取用户完整信息（尝试提取域账号）
+        username = None
+        display_name = feishu_user_name or "飞书用户"
+
+        try:
+            user_info = adapter.get_user_info(feishu_open_id)
+            if user_info:
+                # 尝试从邮箱提取域账号（优先使用 enterprise_email，其次 email）
+                email = user_info.get('enterprise_email') or user_info.get('email', '')
+                if email and '@' in email:
+                    username = email.split('@')[0]
+                    logger.info(f"从邮箱提取域账号: email={email}, username={username}")
+
+                # 更新显示名称（使用中文名）
+                if user_info.get('name'):
+                    display_name = user_info['name']
+        except Exception as e:
+            logger.warning(f"获取飞书用户信息失败，使用降级方案: {e}")
+
+        # 降级方案：使用 feishu_user_name 或 open_id 生成 username
+        if not username:
+            # 如果 feishu_user_name 是纯英文/数字，可以直接用
+            if feishu_user_name and feishu_user_name.replace('_', '').replace('-', '').isalnum():
+                username = feishu_user_name
+            else:
+                username = f"feishu_{feishu_open_id[:8]}"
+            logger.info(f"使用降级方案生成 username: {username}")
+
         # 确保用户名至少3个字符（User模型验证要求）
         if len(username) < 3:
             username = f"user_{feishu_open_id[:8]}"
+
+        # 生成随机密码
         password = self.user_manager.generate_random_password(8)
 
         # 创建用户
@@ -1907,7 +1873,7 @@ class AIAssistant:
             username=username,
             password=password,
             feishu_open_id=feishu_open_id,
-            display_name=feishu_user_name,
+            name=display_name,  # 注意：这里是 name 参数，会映射到 display_name
             role="user"
         )
 
@@ -1915,7 +1881,10 @@ class AIAssistant:
             logger.error(f"创建飞书用户失败: open_id={feishu_open_id[:8]}...")
             return
 
-        logger.info(f"飞书用户自动注册成功: user_id={user_id}, username={username}")
+        logger.info(f"飞书用户自动注册成功: user_id={user_id}, username={username}, display_name={display_name}")
+
+        # TODO: 发送飞书通知消息（包含登录名、密码、前端地址）
+        # 需要实现 FeishuNotifier 或使用 adapter 发送消息
 
         # 发送飞书通知消息
         try:
