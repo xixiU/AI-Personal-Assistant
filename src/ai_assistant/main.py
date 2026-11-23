@@ -384,10 +384,14 @@ class AIAssistant:
         try:
             from ai_assistant.webhook_server import WebhookServer
 
+            # 读取管理员路径配置
+            admin_path = getattr(self.config, 'system_admin_path', '/admin')
+
             self.webhook_server = WebhookServer(
                 host="0.0.0.0",
                 port=self.config.system_webhook_port,
                 web_frontend_enabled=getattr(self.config, 'system_web_frontend_enabled', False),
+                admin_path=admin_path
             )
             self.webhook_server.set_feishu_adapter(feishu_adapter)
             self.webhook_server.set_event_queue(self.event_queue)
@@ -397,6 +401,16 @@ class AIAssistant:
             self.webhook_server.set_ai_components(
                 self.ai_provider, self.context_manager, self.log_file_manager
             )
+            # 注入账号体系组件（用于认证和管理接口）
+            # 如果初始化失败，不影响飞书 webhook，但页面和聊天接口会拒绝访问
+            if self.user_manager and self.chat_history:
+                self.webhook_server.set_api_components(
+                    self.user_manager,
+                    self.chat_history
+                )
+                logger.info("账号体系已注入 webhook 服务器")
+            else:
+                logger.warning("账号体系初始化失败，Web 页面和聊天接口将不可用")
 
             # 在后台线程启动服务器（使用生产级服务器）
             server_thread = threading.Thread(

@@ -2,14 +2,14 @@
 数据查询接口
 
 提供问答历史和反馈数据的查询接口
+使用服务端会话鉴权
 """
 
 from flask import Blueprint, request, jsonify
 from loguru import logger
 from functools import wraps
-import jwt
 
-from ai_assistant.api import success_response, error_response, decode_token
+from ai_assistant.api import success_response, error_response
 
 # 创建数据查询 Blueprint
 data_bp = Blueprint('data', __name__, url_prefix='/api')
@@ -17,44 +17,47 @@ data_bp = Blueprint('data', __name__, url_prefix='/api')
 # 全局变量（由 webhook_server 注入）
 _chat_history_db = None
 _feedback_manager = None
-_jwt_secret = None
+_user_manager = None
 
 
-def init_data(chat_history_db, feedback_manager, jwt_secret: str):
+def init_data(chat_history_db, feedback_manager, user_manager):
     """
     初始化数据查询模块
 
     Args:
         chat_history_db: ChatHistoryDB 实例
         feedback_manager: FeedbackManager 实例
-        jwt_secret: JWT 密钥
+        user_manager: UserManager 实例
     """
-    global _chat_history_db, _feedback_manager, _jwt_secret
+    global _chat_history_db, _feedback_manager, _user_manager
     _chat_history_db = chat_history_db
     _feedback_manager = feedback_manager
-    _jwt_secret = jwt_secret
-    logger.info("数据查询模块初始化完成")
+    _user_manager = user_manager
+    logger.info("数据查询模块初始化完成（服务端会话）")
 
 
 def require_auth(f):
     """
-    认证装饰器：验证 Token 有效性
+    认证装饰器：验证会话有效性
     """
     @wraps(f)
     def decorated_function(*args, **kwargs):
-        auth_header = request.headers.get('Authorization', '')
-        if not auth_header.startswith('Bearer '):
-            return jsonify(error_response("缺少认证 Token", "MISSING_TOKEN")), 401
+        # 从 cookie 读取会话 token
+        token = request.cookies.get('ai_session', '')
+        if not token:
+            return jsonify(error_response("未登录", "NOT_LOGGED_IN")), 401
 
-        token = auth_header[7:]
-        try:
-            payload = decode_token(token, _jwt_secret)
-            request.current_user = payload
-            return f(*args, **kwargs)
-        except jwt.ExpiredSignatureError:
-            return jsonify(error_response("Token 已过期，请重新登录", "TOKEN_EXPIRED")), 401
-        except jwt.InvalidTokenError:
-            return jsonify(error_response("Token 无效", "INVALID_TOKEN")), 401
+        if not _user_manager:
+            return jsonify(error_response("认证服务未初始化", "SERVICE_UNAVAILABLE")), 503
+
+        # 验证会话
+        user = _user_manager.validate_session(token)
+        if not user:
+            return jsonify(error_response("会话已过期或无效", "SESSION_INVALID")), 401
+
+        # 保存到 request 上下文
+        request.current_user = user
+        return f(*args, **kwargs)
 
     return decorated_function
 

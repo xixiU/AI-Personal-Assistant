@@ -119,6 +119,21 @@ class Config:
     # IM 适配器配置
     adapters: List[Dict[str, Any]] = None
 
+    # 数据库配置
+    database: Dict[str, Any] = None  # 数据库配置（type, path, echo 等）
+
+    # 管理员配置
+    admin: Dict[str, Any] = None  # 管理员配置（username, password, name 等）
+
+    # JWT 配置
+    jwt: Dict[str, Any] = None  # JWT 配置（secret, expires_in 等）
+
+    # 前端 URL
+    frontend_url: str = ""  # 前端访问地址（用于生成链接）
+
+    # 系统管理路径
+    system_admin_path: str = "/admin"  # 管理员入口路径
+
     def __post_init__(self):
         """初始化后处理"""
         if self.adapters is None:
@@ -311,5 +326,25 @@ class Config:
         # 解析运维操作配置
         if "operations" in data:
             config.operations = data["operations"]
+
+        # 解析数据库配置
+        if "database" in data:
+            config.database = data["database"]
+
+        # 解析管理员配置
+        if "admin" in data:
+            config.admin = data["admin"]
+
+        # 解析 JWT 配置
+        if "jwt" in data:
+            config.jwt = data["jwt"]
+
+        # 解析前端 URL
+        if "frontend_url" in data:
+            config.frontend_url = data["frontend_url"]
+
+        # 解析系统配置中的 admin_path
+        if "system" in data and "admin_path" in data["system"]:
+            config.system_admin_path = data["system"]["admin_path"]
 
         return config

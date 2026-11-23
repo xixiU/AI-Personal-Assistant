@@ -41,7 +41,7 @@ _AUTH_FAILED_STATUS = 403
 class WebhookServer:
     """Webhook 服务器（生产者角色，只负责接收事件并放入队列）"""
 
-    def __init__(self, host: str = "0.0.0.0", port: int = 8080, web_frontend_enabled: bool = False):
+    def __init__(self, host: str = "0.0.0.0", port: int = 8080, web_frontend_enabled: bool = False, admin_path: str = "/admin"):
         """
         初始化 Webhook 服务器
 
@@ -51,13 +51,11 @@ class WebhookServer:
             web_frontend_enabled: 是否启用自有前端 Web（首页 / Web 聊天 / Web 反馈）。
                 默认关闭，因当前前端无鉴权。关闭时不注册这些路由，使其真正不可访问；
                 飞书 webhook 与健康检查始终可用。
+            admin_path: 管理员入口路径（默认 /admin）
         """
-        # 前端禁用时传 static_folder=None，连 Flask 内置的 /static/<path> 静态路由
-        # 也不挂载，避免 static/ 目录下的 index.html、js/css 等被直接 URL 访问。
-        if web_frontend_enabled:
-            self.app = Flask(__name__)
-        else:
-            self.app = Flask(__name__, static_folder=None)
+        # 前端始终启用 static_folder，但通过自定义路由控制访问权限
+        self.app = Flask(__name__)
+
         # 限制请求体大小：超限时 Flask 直接返回 413，不会把整个 body 读进内存
         self.app.config["MAX_CONTENT_LENGTH"] = _MAX_CONTENT_LENGTH
         self.host = host
@@ -69,6 +67,14 @@ class WebhookServer:
 
         # 静态文件目录（src/ai_assistant/static/）
         self.static_dir = os.path.join(os.path.dirname(__file__), "static")
+
+        # 管理员入口路径（去除尾斜杠，确保一致性）
+        self.admin_path = admin_path.rstrip('/')
+
+        # 验证管理员路径不与保留路径冲突
+        reserved_paths = ['/', '/api', '/webhook', '/health', '/static']
+        if self.admin_path in reserved_paths or self.admin_path.startswith('/api/') or self.admin_path.startswith('/webhook/'):
+            raise ValueError(f"管理员路径 {self.admin_path} 与保留路径冲突，请配置其他路径")
 
         # 初始化 FeedbackManager
         self.feedback_manager = FeedbackManager()
@@ -99,15 +105,57 @@ class WebhookServer:
             methods=["POST"]
         )
 
-        # ===== 按开关注册：自有前端 Web 路由（无鉴权，默认关闭）=====
+        # ===== 注册静态文件路由（只放行 css/js/vendor）=====
+        self.app.add_url_rule(
+            "/static/<path:filename>",
+            "static_files",
+            self.serve_static,
+            methods=["GET"]
+        )
+
+        # ===== 注册认证和管理 API（需要会话鉴权，始终注册）=====
+        self._register_api_blueprints()
+
+        # ===== 注册页面路由（需要登录，web_frontend_enabled 为 True 时注册）=====
         if self.web_frontend_enabled:
+            # 普通用户入口
+            self.app.add_url_rule("/", "index", self.serve_index, methods=["GET"])
+            self.app.add_url_rule("/login", "user_login", self.serve_user_login, methods=["GET"])
+            self.app.add_url_rule("/profile", "user_profile", self.serve_user_profile, methods=["GET"])
+
+            # 管理员入口（路径可配置）
+            # {admin_path} 重定向到 {admin_path}/（尾斜杠规范化）
+            if self.admin_path != '/':  # 根路径不需要重定向
+                self.app.add_url_rule(
+                    self.admin_path,
+                    "admin_root_redirect",
+                    lambda: self._redirect_with_trailing_slash(),
+                    methods=["GET"]
+                )
+
+            # 管理员登录页：{admin_path}/
             self.app.add_url_rule(
-                "/",
-                "index",
-                self.serve_index,
+                f"{self.admin_path}/",
+                "admin_login",
+                self.serve_admin_login,
+                methods=["GET"]
+            )
+            # 用户管理页：{admin_path}/users
+            self.app.add_url_rule(
+                f"{self.admin_path}/users",
+                "admin_users",
+                self.serve_admin_users,
+                methods=["GET"]
+            )
+            # 数据管理页：{admin_path}/data
+            self.app.add_url_rule(
+                f"{self.admin_path}/data",
+                "admin_data",
+                self.serve_admin_data,
                 methods=["GET"]
             )
 
+            # /api/chat 和 /api/feedback 也需要登录
             self.app.add_url_rule(
                 "/api/chat",
                 "chat",
@@ -121,13 +169,13 @@ class WebhookServer:
                 self.handle_feedback,
                 methods=["POST"]
             )
-            logger.info("自有前端 Web 已启用（首页 / Web 聊天 / Web 反馈接口）")
-        else:
-            logger.info("自有前端 Web 已禁用（无鉴权，默认关闭）；仅飞书 webhook 与 /health 可用")
 
-        # ===== 注册认证和管理 API（需要 JWT 鉴权，始终注册）=====
-        # 这些接口通过 JWT Token 鉴权，不依赖 web_frontend_enabled 开关
-        self._register_api_blueprints()
+            logger.info(f"前端页面路由已启用，管理员入口: {self.admin_path}")
+        else:
+            logger.info("前端页面路由已禁用；仅飞书 webhook、API 与 /health 可用")
+
+        # 注册 after_request 钩子，确保所有响应都有 CSRF cookie
+        self.app.after_request(self._ensure_csrf_cookie_middleware)
 
         # 用于存储 AI Provider 和 Context Manager 的引用
         self.ai_provider = None
@@ -137,19 +185,160 @@ class WebhookServer:
         # 纯文本/图片提问不受影响，保证不接线也能正常工作。
         self.log_file_manager = None
 
+    def _ensure_csrf_cookie_middleware(self, response):
+        """
+        CSRF cookie 中间件：确保所有响应都携带 CSRF cookie。
+        如果请求中已有合法的 CSRF cookie，保持不变；否则生成新的。
+        """
+        import secrets
+        from flask import request
+
+        # 跳过静态资源和 webhook 路径
+        if request.path.startswith('/static/') or request.path.startswith('/webhook/'):
+            return response
+
+        existing_csrf = request.cookies.get('ai_csrf', '')
+        # 只有当前 cookie 不存在或格式不合法时才生成新值
+        if not existing_csrf or len(existing_csrf) < 16:
+            new_csrf = secrets.token_urlsafe(32)
+            response.set_cookie(
+                'ai_csrf',
+                new_csrf,
+                max_age=86400,  # 24 小时
+                httponly=False,  # 前端需要读取
+                samesite='Lax',
+                secure=False
+            )
+
+        return response
+
+    def _check_login(self):
+        """
+        检查用户是否已登录
+
+        Returns:
+            (user_dict, error_response)
+            如果已登录，返回 (user, None)
+            如果未登录，返回 (None, (json_response, status_code))
+        """
+        token = request.cookies.get('ai_session', '')
+
+        if not token:
+            return None, (jsonify({"message": "未登录"}), 401)
+
+        if not self.user_manager:
+            return None, (jsonify({"message": "认证服务未初始化"}), 503)
+
+        user = self.user_manager.validate_session(token)
+        if not user:
+            return None, (jsonify({"message": "会话已过期或无效"}), 401)
+
+        return user, None
+
+    def _redirect_with_trailing_slash(self):
+        """重定向到带尾斜杠的路径（用于 {admin_path} → {admin_path}/）"""
+        from flask import redirect, request
+        return redirect(request.path + '/', code=302)
+
+    def serve_static(self, filename):
+        """
+        提供静态文件服务，只放行 css/js/vendor 目录
+        """
+        # 只允许访问 css、js、vendor 子目录
+        allowed_prefixes = ('css/', 'js/', 'vendor/')
+        if not any(filename.startswith(prefix) for prefix in allowed_prefixes):
+            return jsonify({"error": "Forbidden"}), 403
+
+        try:
+            return send_from_directory(self.static_dir, filename)
+        except Exception as e:
+            logger.error(f"Error serving static file {filename}: {e}")
+            return jsonify({"error": "File not found"}), 404
+
     def serve_index(self):
-        """返回首页"""
+        """返回聊天首页（需要登录）"""
+        user, error_resp = self._check_login()
+        if error_resp:
+            # 未登录，跳转到登录页
+            from flask import redirect
+            return redirect('/login')
+
         try:
             return send_from_directory(self.static_dir, "index.html")
         except Exception as e:
             logger.error(f"Error serving index.html: {e}")
             return jsonify({"error": "index.html not found"}), 404
 
+    def serve_user_login(self):
+        """返回用户登录页"""
+        try:
+            return send_from_directory(self.static_dir, "login.html")
+        except Exception as e:
+            logger.error(f"Error serving login.html: {e}")
+            return jsonify({"error": "login.html not found"}), 404
+
+    def serve_user_profile(self):
+        """返回用户个人中心页（需要登录）"""
+        user, error_resp = self._check_login()
+        if error_resp:
+            from flask import redirect
+            return redirect('/login')
+
+        try:
+            return send_from_directory(self.static_dir, "user-profile.html")
+        except Exception as e:
+            logger.error(f"Error serving user-profile.html: {e}")
+            return jsonify({"error": "user-profile.html not found"}), 404
+
+    def serve_admin_login(self):
+        """返回管理员登录页"""
+        try:
+            return send_from_directory(os.path.join(self.static_dir, "admin"), "login.html")
+        except Exception as e:
+            logger.error(f"Error serving admin/login.html: {e}")
+            return jsonify({"error": "admin/login.html not found"}), 404
+
+    def serve_admin_users(self):
+        """返回管理员用户管理页（需要管理员登录）"""
+        user, error_resp = self._check_login()
+        if error_resp:
+            from flask import redirect
+            return redirect(f'{self.admin_path}/')
+
+        # 检查是否是管理员
+        if user.get('role') != 'admin':
+            from flask import redirect
+            return redirect(f'{self.admin_path}/')
+
+        try:
+            return send_from_directory(os.path.join(self.static_dir, "admin"), "users.html")
+        except Exception as e:
+            logger.error(f"Error serving admin/users.html: {e}")
+            return jsonify({"error": "admin/users.html not found"}), 404
+
+    def serve_admin_data(self):
+        """返回管理员数据管理页（需要管理员登录）"""
+        user, error_resp = self._check_login()
+        if error_resp:
+            from flask import redirect
+            return redirect(f'{self.admin_path}/')
+
+        # 检查是否是管理员
+        if user.get('role') != 'admin':
+            from flask import redirect
+            return redirect(f'{self.admin_path}/')
+
+        try:
+            return send_from_directory(os.path.join(self.static_dir, "admin"), "data.html")
+        except Exception as e:
+            logger.error(f"Error serving admin/data.html: {e}")
+            return jsonify({"error": "admin/data.html not found"}), 404
+
     def _register_api_blueprints(self):
         """
         注册 API Blueprint（认证、管理员、数据查询接口）
 
-        这些接口通过 JWT Token 鉴权，始终注册（不受 web_frontend_enabled 影响）
+        这些接口通过服务端会话鉴权，始终注册（不受 web_frontend_enabled 影响）
         """
         from ai_assistant.api.auth import auth_bp
         from ai_assistant.api.admin import admin_bp
@@ -164,9 +353,7 @@ class WebhookServer:
     def set_api_components(
         self,
         user_manager,
-        chat_history_db,
-        jwt_secret: str,
-        jwt_expires_in: int = 86400
+        chat_history_db
     ):
         """
         设置 API 组件（用于认证和数据查询接口）
@@ -174,8 +361,6 @@ class WebhookServer:
         Args:
             user_manager: UserManager 实例
             chat_history_db: ChatHistoryDB 实例
-            jwt_secret: JWT 密钥
-            jwt_expires_in: Token 过期时间（秒，默认 24 小时）
         """
         from ai_assistant.api.auth import init_auth
         from ai_assistant.api.admin import init_admin
@@ -185,11 +370,11 @@ class WebhookServer:
         self.chat_history_db = chat_history_db
 
         # 初始化各个 API 模块
-        init_auth(user_manager, jwt_secret, jwt_expires_in)
-        init_admin(user_manager, jwt_secret)
-        init_data(chat_history_db, self.feedback_manager, jwt_secret)
+        init_auth(user_manager)
+        init_admin(user_manager)
+        init_data(chat_history_db, self.feedback_manager, user_manager)
 
-        logger.info("API 组件已注入（UserManager, ChatHistoryDB, JWT）")
+        logger.info("API 组件已注入（UserManager, ChatHistoryDB）")
 
     def set_feishu_adapter(self, adapter):
         """
@@ -713,7 +898,7 @@ class WebhookServer:
 
     def handle_chat(self):
         """
-        处理 Web 聊天请求
+        处理 Web 聊天请求（需要登录）
 
         请求格式：
         {
@@ -742,6 +927,11 @@ class WebhookServer:
         from datetime import datetime
 
         try:
+            # 检查登录状态
+            user, error_resp = self._check_login()
+            if error_resp:
+                return error_resp
+
             data = request.get_json()
             if not data:
                 return jsonify({"error": "Empty request"}), 400
@@ -872,7 +1062,7 @@ class WebhookServer:
 
     def handle_feedback(self):
         """
-        处理 Web 端反馈提交
+        处理 Web 端反馈提交（需要登录）
 
         请求格式：
         {
@@ -889,6 +1079,11 @@ class WebhookServer:
         }
         """
         try:
+            # 检查登录状态
+            user, error_resp = self._check_login()
+            if error_resp:
+                return error_resp
+
             data = request.get_json()
             if not data:
                 return jsonify({"error": "Empty request"}), 400
