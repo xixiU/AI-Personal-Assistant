@@ -7,7 +7,7 @@
 
 from contextlib import contextmanager
 from typing import Generator
-from sqlalchemy import create_engine, event
+from sqlalchemy import create_engine, event, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import sessionmaker, declarative_base, Session
 from loguru import logger
@@ -225,11 +225,11 @@ class DatabaseManager:
             # 检查列是否存在
             if self.db_type == "sqlite":
                 # SQLite 通过 PRAGMA 检查列
-                result = session.execute(f"PRAGMA table_info({table_name})")
+                result = session.execute(text(f"PRAGMA table_info({table_name})"))
                 columns = [row[1] for row in result]
 
                 if column_name not in columns:
-                    session.execute(f'ALTER TABLE "{table_name}" ADD COLUMN "{column_name}" {column_def}')
+                    session.execute(text(f'ALTER TABLE "{table_name}" ADD COLUMN "{column_name}" {column_def}'))
                     session.commit()
                     logger.info(f"已添加列: {table_name}.{column_name}")
 
@@ -282,13 +282,13 @@ class DatabaseManager:
         try:
             # 检查索引是否存在
             if self.db_type == "sqlite":
-                result = session.execute(f"PRAGMA index_list({table_name})")
+                result = session.execute(text(f"PRAGMA index_list({table_name})"))
                 indexes = [row[1] for row in result]
 
                 if index_name not in indexes:
                     columns_str = ", ".join([f'"{col}"' for col in columns])
                     unique_keyword = "UNIQUE " if unique else ""
-                    session.execute(f'CREATE {unique_keyword}INDEX "{index_name}" ON "{table_name}" ({columns_str})')
+                    session.execute(text(f'CREATE {unique_keyword}INDEX "{index_name}" ON "{table_name}" ({columns_str})'))
                     session.commit()
                     logger.info(f"已创建索引: {index_name} on {table_name}")
 

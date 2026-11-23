@@ -46,7 +46,7 @@ class ChatHistoryDB(Base):
     message_id = Column(String(128), nullable=True, index=True, comment="AI 回复的消息 ID（用于反馈查找）")
 
     # 元数据
-    extra_data = Column(JSON, nullable=True, comment="附加元数据（mode / tool_rounds / doc_count 等）")  # 改名避免 SQLAlchemy 保留名冲突
+    extra_data = Column("metadata", JSON, nullable=True, comment="附加元数据（mode / tool_rounds / doc_count 等）")  # 数据库列名为 metadata，代码中映射为 extra_data
 
     # 时间戳
     created_at = Column(DateTime, nullable=False, default=datetime.now, comment="记录创建时间")
