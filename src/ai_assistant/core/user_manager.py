@@ -731,7 +731,7 @@ class UserManager:
                 user_id = self.create_user(
                     username=admin_username,
                     password=admin_password,
-                    name=admin_name,
+                    display_name=admin_name,  # 修正：参数名是 display_name
                     role='admin'
                 )
 
