@@ -66,11 +66,12 @@
             $('sDislike').textContent = fmtNum(s.dislike_count);
             $('rangeText').textContent = d.range ? (d.range.start_date + ' ~ ' + d.range.end_date) : '';
 
-            Charts.line($('trendChart'), d.daily || [], [
-                { key: 'questions', label: '问答量', color: '#2563eb' },
-                { key: 'active_users', label: '活跃用户', color: '#7c3aed' },
-                { key: 'likes', label: '点赞', color: '#16a34a' },
-                { key: 'dislikes', label: '点踩', color: '#dc2626' }
+            // API 返回简化格式 {date, count}，映射为 {date, questions: count}
+            var dailyData = (d.daily || []).map(function (item) {
+                return { date: item.date, questions: item.count };
+            });
+            Charts.line($('trendChart'), dailyData, [
+                { key: 'questions', label: '问答量', color: '#2563eb' }
             ]);
             Charts.bars($('topList'), d.top_questions || []);
             Charts.bars($('topUsers'), (d.top_users || []).map(function (u) {
