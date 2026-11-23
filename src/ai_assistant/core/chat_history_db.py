@@ -220,23 +220,31 @@ class ChatHistoryDBQuery:
             logger.error(f"获取每日统计失败: {e}", exc_info=True)
             return []
 
-    def get_top_questions(self, limit: int = 10, days: int = 30) -> List[Dict]:
+    def get_top_questions(self, limit: int = 10, days: int = 30, use_clustering: bool = False, embedding_function=None) -> List[Dict]:
         """
         获取高频问题 Top N
 
         Args:
             limit: 返回记录数
             days: 统计最近 N 天
+            use_clustering: 是否使用语义聚类（默认 False）
+            embedding_function: embedding 函数（use_clustering=True 时必须提供）
 
         Returns:
             高频问题列表，格式: [{"query": "...", "count": 50}, ...]
+            或聚类结果: [{
+                "representative": "代表性问题",
+                "count": 5,
+                "similar_questions": ["相似问题1", "相似问题2"]
+            }, ...]
         """
         try:
             with self.db_manager.get_session() as session:
                 # 计算开始日期
                 start_date = datetime.now() - timedelta(days=days)
 
-                # 按问题内容分组统计
+                # 按问题内容分组统计（获取更多数据用于聚类）
+                query_limit = limit * 3 if use_clustering else limit
                 query_obj = session.query(
                     ChatHistoryDB.query,
                     func.count(ChatHistoryDB.record_id).label('count')
@@ -246,15 +254,42 @@ class ChatHistoryDBQuery:
                     ChatHistoryDB.query
                 ).order_by(
                     desc('count')
-                ).limit(limit)
+                ).limit(query_limit)
 
                 results = query_obj.all()
 
-                # 转换为字典列表
-                return [
-                    {"query": row.query, "count": row.count}
-                    for row in results
-                ]
+                # 如果不使用聚类，直接返回
+                if not use_clustering or not embedding_function:
+                    return [
+                        {"query": row.query, "count": row.count}
+                        for row in results[:limit]
+                    ]
+
+                # 使用语义聚类
+                from ai_assistant.core.question_clusterer import QuestionClusterer
+
+                # 准备数据
+                questions = [(row.query, row.count) for row in results]
+                question_texts = [q[0] for q in questions]
+
+                # 生成 embeddings
+                try:
+                    embeddings = embedding_function(question_texts)
+
+                    # 聚类
+                    clusterer = QuestionClusterer(similarity_threshold=0.8)
+                    clusters = clusterer.cluster_questions(questions, embeddings)
+
+                    # 返回前 N 个簇
+                    return clusters[:limit]
+
+                except Exception as e:
+                    logger.error(f"语义聚类失败，降级到普通模式: {e}", exc_info=True)
+                    # 失败时返回原始数据
+                    return [
+                        {"query": row.query, "count": row.count}
+                        for row in results[:limit]
+                    ]
 
         except Exception as e:
             logger.error(f"获取高频问题失败: {e}", exc_info=True)

@@ -406,8 +406,25 @@ def get_stats():
         # 2. 每日问答趋势
         daily = _chat_history_db.get_daily_stats(days=days)
 
-        # 3. 高频问题 Top 10
-        top_questions = _chat_history_db.get_top_questions(limit=10, days=days)
+        # 3. 高频问题 Top 10（支持语义聚类）
+        use_clustering = request.args.get('clustering', 'false', type=str).lower() == 'true'
+
+        if use_clustering:
+            # 尝试加载 embedding 模型
+            try:
+                from ai_assistant.core.hybrid_search import Text2VecEmbeddingFunction
+                embedding_func = Text2VecEmbeddingFunction()
+                top_questions = _chat_history_db.get_top_questions(
+                    limit=10,
+                    days=days,
+                    use_clustering=True,
+                    embedding_function=embedding_func
+                )
+            except Exception as e:
+                logger.warning(f"加载 embedding 模型失败，使用普通模式: {e}")
+                top_questions = _chat_history_db.get_top_questions(limit=10, days=days)
+        else:
+            top_questions = _chat_history_db.get_top_questions(limit=10, days=days)
 
         # 4. 活跃用户 Top 10
         top_users = _chat_history_db.get_top_users(limit=10, days=days)
@@ -482,106 +499,6 @@ def get_wordcloud():
 
     except Exception as e:
         logger.error(f"生成词云数据异常: {e}", exc_info=True)
-        return jsonify(error_response("服务器内部错误", "INTERNAL_ERROR")), 500
-
-
-@admin_bp.route('/users/<user_id>/reset-password', methods=['POST'])
-def get_stats():
-    """
-    获取管理后台数据统计
-
-    请求参数：
-    - range: 统计范围（可选，7d/30d/90d，默认 7d）
-
-    响应：
-    {
-        "success": true,
-        "message": "Success",
-        "data": {
-            "summary": {
-                "total_questions": int,
-                "total_conversations": int,
-                "active_users": int,
-                "total_feedbacks": int,
-                "feedback_rate": float
-            },
-            "daily": [{"date": "2024-01-01", "count": 100}, ...],
-            "top_questions": [{"query": "...", "count": 50}, ...],
-            "top_users": [{"user_name": "...", "count": 30}, ...],
-            "sources": {"feishu": 100, "web": 50, "wechat": 20},
-            "range": "7d"
-        }
-    }
-    """
-    try:
-        # 获取查询参数
-        range_param = request.args.get('range', '7d', type=str)
-
-        # 参数验证
-        if range_param not in ['7d', '30d', '90d']:
-            return jsonify(error_response("范围参数无效", "INVALID_PARAMETER")), 400
-
-        # 解析天数
-        days_map = {'7d': 7, '30d': 30, '90d': 90}
-        days = days_map[range_param]
-
-        # 需要注入的数据库查询模块
-        from ai_assistant.api.data import _chat_history_db, _feedback_manager
-
-        if not _chat_history_db or not _feedback_manager:
-            return jsonify(error_response("数据服务未初始化", "SERVICE_UNAVAILABLE")), 503
-
-        # 1. 汇总统计
-        total_questions = _chat_history_db.count()
-        total_conversations = _chat_history_db.count()  # 暂时与问答数相同，后续可按 session 去重
-        active_users = _chat_history_db.get_active_users_count(days=days)
-
-        # 获取反馈统计（包含点赞/点踩数量）
-        feedback_stats = _feedback_manager.get_stats()
-        total_feedbacks = _feedback_manager.count()
-        like_count = feedback_stats.get('like_count', 0)
-        dislike_count = feedback_stats.get('dislike_count', 0)
-        like_rate = feedback_stats.get('like_rate', 0.0)
-
-        # 计算反馈率（有反馈的问答数 / 总问答数）
-        feedback_rate = total_feedbacks / total_questions if total_questions > 0 else 0.0
-
-        summary = {
-            "total_questions": total_questions,
-            "total_conversations": total_conversations,
-            "active_users": active_users,
-            "total_feedbacks": total_feedbacks,
-            "feedback_rate": round(feedback_rate, 2),
-            "like_count": like_count,
-            "dislike_count": dislike_count,
-            "like_rate": like_rate
-        }
-
-        # 2. 每日问答趋势
-        daily = _chat_history_db.get_daily_stats(days=days)
-
-        # 3. 高频问题 Top 10
-        top_questions = _chat_history_db.get_top_questions(limit=10, days=days)
-
-        # 4. 活跃用户 Top 10
-        top_users = _chat_history_db.get_top_users(limit=10, days=days)
-
-        # 5. 来源分布
-        sources = _chat_history_db.get_source_distribution(days=days)
-
-        logger.info(f"查询管理后台统计: range={range_param}, total_questions={total_questions}")
-
-        return jsonify(success_response({
-            "summary": summary,
-            "daily": daily,
-            "top_questions": top_questions,
-            "top_users": top_users,
-            "sources": sources,
-            "range": range_param
-        })), 200
-
-    except Exception as e:
-        logger.error(f"查询管理后台统计异常: {e}", exc_info=True)
         return jsonify(error_response("服务器内部错误", "INTERNAL_ERROR")), 500
 
 
