@@ -1180,9 +1180,18 @@ class FeishuBotAdapter(IMAdapter):
                 result = self.handle_my_command(text_stripped, sender_id, chat_id)
                 if result:
                     # 直接发送命令结果，不触发 AI
-                    self._send_text_reply(chat_id, message.get("message_id"), result)
-                    self.latest_event = None
-                    return False  # 不触发 AI 处理
+                    success = self._send_text_reply(chat_id, message.get("message_id"), result)
+                    if success:
+                        logger.info(f"✅ /我 命令处理完成，已发送回复")
+                    else:
+                        logger.error(f"❌ /我 命令回复发送失败")
+                else:
+                    logger.warning(f"⚠️ /我 命令处理返回空结果")
+
+                # 清理事件和消息，不触发 AI
+                self.latest_event = None
+                self.latest_message = None
+                return False  # 不触发 AI 处理
 
             # 图片/文件消息通常没有文字说明，给一句默认提问，避免 text 为空
             if image_keys and not text.strip():
@@ -1902,25 +1911,30 @@ class FeishuBotAdapter(IMAdapter):
         """
         try:
             token = self.get_tenant_access_token()
-            url = f"{self.base_url}/open-apis/im/v1/messages"
             headers = {
                 "Authorization": f"Bearer {token}",
                 "Content-Type": "application/json"
             }
-            params = {"receive_id_type": "chat_id"}
-            payload = {
-                "receive_id": chat_id,
-                "msg_type": "text",
-                "content": json.dumps({"text": text}),
-            }
 
-            # 如果有 message_id，设置为回复消息
+            # 使用 reply API 回复消息
             if message_id:
-                payload["reply_in_thread"] = False
                 url = f"{self.base_url}/open-apis/im/v1/messages/{message_id}/reply"
+                payload = {
+                    "msg_type": "text",
+                    "content": json.dumps({"text": text}),
+                }
                 params = {}
+            else:
+                # 如果没有 message_id，直接发送到 chat
+                url = f"{self.base_url}/open-apis/im/v1/messages"
+                payload = {
+                    "receive_id": chat_id,
+                    "msg_type": "text",
+                    "content": json.dumps({"text": text}),
+                }
+                params = {"receive_id_type": "chat_id"}
 
-            logger.debug(f"发送文本消息到 chat_id={chat_id}")
+            logger.debug(f"发送文本消息到 chat_id={chat_id}, message_id={message_id}")
             response = requests.post(url, headers=headers, json=payload, params=params, timeout=10)
             response.raise_for_status()
 
@@ -1932,7 +1946,7 @@ class FeishuBotAdapter(IMAdapter):
                 logger.warning(f"文本消息发送失败: {result.get('msg')}")
                 return False
         except Exception as e:
-            logger.error(f"发送文本消息失败: {e}")
+            logger.error(f"发送文本消息失败: {e}", exc_info=True)
             return False
 
     def _send_ephemeral_message(self, user_id: str, chat_id: str, text: str) -> bool:
