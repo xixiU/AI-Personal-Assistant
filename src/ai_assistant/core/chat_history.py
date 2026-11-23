@@ -92,7 +92,21 @@ class ChatHistoryManager:
         if metadata:
             record["metadata"] = metadata
 
-        # 双写：先写数据库，成功后再写文件
+        # 双写：先写文件（必须成功），再写数据库（可选）
+
+        # 1. 先写 JSONL 文件（主存储，必须成功）
+        today = datetime.now().strftime("%Y-%m-%d")
+        file_path = self.history_dir / f"{today}.jsonl"
+
+        with self._lock:
+            try:
+                with open(file_path, "a", encoding="utf-8") as f:
+                    f.write(json.dumps(record, ensure_ascii=False) + "\n")
+            except Exception as e:
+                logger.error(f"保存对话历史失败: {e}")
+                raise  # 文件写入失败则抛出异常
+
+        # 2. 再写数据库（辅助查询，失败不影响）
         if self.db_manager:
             try:
                 from ai_assistant.models import ChatHistoryDB
@@ -108,18 +122,7 @@ class ChatHistoryManager:
                 logger.debug(f"数据库写入成功: record_id={record_id}")
             except Exception as e:
                 # 数据库写入失败不阻塞流程，记录错误日志
-                logger.error(f"数据库写入失败，仅写入文件: record_id={record_id}, error={e}", exc_info=True)
-
-        # 写入 JSONL 文件
-        today = datetime.now().strftime("%Y-%m-%d")
-        file_path = self.history_dir / f"{today}.jsonl"
-
-        with self._lock:
-            try:
-                with open(file_path, "a", encoding="utf-8") as f:
-                    f.write(json.dumps(record, ensure_ascii=False) + "\n")
-            except Exception as e:
-                logger.error(f"保存对话历史失败: {e}")
+                logger.error(f"数据库写入失败（文件已保存）: record_id={record_id}, error={e}", exc_info=True)
 
         return record_id
 

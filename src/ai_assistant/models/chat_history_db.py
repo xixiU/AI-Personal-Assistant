@@ -46,7 +46,7 @@ class ChatHistoryDB(Base):
     message_id = Column(String(128), nullable=True, index=True, comment="AI 回复的消息 ID（用于反馈查找）")
 
     # 元数据
-    extra_data = Column("metadata", JSON, nullable=True, comment="附加元数据（mode / tool_rounds / doc_count 等）")  # 数据库列名为 metadata，代码中映射为 extra_data
+    metadata = Column(JSON, nullable=True, comment="附加元数据（mode / tool_rounds / doc_count 等）")
 
     # 时间戳
     created_at = Column(DateTime, nullable=False, default=datetime.now, comment="记录创建时间")
@@ -104,7 +104,7 @@ class ChatHistoryDB(Base):
             "context_key": self.context_key,
             "chain_info": self.chain_info,
             "message_id": self.message_id,
-            "extra_data": self.extra_data,  # 改名
+            "metadata": self.metadata,
             "created_at": self.created_at.strftime("%Y-%m-%d %H:%M:%S") if self.created_at else None,
         }
 
@@ -147,5 +147,5 @@ class ChatHistoryDB(Base):
             context_key=record.get("context_key"),
             chain_info=record.get("chain_info"),
             message_id=record.get("message_id"),
-            extra_data=record.get("metadata"),  # JSONL 中是 metadata，映射到 extra_data
+            metadata=record.get("metadata"),
         )
