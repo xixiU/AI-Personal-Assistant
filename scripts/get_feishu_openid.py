@@ -30,6 +30,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
 def load_feishu_config():
     """从 config.yaml 加载飞书配置"""
+    import yaml
+
     config_file = 'config.yaml'
 
     if not os.path.exists(config_file):
@@ -40,18 +42,31 @@ def load_feishu_config():
         with open(config_file, 'r', encoding='utf-8') as f:
             config = yaml.safe_load(f)
 
-        feishu_config = config.get('feishu', {})
-        app_id = feishu_config.get('app_id')
-        app_secret = feishu_config.get('app_secret')
+        # 尝试从 adapters 列表中找 feishu 配置
+        adapters = config.get('adapters', [])
+        feishu_adapter = None
+        for adapter in adapters:
+            if adapter.get('name') == 'feishu':
+                feishu_adapter = adapter
+                break
+
+        if not feishu_adapter:
+            print("❌ config.yaml 的 adapters 中未找到 name='feishu' 的配置")
+            return None
+
+        bot_api = feishu_adapter.get('bot_api', {})
+        app_id = bot_api.get('app_id')
+        app_secret = bot_api.get('app_secret')
+        base_url = bot_api.get('base_url', 'https://open.feishu.cn')
 
         if not app_id or not app_secret:
-            print("❌ config.yaml 中缺少飞书配置（feishu.app_id 或 feishu.app_secret）")
+            print("❌ config.yaml 中缺少飞书配置（adapters[name=feishu].bot_api.app_id 或 app_secret）")
             return None
 
         return {
             'app_id': app_id,
             'app_secret': app_secret,
-            'base_url': feishu_config.get('base_url', 'https://open.feishu.cn')
+            'base_url': base_url
         }
 
     except Exception as e:
@@ -145,50 +160,6 @@ def parse_log_file(log_file='logs/app.log', lines=100):
     for idx, (open_id, info) in enumerate(sorted_users, 1):
         print(f"{idx}. Open ID: {open_id}")
         print(f"   姓名: {info['name']}")
-        print(f"   消息数: {info['count']}")
-        print(f"   最后活跃: {info['last_time']}")
-        print()
-
-    print("-" * 60)
-    print("📋 配置文件格式（复制到 config.yaml）:\n")
-    print("operations:")
-    print("  authorization:")
-    print("    operators:")
-    print("      feishu:")
-    for open_id, info in sorted_users:
-        print(f'        - open_id: "{open_id}"')
-        print(f'          name: "{info["name"]}"')
-
-
-def get_tenant_access_token(app_id, app_secret):
-    """获取 tenant_access_token
-
-    Args:
-        app_id: 飞书应用 ID
-        app_secret: 飞书应用密钥
-
-    Returns:
-        tenant_access_token 或 None
-    """
-    import requests
-
-    url = "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal"
-    headers = {"Content-Type": "application/json"}
-    data = {"app_id": app_id, "app_secret": app_secret}
-
-    try:
-        response = requests.post(url, headers=headers, json=data, timeout=10)
-        result = response.json()
-
-        if result.get('code') == 0:
-            return result.get('tenant_access_token')
-        else:
-            print(f"❌ 获取 token 失败: {result.get('msg', 'Unknown error')}")
-            return None
-    except Exception as e:
-        print(f"❌ 请求失败: {e}")
-        return None
-
 
 def query_via_api(open_id=None):
     """通过飞书API查询用户信息（自动从 config.yaml 读取配置）
@@ -252,14 +223,20 @@ def query_via_api(open_id=None):
             print(f"employee_no    : {user_data.get('employee_no', 'N/A')} （工号）")
             print(f"mobile         : {user_data.get('mobile', 'N/A')} （手机号）")
 
-            # 提取邮箱前缀作为域账号建议
+            # 提取域账号建议
+            user_id = user_data.get('user_id', '')
             email = user_data.get('email') or user_data.get('enterprise_email', '')
-            domain_account = email.split('@')[0] if '@' in email else 'N/A'
+            email_prefix = email.split('@')[0] if '@' in email else ''
 
             print("\n" + "=" * 60)
             print("建议的 username（域账号）:")
             print("=" * 60)
-            print(f"从邮箱提取: {domain_account}")
+            if user_id:
+                print(f"从 user_id 提取（推荐）: {user_id}")
+            if email_prefix:
+                print(f"从邮箱提取（备选）: {email_prefix}")
+            if not user_id and not email_prefix:
+                print("N/A - 建议使用 feishu_{open_id[:8]}")
 
             print()
             print("-" * 60)
