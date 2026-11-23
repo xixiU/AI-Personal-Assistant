@@ -27,9 +27,58 @@
             <div class="page-head">
                 <div>
                     <h1>用户中心</h1>
-                    <p>查看账号信息、修改登录密码</p>
+                    <p>查看账号信息、修改登录密码、浏览历史记录</p>
                 </div>
             </div>
+
+            <!-- 历史记录区域 -->
+            <section class="card" style="margin-bottom: 20px;">
+                <div class="card-head">
+                    <h2>历史记录</h2>
+                </div>
+                <div class="card-body" style="padding: 0;">
+                    <div class="tabs" style="margin: 20px 20px 0; border-radius: 10px;">
+                        <button id="tabChat" class="active">我的对话</button>
+                        <button id="tabFeedback">我的反馈</button>
+                    </div>
+
+                    <!-- 我的对话 Tab -->
+                    <div id="chatHistoryPane" class="history-pane">
+                        <div class="toolbar" style="padding: 16px 20px; border-bottom: 1px solid var(--border);">
+                            <input class="input" id="chatSearchInput" type="text" placeholder="搜索对话内容..." style="width: 280px;">
+                            <button class="btn btn-ghost btn-sm" id="chatSearchBtn">搜索</button>
+                            <button class="btn btn-ghost btn-sm" id="chatResetBtn">重置</button>
+                        </div>
+                        <div id="chatHistoryList"></div>
+                        <div class="pager" id="chatPager" hidden>
+                            <div id="chatPageInfo">-</div>
+                            <div class="btns">
+                                <button class="btn btn-ghost btn-sm" id="chatPrevBtn">上一页</button>
+                                <button class="btn btn-ghost btn-sm" id="chatNextBtn">下一页</button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- 我的反馈 Tab -->
+                    <div id="feedbackHistoryPane" class="history-pane" hidden>
+                        <div class="toolbar" style="padding: 16px 20px; border-bottom: 1px solid var(--border);">
+                            <div class="tabs" style="display: inline-flex; padding: 2px; background: var(--surface-2); border-radius: 8px;">
+                                <button class="filter-tab active" data-type="">全部</button>
+                                <button class="filter-tab" data-type="like">点赞</button>
+                                <button class="filter-tab" data-type="dislike">点踩</button>
+                            </div>
+                        </div>
+                        <div id="feedbackHistoryList"></div>
+                        <div class="pager" id="feedbackPager" hidden>
+                            <div id="feedbackPageInfo">-</div>
+                            <div class="btns">
+                                <button class="btn btn-ghost btn-sm" id="feedbackPrevBtn">上一页</button>
+                                <button class="btn btn-ghost btn-sm" id="feedbackNextBtn">下一页</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
 
             <div class="grid-2">
                 <section class="card">
@@ -69,6 +118,71 @@
     </div>
 
     <script src="/static/js/api.js"></script>
+    <style>
+        .history-pane { min-height: 400px; }
+        .history-item {
+            padding: 16px 20px;
+            border-bottom: 1px solid var(--border);
+            transition: background 0.15s;
+        }
+        .history-item:hover { background: var(--surface-2); }
+        .history-item:last-child { border-bottom: none; }
+        .history-time { font-size: 12px; color: var(--text-3); margin-bottom: 8px; }
+        .history-q {
+            font-size: 14px;
+            color: var(--text);
+            margin-bottom: 6px;
+            font-weight: 500;
+        }
+        .history-a {
+            font-size: 13px;
+            color: var(--text-2);
+            line-height: 1.6;
+            display: -webkit-box;
+            -webkit-line-clamp: 3;
+            -webkit-box-orient: vertical;
+            overflow: hidden;
+        }
+        .history-a.expanded {
+            display: block;
+            -webkit-line-clamp: unset;
+        }
+        .history-actions {
+            margin-top: 10px;
+            display: flex;
+            gap: 8px;
+        }
+        .feedback-type {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            font-size: 14px;
+            margin-bottom: 8px;
+        }
+        .feedback-text {
+            font-size: 13px;
+            color: var(--text-2);
+            margin-top: 6px;
+            padding: 10px 12px;
+            background: var(--surface-2);
+            border-radius: 8px;
+        }
+        .filter-tab {
+            border: none;
+            background: none;
+            padding: 4px 12px;
+            border-radius: 6px;
+            font: inherit;
+            font-size: 13px;
+            color: var(--text-2);
+            cursor: pointer;
+        }
+        .filter-tab.active {
+            background: var(--surface);
+            color: var(--text);
+            box-shadow: var(--shadow);
+        }
+    </style>
     <script>
     (async function () {
         // 登录态以 GET /api/auth/me 为准（HttpOnly cookie），未登录时 guard 已跳用户登录页
@@ -97,6 +211,7 @@
         // guard 已经拿到 /api/auth/me 的结果，直接渲染
         render(user);
 
+        // ===== 密码修改 =====
         var form = document.getElementById('pwdForm');
         var errEl = document.getElementById('pwdError');
         var btn = document.getElementById('pwdBtn');
@@ -129,6 +244,321 @@
                 btn.disabled = false;
             }
         });
+
+        // ===== 历史记录 Tab 切换 =====
+        var tabChat = document.getElementById('tabChat');
+        var tabFeedback = document.getElementById('tabFeedback');
+        var chatPane = document.getElementById('chatHistoryPane');
+        var feedbackPane = document.getElementById('feedbackHistoryPane');
+
+        tabChat.addEventListener('click', function () {
+            tabChat.classList.add('active');
+            tabFeedback.classList.remove('active');
+            chatPane.hidden = false;
+            feedbackPane.hidden = true;
+        });
+
+        tabFeedback.addEventListener('click', function () {
+            tabFeedback.classList.add('active');
+            tabChat.classList.remove('active');
+            feedbackPane.hidden = false;
+            chatPane.hidden = true;
+            if (!feedbackState.loaded) loadFeedbackHistory();
+        });
+
+        // ===== 我的对话 =====
+        var chatState = {
+            page: 1,
+            pageSize: 20,
+            keyword: '',
+            total: 0,
+            loading: false
+        };
+
+        var chatList = document.getElementById('chatHistoryList');
+        var chatPager = document.getElementById('chatPager');
+        var chatPageInfo = document.getElementById('chatPageInfo');
+        var chatPrevBtn = document.getElementById('chatPrevBtn');
+        var chatNextBtn = document.getElementById('chatNextBtn');
+        var chatSearchInput = document.getElementById('chatSearchInput');
+        var chatSearchBtn = document.getElementById('chatSearchBtn');
+        var chatResetBtn = document.getElementById('chatResetBtn');
+
+        async function loadChatHistory() {
+            if (chatState.loading) return;
+            chatState.loading = true;
+
+            try {
+                var params = { page: chatState.page, page_size: chatState.pageSize };
+                if (chatState.keyword) params.keyword = chatState.keyword;
+
+                var resp = await App.get('/api/user/chat-history' + App.qs(params));
+                chatState.total = resp.data.total || 0;
+                renderChatHistory(resp.data.items || []);
+                updateChatPager();
+            } catch (err) {
+                App.toast(err.message || '加载对话历史失败', 'error');
+                chatList.innerHTML = '<div class="empty">加载失败：' + App.escape(err.message) + '</div>';
+            } finally {
+                chatState.loading = false;
+            }
+        }
+
+        function renderChatHistory(items) {
+            if (items.length === 0) {
+                chatList.innerHTML = '<div class="empty">暂无对话记录</div>';
+                return;
+            }
+
+            var html = '';
+            items.forEach(function (item) {
+                var time = formatTime(item.created_at);
+                var question = App.escape(item.question || '');
+                var answer = App.escape(item.answer || '');
+                var answerId = 'answer-' + item.record_id;
+                var answerPreview = answer.length > 100 ? answer.slice(0, 100) + '...' : answer;
+
+                html += '<div class="history-item">';
+                html += '<div class="history-time">' + time + '</div>';
+                html += '<div class="history-q">Q: ' + question + '</div>';
+                html += '<div class="history-a" id="' + answerId + '">' + answerPreview + '</div>';
+                html += '<div class="history-actions">';
+                if (answer.length > 100) {
+                    html += '<button class="btn btn-link btn-sm toggle-answer" data-id="' + answerId + '" data-full="' + App.escape(answer) + '" data-preview="' + App.escape(answerPreview) + '">查看完整</button>';
+                }
+                html += '<button class="btn btn-link btn-sm feedback-like" data-record-id="' + item.record_id + '" data-session-id="' + App.escape(item.session_id || '') + '">👍 赞同</button>';
+                html += '<button class="btn btn-link btn-sm feedback-dislike" data-record-id="' + item.record_id + '" data-session-id="' + App.escape(item.session_id || '') + '">👎 不准确</button>';
+                html += '</div>';
+                html += '</div>';
+            });
+
+            chatList.innerHTML = html;
+        }
+
+        function updateChatPager() {
+            var totalPages = Math.ceil(chatState.total / chatState.pageSize);
+            if (totalPages <= 1) {
+                chatPager.hidden = true;
+                return;
+            }
+
+            chatPager.hidden = false;
+            chatPageInfo.textContent = '第 ' + chatState.page + ' / ' + totalPages + ' 页，共 ' + chatState.total + ' 条';
+            chatPrevBtn.disabled = chatState.page <= 1;
+            chatNextBtn.disabled = chatState.page >= totalPages;
+        }
+
+        chatPrevBtn.addEventListener('click', function () {
+            if (chatState.page > 1) {
+                chatState.page--;
+                loadChatHistory();
+            }
+        });
+
+        chatNextBtn.addEventListener('click', function () {
+            var totalPages = Math.ceil(chatState.total / chatState.pageSize);
+            if (chatState.page < totalPages) {
+                chatState.page++;
+                loadChatHistory();
+            }
+        });
+
+        chatSearchBtn.addEventListener('click', function () {
+            chatState.keyword = chatSearchInput.value.trim();
+            chatState.page = 1;
+            loadChatHistory();
+        });
+
+        chatResetBtn.addEventListener('click', function () {
+            chatSearchInput.value = '';
+            chatState.keyword = '';
+            chatState.page = 1;
+            loadChatHistory();
+        });
+
+        chatSearchInput.addEventListener('keydown', function (e) {
+            if (e.key === 'Enter') {
+                chatSearchBtn.click();
+            }
+        });
+
+        // 查看完整答案 / 反馈
+        chatList.addEventListener('click', function (e) {
+            if (e.target.classList.contains('toggle-answer')) {
+                var answerId = e.target.dataset.id;
+                var answerEl = document.getElementById(answerId);
+                var isExpanded = answerEl.classList.contains('expanded');
+
+                if (isExpanded) {
+                    answerEl.textContent = e.target.dataset.preview;
+                    answerEl.classList.remove('expanded');
+                    e.target.textContent = '查看完整';
+                } else {
+                    answerEl.textContent = e.target.dataset.full;
+                    answerEl.classList.add('expanded');
+                    e.target.textContent = '收起';
+                }
+            } else if (e.target.classList.contains('feedback-like')) {
+                submitChatFeedback(e.target.dataset.recordId, e.target.dataset.sessionId, 'like', '');
+            } else if (e.target.classList.contains('feedback-dislike')) {
+                var recordId = e.target.dataset.recordId;
+                var sessionId = e.target.dataset.sessionId;
+                var feedbackText = prompt('请描述哪里不准确（可选）：');
+                if (feedbackText !== null) {
+                    submitChatFeedback(recordId, sessionId, 'dislike', feedbackText);
+                }
+            }
+        });
+
+        async function submitChatFeedback(recordId, sessionId, type, text) {
+            try {
+                await App.post('/api/feedback', {
+                    session_id: sessionId,
+                    record_id: recordId,
+                    feedback_type: type,
+                    feedback_text: text
+                });
+                App.toast('感谢您的反馈！', 'success');
+            } catch (err) {
+                App.toast(err.message || '反馈提交失败', 'error');
+            }
+        }
+
+        // ===== 我的反馈 =====
+        var feedbackState = {
+            page: 1,
+            pageSize: 20,
+            feedbackType: '',
+            total: 0,
+            loading: false,
+            loaded: false
+        };
+
+        var feedbackList = document.getElementById('feedbackHistoryList');
+        var feedbackPager = document.getElementById('feedbackPager');
+        var feedbackPageInfo = document.getElementById('feedbackPageInfo');
+        var feedbackPrevBtn = document.getElementById('feedbackPrevBtn');
+        var feedbackNextBtn = document.getElementById('feedbackNextBtn');
+
+        // 筛选按钮
+        document.querySelectorAll('.filter-tab').forEach(function (tab) {
+            tab.addEventListener('click', function () {
+                document.querySelectorAll('.filter-tab').forEach(function (t) { t.classList.remove('active'); });
+                tab.classList.add('active');
+                feedbackState.feedbackType = tab.dataset.type;
+                feedbackState.page = 1;
+                loadFeedbackHistory();
+            });
+        });
+
+        async function loadFeedbackHistory() {
+            if (feedbackState.loading) return;
+            feedbackState.loading = true;
+            feedbackState.loaded = true;
+
+            try {
+                var params = { page: feedbackState.page, page_size: feedbackState.pageSize };
+                if (feedbackState.feedbackType) params.feedback_type = feedbackState.feedbackType;
+
+                var resp = await App.get('/api/user/feedback' + App.qs(params));
+                feedbackState.total = resp.data.total || 0;
+                renderFeedbackHistory(resp.data.items || []);
+                updateFeedbackPager();
+            } catch (err) {
+                App.toast(err.message || '加载反馈历史失败', 'error');
+                feedbackList.innerHTML = '<div class="empty">加载失败：' + App.escape(err.message) + '</div>';
+            } finally {
+                feedbackState.loading = false;
+            }
+        }
+
+        function renderFeedbackHistory(items) {
+            if (items.length === 0) {
+                feedbackList.innerHTML = '<div class="empty">暂无反馈记录</div>';
+                return;
+            }
+
+            var html = '';
+            items.forEach(function (item) {
+                var time = formatTime(item.created_at);
+                var typeIcon = item.feedback_type === 'like' ? '👍 点赞' : '👎 点踩';
+                var question = App.escape(item.question || '无相关问题');
+                var feedbackText = item.feedback_text ? App.escape(item.feedback_text) : '';
+
+                html += '<div class="history-item">';
+                html += '<div class="history-time">' + time + '</div>';
+                html += '<div class="feedback-type"><strong>' + typeIcon + '</strong></div>';
+                html += '<div class="history-q">Q: ' + question + '</div>';
+                if (feedbackText) {
+                    html += '<div class="feedback-text">反馈内容: ' + feedbackText + '</div>';
+                }
+                html += '</div>';
+            });
+
+            feedbackList.innerHTML = html;
+        }
+
+        function updateFeedbackPager() {
+            var totalPages = Math.ceil(feedbackState.total / feedbackState.pageSize);
+            if (totalPages <= 1) {
+                feedbackPager.hidden = true;
+                return;
+            }
+
+            feedbackPager.hidden = false;
+            feedbackPageInfo.textContent = '第 ' + feedbackState.page + ' / ' + totalPages + ' 页，共 ' + feedbackState.total + ' 条';
+            feedbackPrevBtn.disabled = feedbackState.page <= 1;
+            feedbackNextBtn.disabled = feedbackState.page >= totalPages;
+        }
+
+        feedbackPrevBtn.addEventListener('click', function () {
+            if (feedbackState.page > 1) {
+                feedbackState.page--;
+                loadFeedbackHistory();
+            }
+        });
+
+        feedbackNextBtn.addEventListener('click', function () {
+            var totalPages = Math.ceil(feedbackState.total / feedbackState.pageSize);
+            if (feedbackState.page < totalPages) {
+                feedbackState.page++;
+                loadFeedbackHistory();
+            }
+        });
+
+        // ===== 工具函数 =====
+        function formatTime(timeStr) {
+            if (!timeStr) return '-';
+            try {
+                var d = new Date(timeStr);
+                var now = new Date();
+                var diff = now - d;
+                var dayDiff = Math.floor(diff / 86400000);
+
+                if (dayDiff === 0) {
+                    var hours = d.getHours().toString().padStart(2, '0');
+                    var minutes = d.getMinutes().toString().padStart(2, '0');
+                    return '今天 ' + hours + ':' + minutes;
+                } else if (dayDiff === 1) {
+                    return '昨天';
+                } else if (dayDiff < 7) {
+                    return dayDiff + ' 天前';
+                } else {
+                    var year = d.getFullYear();
+                    var month = (d.getMonth() + 1).toString().padStart(2, '0');
+                    var day = d.getDate().toString().padStart(2, '0');
+                    if (year === now.getFullYear()) {
+                        return month + '-' + day;
+                    }
+                    return year + '-' + month + '-' + day;
+                }
+            } catch (e) {
+                return timeStr;
+            }
+        }
+
+        // 初始化加载对话历史
+        loadChatHistory();
     })();
     </script>
 </body>

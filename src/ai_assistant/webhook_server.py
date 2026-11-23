@@ -336,19 +336,21 @@ class WebhookServer:
 
     def _register_api_blueprints(self):
         """
-        注册 API Blueprint（认证、管理员、数据查询接口）
+        注册 API Blueprint（认证、管理员、数据查询接口、用户个人接口）
 
         这些接口通过服务端会话鉴权，始终注册（不受 web_frontend_enabled 影响）
         """
         from ai_assistant.api.auth import auth_bp
         from ai_assistant.api.admin import admin_bp
         from ai_assistant.api.data import data_bp
+        from ai_assistant.api.user import user_bp
 
         self.app.register_blueprint(auth_bp)
         self.app.register_blueprint(admin_bp)
         self.app.register_blueprint(data_bp)
+        self.app.register_blueprint(user_bp)
 
-        logger.info("API Blueprint 已注册（认证、管理员、数据查询接口）")
+        logger.info("API Blueprint 已注册（认证、管理员、数据查询接口、用户个人接口）")
 
     def set_api_components(
         self,
@@ -356,7 +358,7 @@ class WebhookServer:
         chat_history_manager
     ):
         """
-        设置 API 组件（用于认证和数据查询接口）
+        设置 API 组件（用于认证、数据查询和用户个人接口）
 
         Args:
             user_manager: UserManager 实例
@@ -365,6 +367,7 @@ class WebhookServer:
         from ai_assistant.api.auth import init_auth
         from ai_assistant.api.admin import init_admin
         from ai_assistant.api.data import init_data
+        from ai_assistant.api.user import init_user
         from ai_assistant.core.chat_history_db import ChatHistoryDBQuery
         from ai_assistant.core.feedback_db_query import FeedbackDBQuery
 
@@ -379,6 +382,7 @@ class WebhookServer:
         init_auth(user_manager)
         init_admin(user_manager)
         init_data(chat_history_db_query, feedback_db_query, user_manager)
+        init_user(chat_history_db_query, feedback_db_query, user_manager)
 
         logger.info("API 组件已注入（UserManager, ChatHistoryDBQuery, FeedbackDBQuery）")
 
