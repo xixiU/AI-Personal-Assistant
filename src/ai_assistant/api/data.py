@@ -153,12 +153,15 @@ def get_chat_history():
             keyword=keyword
         )
 
-        # 批量检查反馈状态
+        # 批量检查反馈状态和类型
         if records and _feedback_manager:
             record_ids = [r['record_id'] for r in records]
-            has_feedback_map = _feedback_manager.check_has_feedback(record_ids)
+            feedback_types = _feedback_manager.get_feedback_types(record_ids)
             for record in records:
-                record['has_feedback'] = has_feedback_map.get(record['record_id'], False)
+                rid = record['record_id']
+                feedback_type = feedback_types.get(rid)
+                record['has_feedback'] = feedback_type is not None
+                record['feedback_type'] = feedback_type  # 'like'/'dislike'/None
 
         logger.info(f"查询问答历史: page={page}, user_id={user_id}, session={session_id}, keyword={keyword}, total={total}")
 

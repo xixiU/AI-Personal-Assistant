@@ -381,9 +381,15 @@ def get_stats():
         total_questions = _chat_history_db.count()
         total_conversations = _chat_history_db.count()  # 暂时与问答数相同，后续可按 session 去重
         active_users = _chat_history_db.get_active_users_count(days=days)
-        total_feedbacks = _feedback_manager.count()
 
-        # 计算反馈率
+        # 获取反馈统计（包含点赞/点踩数量）
+        feedback_stats = _feedback_manager.get_stats()
+        total_feedbacks = _feedback_manager.count()
+        like_count = feedback_stats.get('like_count', 0)
+        dislike_count = feedback_stats.get('dislike_count', 0)
+        like_rate = feedback_stats.get('like_rate', 0.0)
+
+        # 计算反馈率（有反馈的问答数 / 总问答数）
         feedback_rate = total_feedbacks / total_questions if total_questions > 0 else 0.0
 
         summary = {
@@ -391,7 +397,10 @@ def get_stats():
             "total_conversations": total_conversations,
             "active_users": active_users,
             "total_feedbacks": total_feedbacks,
-            "feedback_rate": round(feedback_rate, 2)
+            "feedback_rate": round(feedback_rate, 2),
+            "like_count": like_count,
+            "dislike_count": dislike_count,
+            "like_rate": like_rate
         }
 
         # 2. 每日问答趋势

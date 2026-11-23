@@ -242,15 +242,15 @@ class FeedbackDBQuery:
                 "like_rate": 0.0
             }
 
-    def check_has_feedback(self, record_ids: List[str]) -> Dict[str, bool]:
+    def get_feedback_types(self, record_ids: List[str]) -> Dict[str, Optional[str]]:
         """
-        批量检查记录是否有反馈
+        批量获取记录的反馈类型
 
         Args:
             record_ids: 记录 ID 列表
 
         Returns:
-            {record_id: has_feedback} 字典
+            {record_id: feedback_type} 字典，feedback_type 为 'like'/'dislike'/None
         """
         if not record_ids:
             return {}
@@ -258,16 +258,41 @@ class FeedbackDBQuery:
         try:
             with self.db_manager.get_session() as session:
                 # 查询这些 record_id 的反馈
-                query_obj = session.query(FeedbackDB.record_id).filter(
+                query_obj = session.query(
+                    FeedbackDB.record_id,
+                    FeedbackDB.feedback_type
+                ).filter(
                     FeedbackDB.record_id.in_(record_ids)
-                ).distinct()
+                )
 
                 results = query_obj.all()
 
                 # 构建结果字典
-                has_feedback_set = {row.record_id for row in results}
-                return {rid: (rid in has_feedback_set) for rid in record_ids}
+                feedback_map = {}
+                for record_id, feedback_type in results:
+                    # 转换枚举为字符串
+                    feedback_map[record_id] = feedback_type.value if feedback_type else None
+
+                # 对于没有反馈的记录，返回 None
+                for rid in record_ids:
+                    if rid not in feedback_map:
+                        feedback_map[rid] = None
+
+                return feedback_map
 
         except Exception as e:
-            logger.error(f"批量检查反馈失败: {e}", exc_info=True)
-            return {rid: False for rid in record_ids}
+            logger.error(f"批量获取反馈类型失败: {e}", exc_info=True)
+            return {rid: None for rid in record_ids}
+
+    def check_has_feedback(self, record_ids: List[str]) -> Dict[str, bool]:
+        """
+        批量检查记录是否有反馈（向后兼容方法）
+
+        Args:
+            record_ids: 记录 ID 列表
+
+        Returns:
+            {record_id: has_feedback} 字典
+        """
+        feedback_types = self.get_feedback_types(record_ids)
+        return {rid: (ftype is not None) for rid, ftype in feedback_types.items()}
