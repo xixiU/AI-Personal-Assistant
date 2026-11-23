@@ -192,6 +192,7 @@ class ChatHistoryDBQuery:
 
         Returns:
             每日统计列表，格式: [{"date": "2024-01-01", "count": 100}, ...]
+            注意：会补全空白日期（count=0）
         """
         try:
             with self.db_manager.get_session() as session:
@@ -210,11 +211,23 @@ class ChatHistoryDBQuery:
 
                 results = query_obj.all()
 
-                # 转换为字典列表
-                return [
-                    {"date": str(row.date), "count": row.count}
-                    for row in results
-                ]
+                # 构建日期到计数的映射
+                data_map = {str(row.date): row.count for row in results}
+
+                # 补全所有日期（包括没有数据的日期）
+                complete_data = []
+                current_date = start_date.date()
+                end_date = datetime.now().date()
+
+                while current_date <= end_date:
+                    date_str = str(current_date)
+                    complete_data.append({
+                        "date": date_str,
+                        "count": data_map.get(date_str, 0)
+                    })
+                    current_date += timedelta(days=1)
+
+                return complete_data
 
         except Exception as e:
             logger.error(f"获取每日统计失败: {e}", exc_info=True)
