@@ -97,7 +97,8 @@ class AIAssistant:
 
         # 初始化反馈管理器
         from ai_assistant.core.feedback_manager import FeedbackManager
-        self.feedback_manager = FeedbackManager()
+
+        # 注意：先初始化数据库，再初始化 FeedbackManager（需要 db_manager）
 
         # 初始化数据库和用户管理器
         from ai_assistant.core.database import DatabaseManager
@@ -122,6 +123,9 @@ class AIAssistant:
         )
 
         logger.info("数据库和用户管理器初始化完成")
+
+        # 初始化 FeedbackManager（启用双写）
+        self.feedback_manager = FeedbackManager(db_manager=self.db_manager)
 
         # 初始化 AI Provider
         provider_type = self.config.ai_primary_provider
@@ -274,11 +278,12 @@ class AIAssistant:
             notification=self.config.reply_notification
         )
 
-        # 初始化对话历史管理器
+        # 初始化对话历史管理器（启用双写）
         from ai_assistant.core.chat_history import ChatHistoryManager
         if getattr(self.config, 'chat_history_enabled', True):
             self.chat_history = ChatHistoryManager(
-                history_dir=getattr(self.config, 'chat_history_dir', './data/chat_history')
+                history_dir=getattr(self.config, 'chat_history_dir', './data/chat_history'),
+                db_manager=self.db_manager  # 启用双写
             )
             # 设置到 AIProvider 基类（所有渠道共享）
             from ai_assistant.core.ai_provider import AIProvider
@@ -1970,7 +1975,10 @@ class AIAssistant:
                 # 更新历史记录中的 message_id（用于容器重启后通过 message_id 精确查找）
                 try:
                     from ai_assistant.core.chat_history import ChatHistoryManager
-                    history_mgr = ChatHistoryManager(history_dir="data/chat_history")
+                    history_mgr = ChatHistoryManager(
+                        history_dir="data/chat_history",
+                        db_manager=self.db_manager  # 启用双写
+                    )
                     history_mgr.update_message_id(record_id, new_message_id)
                 except Exception as e:
                     logger.warning(f"更新历史记录 message_id 失败（不影响回复）: {e}")
