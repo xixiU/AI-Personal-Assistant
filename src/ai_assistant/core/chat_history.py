@@ -107,19 +107,22 @@ class ChatHistoryManager:
                 raise  # 文件写入失败则抛出异常
 
         # 2. 再写数据库（辅助查询，失败不影响）
-        if self.db_manager:
+        if self.db_manager and user_id:
             try:
                 from ai_assistant.models import ChatHistoryDB
 
                 # 创建数据库记录
                 db_record = ChatHistoryDB.from_jsonl_record(record)
 
+                # 覆盖 user_id 为 UUID
+                db_record.user_id = user_id  # 使用传入的 user_id（UUID）
+
                 # 写入数据库
                 with self.db_manager.get_session() as session:
                     session.add(db_record)
                     session.commit()
 
-                logger.debug(f"数据库写入成功: record_id={record_id}")
+                logger.debug(f"数据库写入成功: record_id={record_id}, user_id={user_id[:8]}...")
             except Exception as e:
                 # 数据库写入失败不阻塞流程，记录错误日志
                 logger.error(f"数据库写入失败（文件已保存）: record_id={record_id}, error={e}", exc_info=True)
