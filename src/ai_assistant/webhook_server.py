@@ -353,28 +353,34 @@ class WebhookServer:
     def set_api_components(
         self,
         user_manager,
-        chat_history_db
+        chat_history_manager
     ):
         """
         设置 API 组件（用于认证和数据查询接口）
 
         Args:
             user_manager: UserManager 实例
-            chat_history_db: ChatHistoryDB 实例
+            chat_history_manager: ChatHistoryManager 实例（JSONL 管理器）
         """
         from ai_assistant.api.auth import init_auth
         from ai_assistant.api.admin import init_admin
         from ai_assistant.api.data import init_data
+        from ai_assistant.core.chat_history_db import ChatHistoryDBQuery
+        from ai_assistant.core.feedback_db_query import FeedbackDBQuery
 
         self.user_manager = user_manager
-        self.chat_history_db = chat_history_db
+
+        # 创建数据库查询实例（需要从 user_manager 获取 db_manager）
+        db_manager = user_manager.db_manager
+        chat_history_db_query = ChatHistoryDBQuery(db_manager)
+        feedback_db_query = FeedbackDBQuery(db_manager)
 
         # 初始化各个 API 模块
         init_auth(user_manager)
         init_admin(user_manager)
-        init_data(chat_history_db, self.feedback_manager, user_manager)
+        init_data(chat_history_db_query, feedback_db_query, user_manager)
 
-        logger.info("API 组件已注入（UserManager, ChatHistoryDB）")
+        logger.info("API 组件已注入（UserManager, ChatHistoryDBQuery, FeedbackDBQuery）")
 
     def set_feishu_adapter(self, adapter):
         """

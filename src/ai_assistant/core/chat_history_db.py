@@ -1,0 +1,368 @@
+"""
+对话历史数据库查询模块
+
+提供对 chat_history 表的查询、统计功能
+支持分页、过滤、排序等操作
+"""
+
+from datetime import datetime, timedelta
+from typing import List, Dict, Optional
+from sqlalchemy import func, desc, or_
+from loguru import logger
+
+from ai_assistant.core.database import DatabaseManager
+from ai_assistant.models.chat_history_db import ChatHistoryDB
+
+
+class ChatHistoryDBQuery:
+    """对话历史数据库查询类"""
+
+    def __init__(self, db_manager: DatabaseManager):
+        """
+        初始化查询类
+
+        Args:
+            db_manager: 数据库管理器
+        """
+        self.db_manager = db_manager
+        logger.info("对话历史数据库查询模块初始化完成")
+
+    def query(
+        self,
+        user_id: Optional[str] = None,
+        session_id: Optional[str] = None,
+        start_time: Optional[str] = None,
+        end_time: Optional[str] = None,
+        source: Optional[str] = None,
+        keyword: Optional[str] = None,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> List[Dict]:
+        """
+        查询对话历史记录
+
+        Args:
+            user_id: 用户 ID 过滤
+            session_id: 会话 ID 过滤
+            start_time: 开始时间（ISO 8601 格式）
+            end_time: 结束时间（ISO 8601 格式）
+            source: 来源过滤（feishu/web/wechat）
+            keyword: 关键词搜索（在 query 或 answer 中模糊匹配）
+            limit: 返回记录数上限
+            offset: 偏移量（分页用）
+
+        Returns:
+            记录列表，每条记录包含对话历史和反馈状态
+        """
+        try:
+            with self.db_manager.get_session() as session:
+                # 构建查询
+                query_obj = session.query(ChatHistoryDB)
+
+                # 应用过滤条件
+                if user_id:
+                    query_obj = query_obj.filter(ChatHistoryDB.user_id == user_id)
+                if session_id:
+                    query_obj = query_obj.filter(ChatHistoryDB.session_id == session_id)
+                if source:
+                    query_obj = query_obj.filter(ChatHistoryDB.source == source)
+
+                # 时间范围过滤
+                if start_time:
+                    try:
+                        start_dt = datetime.fromisoformat(start_time.replace('Z', '+00:00'))
+                        query_obj = query_obj.filter(ChatHistoryDB.timestamp >= start_dt)
+                    except ValueError:
+                        logger.warning(f"无效的 start_time 格式: {start_time}")
+
+                if end_time:
+                    try:
+                        end_dt = datetime.fromisoformat(end_time.replace('Z', '+00:00'))
+                        query_obj = query_obj.filter(ChatHistoryDB.timestamp <= end_dt)
+                    except ValueError:
+                        logger.warning(f"无效的 end_time 格式: {end_time}")
+
+                # 关键词搜索（在 query 或 answer 中模糊匹配）
+                if keyword:
+                    search_pattern = f"%{keyword}%"
+                    query_obj = query_obj.filter(
+                        or_(
+                            ChatHistoryDB.query.like(search_pattern),
+                            ChatHistoryDB.answer.like(search_pattern)
+                        )
+                    )
+
+                # 按时间倒序排序（最新的在前）
+                query_obj = query_obj.order_by(desc(ChatHistoryDB.timestamp))
+
+                # 分页
+                query_obj = query_obj.limit(limit).offset(offset)
+
+                # 执行查询
+                records = query_obj.all()
+
+                # 转换为字典列表
+                result = []
+                for record in records:
+                    record_dict = record.to_dict()
+                    # 添加 has_feedback 字段（需要关联查询 feedback 表）
+                    # 这里先设置为 False，实际值需要在 API 层补充
+                    record_dict['has_feedback'] = False
+                    result.append(record_dict)
+
+                return result
+
+        except Exception as e:
+            logger.error(f"查询对话历史失败: {e}", exc_info=True)
+            return []
+
+    def count(
+        self,
+        user_id: Optional[str] = None,
+        session_id: Optional[str] = None,
+        start_time: Optional[str] = None,
+        end_time: Optional[str] = None,
+        source: Optional[str] = None,
+        keyword: Optional[str] = None,
+    ) -> int:
+        """
+        统计符合条件的记录数
+
+        Args:
+            user_id: 用户 ID 过滤
+            session_id: 会话 ID 过滤
+            start_time: 开始时间
+            end_time: 结束时间
+            source: 来源过滤
+            keyword: 关键词搜索
+
+        Returns:
+            记录总数
+        """
+        try:
+            with self.db_manager.get_session() as session:
+                # 构建查询
+                query_obj = session.query(func.count(ChatHistoryDB.record_id))
+
+                # 应用过滤条件（与 query 方法相同）
+                if user_id:
+                    query_obj = query_obj.filter(ChatHistoryDB.user_id == user_id)
+                if session_id:
+                    query_obj = query_obj.filter(ChatHistoryDB.session_id == session_id)
+                if source:
+                    query_obj = query_obj.filter(ChatHistoryDB.source == source)
+
+                if start_time:
+                    try:
+                        start_dt = datetime.fromisoformat(start_time.replace('Z', '+00:00'))
+                        query_obj = query_obj.filter(ChatHistoryDB.timestamp >= start_dt)
+                    except ValueError:
+                        pass
+
+                if end_time:
+                    try:
+                        end_dt = datetime.fromisoformat(end_time.replace('Z', '+00:00'))
+                        query_obj = query_obj.filter(ChatHistoryDB.timestamp <= end_dt)
+                    except ValueError:
+                        pass
+
+                if keyword:
+                    search_pattern = f"%{keyword}%"
+                    query_obj = query_obj.filter(
+                        or_(
+                            ChatHistoryDB.query.like(search_pattern),
+                            ChatHistoryDB.answer.like(search_pattern)
+                        )
+                    )
+
+                # 执行统计
+                total = query_obj.scalar()
+                return total or 0
+
+        except Exception as e:
+            logger.error(f"统计对话历史失败: {e}", exc_info=True)
+            return 0
+
+    def get_daily_stats(self, days: int = 7) -> List[Dict]:
+        """
+        获取每日问答趋势统计
+
+        Args:
+            days: 统计最近 N 天
+
+        Returns:
+            每日统计列表，格式: [{"date": "2024-01-01", "count": 100}, ...]
+        """
+        try:
+            with self.db_manager.get_session() as session:
+                # 计算开始日期
+                start_date = datetime.now() - timedelta(days=days)
+
+                # 按日期分组统计
+                query_obj = session.query(
+                    func.date(ChatHistoryDB.timestamp).label('date'),
+                    func.count(ChatHistoryDB.record_id).label('count')
+                ).filter(
+                    ChatHistoryDB.timestamp >= start_date
+                ).group_by(
+                    func.date(ChatHistoryDB.timestamp)
+                ).order_by('date')
+
+                results = query_obj.all()
+
+                # 转换为字典列表
+                return [
+                    {"date": str(row.date), "count": row.count}
+                    for row in results
+                ]
+
+        except Exception as e:
+            logger.error(f"获取每日统计失败: {e}", exc_info=True)
+            return []
+
+    def get_top_questions(self, limit: int = 10, days: int = 30) -> List[Dict]:
+        """
+        获取高频问题 Top N
+
+        Args:
+            limit: 返回记录数
+            days: 统计最近 N 天
+
+        Returns:
+            高频问题列表，格式: [{"query": "...", "count": 50}, ...]
+        """
+        try:
+            with self.db_manager.get_session() as session:
+                # 计算开始日期
+                start_date = datetime.now() - timedelta(days=days)
+
+                # 按问题内容分组统计
+                query_obj = session.query(
+                    ChatHistoryDB.query,
+                    func.count(ChatHistoryDB.record_id).label('count')
+                ).filter(
+                    ChatHistoryDB.timestamp >= start_date
+                ).group_by(
+                    ChatHistoryDB.query
+                ).order_by(
+                    desc('count')
+                ).limit(limit)
+
+                results = query_obj.all()
+
+                # 转换为字典列表
+                return [
+                    {"query": row.query, "count": row.count}
+                    for row in results
+                ]
+
+        except Exception as e:
+            logger.error(f"获取高频问题失败: {e}", exc_info=True)
+            return []
+
+    def get_top_users(self, limit: int = 10, days: int = 30) -> List[Dict]:
+        """
+        获取活跃用户 Top N
+
+        Args:
+            limit: 返回记录数
+            days: 统计最近 N 天
+
+        Returns:
+            活跃用户列表，格式: [{"user_name": "...", "count": 30}, ...]
+        """
+        try:
+            with self.db_manager.get_session() as session:
+                # 计算开始日期
+                start_date = datetime.now() - timedelta(days=days)
+
+                # 按用户分组统计
+                query_obj = session.query(
+                    ChatHistoryDB.user_name,
+                    func.count(ChatHistoryDB.record_id).label('count')
+                ).filter(
+                    ChatHistoryDB.timestamp >= start_date,
+                    ChatHistoryDB.user_name.isnot(None),
+                    ChatHistoryDB.user_name != ''
+                ).group_by(
+                    ChatHistoryDB.user_name
+                ).order_by(
+                    desc('count')
+                ).limit(limit)
+
+                results = query_obj.all()
+
+                # 转换为字典列表
+                return [
+                    {"user_name": row.user_name, "count": row.count}
+                    for row in results
+                ]
+
+        except Exception as e:
+            logger.error(f"获取活跃用户失败: {e}", exc_info=True)
+            return []
+
+    def get_source_distribution(self, days: int = 30) -> Dict[str, int]:
+        """
+        获取来源分布统计
+
+        Args:
+            days: 统计最近 N 天
+
+        Returns:
+            来源分布字典，格式: {"feishu": 100, "web": 50, "wechat": 20}
+        """
+        try:
+            with self.db_manager.get_session() as session:
+                # 计算开始日期
+                start_date = datetime.now() - timedelta(days=days)
+
+                # 按来源分组统计
+                query_obj = session.query(
+                    ChatHistoryDB.source,
+                    func.count(ChatHistoryDB.record_id).label('count')
+                ).filter(
+                    ChatHistoryDB.timestamp >= start_date
+                ).group_by(
+                    ChatHistoryDB.source
+                )
+
+                results = query_obj.all()
+
+                # 转换为字典
+                return {row.source: row.count for row in results}
+
+        except Exception as e:
+            logger.error(f"获取来源分布失败: {e}", exc_info=True)
+            return {}
+
+    def get_active_users_count(self, days: int = 30) -> int:
+        """
+        获取活跃用户数（近 N 天有提问的用户数）
+
+        Args:
+            days: 统计最近 N 天
+
+        Returns:
+            活跃用户数
+        """
+        try:
+            with self.db_manager.get_session() as session:
+                # 计算开始日期
+                start_date = datetime.now() - timedelta(days=days)
+
+                # 统计不重复的 user_id
+                query_obj = session.query(
+                    func.count(func.distinct(ChatHistoryDB.user_id))
+                ).filter(
+                    ChatHistoryDB.timestamp >= start_date,
+                    ChatHistoryDB.user_id.isnot(None),
+                    ChatHistoryDB.user_id != ''
+                )
+
+                total = query_obj.scalar()
+                return total or 0
+
+        except Exception as e:
+            logger.error(f"获取活跃用户数失败: {e}", exc_info=True)
+            return 0

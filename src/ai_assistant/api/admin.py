@@ -331,6 +331,97 @@ def delete_user(user_id: str):
     return jsonify(error_response("不支持删除操作，请使用停用功能", "METHOD_NOT_ALLOWED")), 405
 
 
+@admin_bp.route('/stats', methods=['GET'])
+def get_stats():
+    """
+    获取管理后台数据统计
+
+    请求参数：
+    - range: 统计范围（可选，7d/30d/90d，默认 7d）
+
+    响应：
+    {
+        "success": true,
+        "message": "Success",
+        "data": {
+            "summary": {
+                "total_questions": int,
+                "total_conversations": int,
+                "active_users": int,
+                "total_feedbacks": int,
+                "feedback_rate": float
+            },
+            "daily": [{"date": "2024-01-01", "count": 100}, ...],
+            "top_questions": [{"query": "...", "count": 50}, ...],
+            "top_users": [{"user_name": "...", "count": 30}, ...],
+            "sources": {"feishu": 100, "web": 50, "wechat": 20},
+            "range": "7d"
+        }
+    }
+    """
+    try:
+        # 获取查询参数
+        range_param = request.args.get('range', '7d', type=str)
+
+        # 参数验证
+        if range_param not in ['7d', '30d', '90d']:
+            return jsonify(error_response("范围参数无效", "INVALID_PARAMETER")), 400
+
+        # 解析天数
+        days_map = {'7d': 7, '30d': 30, '90d': 90}
+        days = days_map[range_param]
+
+        # 需要注入的数据库查询模块
+        from ai_assistant.api.data import _chat_history_db, _feedback_manager
+
+        if not _chat_history_db or not _feedback_manager:
+            return jsonify(error_response("数据服务未初始化", "SERVICE_UNAVAILABLE")), 503
+
+        # 1. 汇总统计
+        total_questions = _chat_history_db.count()
+        total_conversations = _chat_history_db.count()  # 暂时与问答数相同，后续可按 session 去重
+        active_users = _chat_history_db.get_active_users_count(days=days)
+        total_feedbacks = _feedback_manager.count()
+
+        # 计算反馈率
+        feedback_rate = total_feedbacks / total_questions if total_questions > 0 else 0.0
+
+        summary = {
+            "total_questions": total_questions,
+            "total_conversations": total_conversations,
+            "active_users": active_users,
+            "total_feedbacks": total_feedbacks,
+            "feedback_rate": round(feedback_rate, 2)
+        }
+
+        # 2. 每日问答趋势
+        daily = _chat_history_db.get_daily_stats(days=days)
+
+        # 3. 高频问题 Top 10
+        top_questions = _chat_history_db.get_top_questions(limit=10, days=days)
+
+        # 4. 活跃用户 Top 10
+        top_users = _chat_history_db.get_top_users(limit=10, days=days)
+
+        # 5. 来源分布
+        sources = _chat_history_db.get_source_distribution(days=days)
+
+        logger.info(f"查询管理后台统计: range={range_param}, total_questions={total_questions}")
+
+        return jsonify(success_response({
+            "summary": summary,
+            "daily": daily,
+            "top_questions": top_questions,
+            "top_users": top_users,
+            "sources": sources,
+            "range": range_param
+        })), 200
+
+    except Exception as e:
+        logger.error(f"查询管理后台统计异常: {e}", exc_info=True)
+        return jsonify(error_response("服务器内部错误", "INTERNAL_ERROR")), 500
+
+
 @admin_bp.route('/users/<user_id>/reset-password', methods=['POST'])
 def reset_user_password(user_id: str):
     """

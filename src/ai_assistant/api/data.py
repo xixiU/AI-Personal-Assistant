@@ -25,8 +25,8 @@ def init_data(chat_history_db, feedback_manager, user_manager):
     初始化数据查询模块
 
     Args:
-        chat_history_db: ChatHistoryDB 实例
-        feedback_manager: FeedbackManager 实例
+        chat_history_db: ChatHistoryDBQuery 实例（数据库查询类）
+        feedback_manager: FeedbackDBQuery 实例（数据库查询类）
         user_manager: UserManager 实例
     """
     global _chat_history_db, _feedback_manager, _user_manager
@@ -75,7 +75,8 @@ def get_chat_history():
     - session_id: 会话 ID 过滤（可选）
     - start_time: 开始时间（可选，ISO 8601 格式）
     - end_time: 结束时间（可选，ISO 8601 格式）
-    - source: 来源过滤（可选，feishu/web）
+    - source: 来源过滤（可选，feishu/web/wechat）
+    - keyword: 关键词搜索（可选，在 query 或 answer 中模糊匹配）
 
     响应：
     {
@@ -111,13 +112,14 @@ def get_chat_history():
         start_time = request.args.get('start_time', None, type=str)
         end_time = request.args.get('end_time', None, type=str)
         source = request.args.get('source', None, type=str)
+        keyword = request.args.get('keyword', None, type=str)
 
         # 参数验证
         if page < 1:
             return jsonify(error_response("页码必须大于 0", "INVALID_PARAMETER")), 400
         if page_size < 1 or page_size > 100:
             return jsonify(error_response("每页数量必须在 1-100 之间", "INVALID_PARAMETER")), 400
-        if source and source not in ['feishu', 'web']:
+        if source and source not in ['feishu', 'web', 'wechat']:
             return jsonify(error_response("来源参数无效", "INVALID_PARAMETER")), 400
 
         # 权限检查：普通用户只能查自己的数据
@@ -131,24 +133,34 @@ def get_chat_history():
         if not _chat_history_db:
             return jsonify(error_response("问答历史服务未初始化", "SERVICE_UNAVAILABLE")), 503
 
-        # TODO: 等待 Backend-DB-Agent 实现查询方法
-        # offset = (page - 1) * page_size
-        # records = _chat_history_db.query(
-        #     user_id=user_id,
-        #     session_id=session_id,
-        #     start_time=start_time,
-        #     end_time=end_time,
-        #     source=source,
-        #     limit=page_size,
-        #     offset=offset
-        # )
-        # total = _chat_history_db.count(...)
+        offset = (page - 1) * page_size
+        records = _chat_history_db.query(
+            user_id=user_id,
+            session_id=session_id,
+            start_time=start_time,
+            end_time=end_time,
+            source=source,
+            keyword=keyword,
+            limit=page_size,
+            offset=offset
+        )
+        total = _chat_history_db.count(
+            user_id=user_id,
+            session_id=session_id,
+            start_time=start_time,
+            end_time=end_time,
+            source=source,
+            keyword=keyword
+        )
 
-        logger.warning(f"查询问答历史（待实现）: page={page}, user_id={user_id}, session={session_id}")
+        # 批量检查反馈状态
+        if records and _feedback_manager:
+            record_ids = [r['record_id'] for r in records]
+            has_feedback_map = _feedback_manager.check_has_feedback(record_ids)
+            for record in records:
+                record['has_feedback'] = has_feedback_map.get(record['record_id'], False)
 
-        # 临时返回空数据
-        records = []
-        total = 0
+        logger.info(f"查询问答历史: page={page}, user_id={user_id}, session={session_id}, keyword={keyword}, total={total}")
 
         return jsonify(success_response({
             "records": records,
@@ -176,7 +188,7 @@ def get_feedback():
     - feedback_type: 反馈类型过滤（可选，like/dislike）
     - start_time: 开始时间（可选，ISO 8601 格式）
     - end_time: 结束时间（可选，ISO 8601 格式）
-    - source: 来源过滤（可选，feishu/web）
+    - source: 来源过滤（可选，feishu/web/wechat）
 
     响应：
     {
@@ -227,7 +239,7 @@ def get_feedback():
             return jsonify(error_response("每页数量必须在 1-100 之间", "INVALID_PARAMETER")), 400
         if feedback_type and feedback_type not in ['like', 'dislike']:
             return jsonify(error_response("反馈类型参数无效", "INVALID_PARAMETER")), 400
-        if source and source not in ['feishu', 'web']:
+        if source and source not in ['feishu', 'web', 'wechat']:
             return jsonify(error_response("来源参数无效", "INVALID_PARAMETER")), 400
 
         # 权限检查：普通用户只能查自己的数据
@@ -241,31 +253,36 @@ def get_feedback():
         if not _feedback_manager:
             return jsonify(error_response("反馈服务未初始化", "SERVICE_UNAVAILABLE")), 503
 
-        # TODO: 等待 Backend-DB-Agent 实现查询方法
-        # offset = (page - 1) * page_size
-        # feedbacks = _feedback_manager.query(
-        #     user_id=user_id,
-        #     session_id=session_id,
-        #     feedback_type=feedback_type,
-        #     start_time=start_time,
-        #     end_time=end_time,
-        #     source=source,
-        #     limit=page_size,
-        #     offset=offset
-        # )
-        # total = _feedback_manager.count(...)
-        # stats = _feedback_manager.get_stats(...)
+        offset = (page - 1) * page_size
+        feedbacks = _feedback_manager.query(
+            user_id=user_id,
+            session_id=session_id,
+            feedback_type=feedback_type,
+            start_time=start_time,
+            end_time=end_time,
+            source=source,
+            limit=page_size,
+            offset=offset
+        )
+        total = _feedback_manager.count(
+            user_id=user_id,
+            session_id=session_id,
+            feedback_type=feedback_type,
+            start_time=start_time,
+            end_time=end_time,
+            source=source
+        )
+        stats = _feedback_manager.get_stats(
+            user_id=user_id,
+            session_id=session_id,
+            start_time=start_time,
+            end_time=end_time,
+            source=source
+        )
 
-        logger.warning(f"查询反馈数据（待实现）: page={page}, user_id={user_id}, type={feedback_type}")
-
-        # 临时返回空数据
-        feedbacks = []
-        total = 0
-        stats = {
-            "like_count": 0,
-            "dislike_count": 0,
-            "like_rate": 0.0
-        }
+        # 如果需要关联查询对话记录的 query 和 response，可以在这里补充
+        # 当前先返回反馈记录本身
+        logger.info(f"查询反馈数据: page={page}, user_id={user_id}, type={feedback_type}, total={total}")
 
         return jsonify(success_response({
             "feedbacks": feedbacks,
