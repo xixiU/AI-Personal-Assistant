@@ -70,6 +70,11 @@
                         <button type="button" data-tab="feedback">反馈记录</button>
                     </div>
                     <div class="toolbar">
+                        <select class="select" id="fUserId">
+                            <option value="">全部用户</option>
+                        </select>
+                        <input type="date" class="input" id="fStartDate" placeholder="开始时间">
+                        <input type="date" class="input" id="fEndDate" placeholder="结束时间">
                         <select class="select" id="fSource">
                             <option value="">全部来源</option>
                             <option value="web">Web</option>
@@ -82,7 +87,6 @@
                             <option value="dislike">点踩</option>
                         </select>
                         <input class="input" id="fKeyword" placeholder="问题关键词（仅问答历史）">
-                        <input class="input" id="fUserId" placeholder="用户 ID（可选）">
                         <button class="btn btn-ghost" id="fSearch" type="button">查询</button>
                     </div>
                 </div>
