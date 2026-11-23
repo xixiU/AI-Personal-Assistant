@@ -1833,18 +1833,23 @@ class AIAssistant:
             logger.debug(f"飞书用户已注册: open_id={feishu_open_id[:8]}...")
             return
 
-        # 获取用户完整信息（尝试提取域账号）
+        # 获取用户完整信息（优先使用 user_id 作为域账号）
         username = None
         display_name = feishu_user_name or "飞书用户"
 
         try:
             user_info = adapter.get_user_info(feishu_open_id)
             if user_info:
-                # 尝试从邮箱提取域账号（优先使用 enterprise_email，其次 email）
-                email = user_info.get('enterprise_email') or user_info.get('email', '')
-                if email and '@' in email:
-                    username = email.split('@')[0]
-                    logger.info(f"从邮箱提取域账号: email={email}, username={username}")
+                # 优先使用 user_id（这就是域账号）
+                username = user_info.get('user_id', '').strip()
+                if username:
+                    logger.info(f"使用飞书 user_id 作为域账号: username={username}")
+                else:
+                    # 降级方案1：从邮箱提取域账号
+                    email = user_info.get('enterprise_email') or user_info.get('email', '')
+                    if email and '@' in email:
+                        username = email.split('@')[0]
+                        logger.info(f"从邮箱提取域账号: email={email}, username={username}")
 
                 # 更新显示名称（使用中文名）
                 if user_info.get('name'):
@@ -1852,14 +1857,10 @@ class AIAssistant:
         except Exception as e:
             logger.warning(f"获取飞书用户信息失败，使用降级方案: {e}")
 
-        # 降级方案：使用 feishu_user_name 或 open_id 生成 username
+        # 最后降级方案：使用 open_id 生成 username
         if not username:
-            # 如果 feishu_user_name 是纯英文/数字，可以直接用
-            if feishu_user_name and feishu_user_name.replace('_', '').replace('-', '').isalnum():
-                username = feishu_user_name
-            else:
-                username = f"feishu_{feishu_open_id[:8]}"
-            logger.info(f"使用降级方案生成 username: {username}")
+            username = f"feishu_{feishu_open_id[:8]}"
+            logger.info(f"使用最终降级方案生成 username: {username}")
 
         # 确保用户名至少3个字符（User模型验证要求）
         if len(username) < 3:
