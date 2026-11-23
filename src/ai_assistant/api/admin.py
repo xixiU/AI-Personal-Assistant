@@ -6,74 +6,58 @@
 
 from flask import Blueprint, request, jsonify
 from loguru import logger
-from functools import wraps
-import jwt
 
-from ai_assistant.api import success_response, error_response, decode_token
+from ai_assistant.api import success_response, error_response
 
 # 创建管理员 Blueprint
 admin_bp = Blueprint('admin', __name__, url_prefix='/api/admin')
 
 # 全局变量（由 webhook_server 注入）
 _user_manager = None
-_jwt_secret = None
 
 
-def init_admin(user_manager, jwt_secret: str):
+def init_admin(user_manager):
     """
     初始化管理员模块
 
     Args:
         user_manager: UserManager 实例
-        jwt_secret: JWT 密钥
     """
-    global _user_manager, _jwt_secret
+    global _user_manager
     _user_manager = user_manager
-    _jwt_secret = jwt_secret
     logger.info("管理员模块初始化完成")
 
 
-def require_auth(f):
+@admin_bp.before_request
+def check_admin_permission():
     """
-    认证装饰器：验证 Token 有效性
+    Blueprint 级别的权限检查：所有管理接口都需要管理员权限
+
+    使用会话验证方案（从 ai_session cookie 读取 token）
     """
-    @wraps(f)
-    def decorated_function(*args, **kwargs):
-        auth_header = request.headers.get('Authorization', '')
-        if not auth_header.startswith('Bearer '):
-            return jsonify(error_response("缺少认证 Token", "MISSING_TOKEN")), 401
+    # 从 cookie 中获取会话 token
+    session_token = request.cookies.get('ai_session')
+    if not session_token:
+        return jsonify(error_response("未登录或会话已过期", "MISSING_SESSION")), 401
 
-        token = auth_header[7:]
-        try:
-            payload = decode_token(token, _jwt_secret)
-            request.current_user = payload  # 将用户信息附加到 request 对象
-            return f(*args, **kwargs)
-        except jwt.ExpiredSignatureError:
-            return jsonify(error_response("Token 已过期，请重新登录", "TOKEN_EXPIRED")), 401
-        except jwt.InvalidTokenError:
-            return jsonify(error_response("Token 无效", "INVALID_TOKEN")), 401
+    # 验证会话
+    if not _user_manager:
+        return jsonify(error_response("用户管理服务未初始化", "SERVICE_UNAVAILABLE")), 503
 
-    return decorated_function
+    user = _user_manager.validate_session(session_token)
+    if not user:
+        return jsonify(error_response("会话无效或已过期", "INVALID_SESSION")), 401
 
+    # 验证管理员权限
+    if user.get('role') != 'admin':
+        logger.warning(f"非管理员尝试访问管理接口: user_id={user.get('user_id')}, path={request.path}")
+        return jsonify(error_response("需要管理员权限", "PERMISSION_DENIED")), 403
 
-def require_admin(f):
-    """
-    管理员权限装饰器：验证用户是否为管理员
-    """
-    @wraps(f)
-    @require_auth
-    def decorated_function(*args, **kwargs):
-        user = request.current_user
-        if user.get('role') != 'admin':
-            logger.warning(f"非管理员尝试访问管理接口: user_id={user.get('user_id')}")
-            return jsonify(error_response("需要管理员权限", "PERMISSION_DENIED")), 403
-        return f(*args, **kwargs)
-
-    return decorated_function
+    # 将用户信息附加到 request 对象
+    request.current_user = user
 
 
 @admin_bp.route('/users', methods=['GET'])
-@require_admin
 def list_users():
     """
     查询用户列表
@@ -81,23 +65,16 @@ def list_users():
     请求参数：
     - page: 页码（默认 1）
     - page_size: 每页数量（默认 20，最大 100）
+    - keyword: 搜索关键词（username 或 display_name）
     - role: 角色过滤（可选，admin/user）
+    - status: 状态过滤（可选，active/disabled）
 
     响应：
     {
         "success": true,
         "message": "Success",
         "data": {
-            "users": [
-                {
-                    "user_id": "uuid",
-                    "username": "admin",
-                    "display_name": "管理员",
-                    "email": "admin@example.com",
-                    "role": "admin",
-                    "created_at": "2024-01-01T00:00:00"
-                }
-            ],
+            "users": [UserPublic...],
             "total": 100,
             "page": 1,
             "page_size": 20
@@ -108,7 +85,9 @@ def list_users():
         # 获取分页参数
         page = request.args.get('page', 1, type=int)
         page_size = request.args.get('page_size', 20, type=int)
+        keyword = request.args.get('keyword', None, type=str)
         role = request.args.get('role', None, type=str)
+        status = request.args.get('status', None, type=str)
 
         # 参数验证
         if page < 1:
@@ -117,18 +96,37 @@ def list_users():
             return jsonify(error_response("每页数量必须在 1-100 之间", "INVALID_PARAMETER")), 400
         if role and role not in ['admin', 'user']:
             return jsonify(error_response("角色参数无效", "INVALID_PARAMETER")), 400
+        if status and status not in ['active', 'disabled']:
+            return jsonify(error_response("状态参数无效", "INVALID_PARAMETER")), 400
+
+        # 转换 status 为 is_active 布尔值
+        is_active = None
+        if status == 'active':
+            is_active = True
+        elif status == 'disabled':
+            is_active = False
 
         # 查询用户列表
         if not _user_manager:
             return jsonify(error_response("用户管理服务未初始化", "SERVICE_UNAVAILABLE")), 503
 
         offset = (page - 1) * page_size
-        users = _user_manager.list_users(limit=page_size, offset=offset, role=role)
+        users = _user_manager.list_users(
+            limit=page_size,
+            offset=offset,
+            keyword=keyword,
+            role=role,
+            is_active=is_active
+        )
 
-        # TODO: 需要从数据库获取总数，当前返回假数据
-        total = len(users)
+        # 获取总数
+        total = _user_manager.count_users(
+            keyword=keyword,
+            role=role,
+            is_active=is_active
+        )
 
-        logger.info(f"查询用户列表: page={page}, page_size={page_size}, role={role}, count={len(users)}")
+        logger.info(f"查询用户列表: page={page}, page_size={page_size}, keyword={keyword}, role={role}, status={status}, total={total}")
 
         return jsonify(success_response({
             "users": users,
@@ -143,7 +141,6 @@ def list_users():
 
 
 @admin_bp.route('/users', methods=['POST'])
-@require_admin
 def create_user():
     """
     创建用户
@@ -153,7 +150,6 @@ def create_user():
         "username": "newuser",
         "password": "password123",  # 可选，不填则自动生成
         "display_name": "新用户",
-        "email": "user@example.com",
         "role": "user"  # admin 或 user
     }
 
@@ -166,7 +162,8 @@ def create_user():
             "username": "newuser",
             "password": "auto-generated-pass",  # 仅在自动生成时返回
             "display_name": "新用户",
-            "role": "user"
+            "role": "user",
+            ...
         }
     }
     """
@@ -178,7 +175,6 @@ def create_user():
         username = data.get('username', '').strip()
         password = data.get('password', '').strip()
         display_name = data.get('display_name', '').strip()
-        email = data.get('email', '').strip()
         role = data.get('role', 'user').strip()
 
         # 参数验证
@@ -198,7 +194,7 @@ def create_user():
         elif len(password) < 6:
             return jsonify(error_response("密码长度不能少于 6 位", "INVALID_PASSWORD")), 400
 
-        # 创建用户
+        # 创建用户（注意：不传 email 参数）
         if not _user_manager:
             return jsonify(error_response("用户管理服务未初始化", "SERVICE_UNAVAILABLE")), 503
 
@@ -206,7 +202,6 @@ def create_user():
             username=username,
             password=password,
             display_name=display_name or username,
-            email=email or None,
             role=role
         )
 
@@ -216,17 +211,22 @@ def create_user():
 
         logger.info(f"用户创建成功: username={username}, user_id={user_id}, role={role}")
 
-        response_data = {
-            "user_id": user_id,
-            "username": username,
-            "display_name": display_name or username,
-            "role": role
-        }
-        # 仅在自动生成密码时返回密码
-        if auto_generated:
-            response_data["password"] = password
+        # 获取完整用户信息
+        user_info = _user_manager.get_user(user_id)
+        if not user_info:
+            # 理论上不应该发生
+            user_info = {
+                "user_id": user_id,
+                "username": username,
+                "display_name": display_name or username,
+                "role": role
+            }
 
-        return jsonify(success_response(response_data, "用户创建成功")), 201
+        # 仅在自动生成密码时添加 password 字段
+        if auto_generated:
+            user_info["password"] = password
+
+        return jsonify(success_response(user_info, "用户创建成功")), 201
 
     except Exception as e:
         logger.error(f"创建用户异常: {e}", exc_info=True)
@@ -234,7 +234,6 @@ def create_user():
 
 
 @admin_bp.route('/users/<user_id>', methods=['PUT'])
-@require_admin
 def update_user(user_id: str):
     """
     更新用户信息
@@ -242,14 +241,15 @@ def update_user(user_id: str):
     请求体：
     {
         "display_name": "新名称",  # 可选
-        "email": "newemail@example.com",  # 可选
-        "role": "admin"  # 可选
+        "role": "admin",  # 可选
+        "is_active": true  # 可选
     }
 
     响应：
     {
         "success": true,
-        "message": "用户信息更新成功"
+        "message": "用户信息更新成功",
+        "data": UserPublic
     }
     """
     try:
@@ -257,10 +257,63 @@ def update_user(user_id: str):
         if not data:
             return jsonify(error_response("请求体不能为空", "INVALID_REQUEST")), 400
 
-        # TODO: 等待 Backend-DB-Agent 实现数据库模型后，调用 UserManager.update_user
-        logger.warning(f"更新用户接口调用（待实现）: user_id={user_id}")
+        display_name = data.get('display_name')
+        role = data.get('role')
+        is_active = data.get('is_active')
 
-        return jsonify(error_response("功能开发中，等待数据库模型实现", "NOT_IMPLEMENTED")), 501
+        # 参数验证
+        if role and role not in ['admin', 'user']:
+            return jsonify(error_response("角色参数无效", "INVALID_PARAMETER")), 400
+
+        if not _user_manager:
+            return jsonify(error_response("用户管理服务未初始化", "SERVICE_UNAVAILABLE")), 503
+
+        # 获取当前用户信息
+        current_user_id = request.current_user.get('user_id')
+        target_user = _user_manager.get_user(user_id)
+        if not target_user:
+            return jsonify(error_response("用户不存在", "USER_NOT_FOUND")), 404
+
+        # 业务规则检查
+
+        # 1. 不能修改自己的角色
+        if role and user_id == current_user_id and role != target_user.get('role'):
+            return jsonify(error_response("不能修改自己的角色", "INVALID_OPERATION")), 400
+
+        # 2. 不能停用或降级最后一个管理员
+        if target_user.get('role') == 'admin':
+            # 如果要降级或停用管理员
+            will_demote = role and role != 'admin'
+            will_disable = is_active is False
+
+            if will_demote or will_disable:
+                # 检查是否是最后一个管理员
+                admin_count = _user_manager.count_admins(exclude_user_id=user_id)
+                if admin_count == 0:
+                    return jsonify(error_response("不能停用或降级最后一个管理员", "INVALID_OPERATION")), 400
+
+        # 执行更新（注意：UserManager 的参数名是 name，不是 display_name）
+        success = _user_manager.update_user(
+            user_id=user_id,
+            name=display_name,
+            role=role,
+            is_active=is_active
+        )
+
+        if not success:
+            logger.warning(f"用户更新失败: user_id={user_id}")
+            return jsonify(error_response("用户更新失败", "UPDATE_FAILED")), 500
+
+        # 如果停用了用户，删除其所有会话
+        if is_active is False:
+            deleted_count = _user_manager.delete_all_sessions_for_user(user_id)
+            logger.info(f"停用用户，删除其会话: user_id={user_id}, session_count={deleted_count}")
+
+        logger.info(f"用户信息更新成功: user_id={user_id}, admin={request.current_user.get('username')}")
+
+        # 返回更新后的用户信息
+        updated_user = _user_manager.get_user(user_id)
+        return jsonify(success_response(updated_user, "用户信息更新成功")), 200
 
     except Exception as e:
         logger.error(f"更新用户异常: {e}", exc_info=True)
@@ -268,42 +321,17 @@ def update_user(user_id: str):
 
 
 @admin_bp.route('/users/<user_id>', methods=['DELETE'])
-@require_admin
 def delete_user(user_id: str):
     """
-    删除用户（软删除）
+    删除用户
 
-    响应：
-    {
-        "success": true,
-        "message": "用户删除成功"
-    }
+    前端通过 PUT is_active=false 停用账号，不调用此接口。
+    此接口返回 405 Method Not Allowed。
     """
-    try:
-        # 不允许删除自己
-        current_user_id = request.current_user.get('user_id')
-        if user_id == current_user_id:
-            return jsonify(error_response("不能删除自己", "INVALID_OPERATION")), 400
-
-        # 删除用户
-        if not _user_manager:
-            return jsonify(error_response("用户管理服务未初始化", "SERVICE_UNAVAILABLE")), 503
-
-        success = _user_manager.delete_user(user_id)
-        if not success:
-            logger.warning(f"用户删除失败: user_id={user_id}")
-            return jsonify(error_response("用户删除失败（用户不存在）", "DELETE_FAILED")), 404
-
-        logger.info(f"用户删除成功: user_id={user_id}")
-        return jsonify(success_response(message="用户删除成功")), 200
-
-    except Exception as e:
-        logger.error(f"删除用户异常: {e}", exc_info=True)
-        return jsonify(error_response("服务器内部错误", "INTERNAL_ERROR")), 500
+    return jsonify(error_response("不支持删除操作，请使用停用功能", "METHOD_NOT_ALLOWED")), 405
 
 
 @admin_bp.route('/users/<user_id>/reset-password', methods=['POST'])
-@require_admin
 def reset_user_password(user_id: str):
     """
     重置用户密码（管理员操作）
@@ -343,6 +371,10 @@ def reset_user_password(user_id: str):
         if not success:
             logger.warning(f"密码重置失败: user_id={user_id}")
             return jsonify(error_response("密码重置失败（用户不存在）", "RESET_FAILED")), 404
+
+        # 重置密码后，删除用户的所有会话（强制重新登录）
+        deleted_count = _user_manager.delete_all_sessions_for_user(user_id)
+        logger.info(f"重置密码后删除会话: user_id={user_id}, session_count={deleted_count}")
 
         logger.info(f"管理员重置用户密码: user_id={user_id}, admin={request.current_user.get('username')}")
 
