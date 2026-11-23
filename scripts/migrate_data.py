@@ -277,6 +277,105 @@ def extract_users_from_jsonl(
     return users
 
 
+def send_feishu_password_notification(open_id: str, username: str, password: str) -> bool:
+    """
+    发送飞书消息通知用户密码
+
+    Args:
+        open_id: 用户的 open_id
+        username: 用户名
+        password: 临时密码
+
+    Returns:
+        True if successful, False otherwise
+    """
+    import requests
+    import yaml
+    from pathlib import Path
+
+    try:
+        # 读取配置
+        config_file = Path("config.yaml")
+        if not config_file.exists():
+            logger.warning("配置文件不存在，跳过飞书通知")
+            return False
+
+        with open(config_file, 'r', encoding='utf-8') as f:
+            config = yaml.safe_load(f)
+
+        feishu_config = config.get('feishu', {})
+        app_id = feishu_config.get('app_id')
+        app_secret = feishu_config.get('app_secret')
+        base_url = feishu_config.get('base_url', 'https://open.feishu.cn')
+
+        if not app_id or not app_secret:
+            logger.warning("飞书配置不完整，跳过密码通知")
+            return False
+
+        # 获取 tenant_access_token
+        token_url = f"{base_url}/open-apis/auth/v3/tenant_access_token/internal"
+        token_response = requests.post(
+            token_url,
+            json={"app_id": app_id, "app_secret": app_secret},
+            timeout=10
+        )
+        token_result = token_response.json()
+
+        if token_result.get('code') != 0:
+            logger.warning(f"获取飞书 token 失败: {token_result.get('msg')}")
+            return False
+
+        tenant_access_token = token_result.get('tenant_access_token')
+
+        # 发送消息
+        message_url = f"{base_url}/open-apis/im/v1/messages"
+
+        # 消息内容
+        message_text = f"""🔐 您的管理后台账号已创建
+
+用户名：{username}
+临时密码：{password}
+
+管理后台地址：http://your-server:8080/admin/
+
+⚠️ 请首次登录后立即修改密码
+
+如有问题，请联系管理员。"""
+
+        message_body = {
+            "receive_id": open_id,
+            "msg_type": "text",
+            "content": json.dumps({"text": message_text})
+        }
+
+        headers = {
+            "Authorization": f"Bearer {tenant_access_token}",
+            "Content-Type": "application/json"
+        }
+
+        params = {"receive_id_type": "open_id"}
+
+        message_response = requests.post(
+            message_url,
+            headers=headers,
+            params=params,
+            json=message_body,
+            timeout=10
+        )
+        message_result = message_response.json()
+
+        if message_result.get('code') == 0:
+            logger.info(f"飞书密码通知发送成功: username={username}, open_id={open_id[:8]}...")
+            return True
+        else:
+            logger.warning(f"飞书密码通知发送失败: {message_result.get('msg')}")
+            return False
+
+    except Exception as e:
+        logger.warning(f"发送飞书密码通知异常: {e}")
+        return False
+
+
 def migrate_users(
     user_manager: UserManager,
     users: Set[Tuple[str, str]]
@@ -321,6 +420,9 @@ def migrate_users(
             if new_user_id:
                 success_count += 1
                 logger.debug(f"创建用户: username={username}, feishu_open_id={user_id}")
+
+                # 发送飞书消息通知密码
+                send_feishu_password_notification(user_id, username, password)
             else:
                 logger.warning(f"创建用户失败: username={username}")
 
