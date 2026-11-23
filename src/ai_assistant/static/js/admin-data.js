@@ -62,7 +62,7 @@
 
     // ---------- 统计（对照表 v1 #10：GET /api/admin/stats 一个接口返回全部）----------
     var STAT_IDS = ['sQueries', 'sActive', 'sLikeRate', 'sDislike', 'sSessions'];
-    var BOX_IDS = ['trendChart', 'topList', 'topUsers', 'sourceList', 'wordCloud'];
+    var BOX_IDS = ['trendChart', 'topList', 'topUsers'];
 
     async function loadStats() {
         var days = state.days;
