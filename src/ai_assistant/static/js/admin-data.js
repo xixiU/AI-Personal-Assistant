@@ -89,12 +89,12 @@
             $('sDislike').textContent = fmtNum(s.dislike_count);
             $('rangeText').textContent = d.range ? (d.range.start_date + ' ~ ' + d.range.end_date) : '';
 
-            // API 返回简化格式 {date, count}，映射为 {date, questions: count}
-            var dailyData = (d.daily || []).map(function (item) {
-                return { date: item.date, questions: item.count };
-            });
-            Charts.line($('trendChart'), dailyData, [
-                { key: 'questions', label: '问答量', color: '#2563eb' }
+            // 多指标趋势图
+            var trendData = d.trend_data || [];
+            Charts.line($('trendChart'), trendData, [
+                { key: 'questions', label: '问答量', color: '#2563eb' },
+                { key: 'feedbacks', label: '反馈数', color: '#10b981' },
+                { key: 'active_users', label: '活跃用户', color: '#f59e0b' }
             ]);
             Charts.bars($('topList'), d.top_questions || []);
             Charts.bars($('topUsers'), (d.top_users || []).map(function (u) {
