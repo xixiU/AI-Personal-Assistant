@@ -316,7 +316,7 @@
                 var params = { page: chatState.page, page_size: chatState.pageSize };
                 if (chatState.keyword) params.keyword = chatState.keyword;
 
-                var resp = await App.get('/api/chat-history' + App.qs(params));
+                var resp = await App.get('/api/data/chat-history' + App.qs(params));
                 chatState.total = resp.data.total || 0;
                 renderChatHistory(resp.data.records || []);
                 updateChatPager();

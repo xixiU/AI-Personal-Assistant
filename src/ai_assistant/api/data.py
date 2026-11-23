@@ -12,7 +12,7 @@ from functools import wraps
 from ai_assistant.api import success_response, error_response
 
 # 创建数据查询 Blueprint
-data_bp = Blueprint('data', __name__, url_prefix='/api')
+data_bp = Blueprint('data', __name__, url_prefix='/api/data')
 
 # 全局变量（由 webhook_server 注入）
 _chat_history_db = None

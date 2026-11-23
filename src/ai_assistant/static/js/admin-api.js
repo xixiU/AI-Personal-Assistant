@@ -67,13 +67,13 @@
         // ---------- 明细 ----------
         /** data {records:[{record_id, session_id, user_id, user_name, query, answer, mode, source, latency_ms, created_at, feedback_type}], total, page, page_size} */
         chatHistory: async function (params) {
-            var res = await App.get('/api/chat-history' + App.qs(params));
+            var res = await App.get('/api/data/chat-history' + App.qs(params));
             var d = res.data || {};
             return { records: d.records || [], total: d.total || 0 };
         },
         /** data {feedbacks:[{feedback_id, record_id, session_id, user_id, user_name, feedback_type, feedback_text, source, created_at, query, answer}], total, page, page_size, stats} */
         feedback: async function (params) {
-            var res = await App.get('/api/feedback' + App.qs(params));
+            var res = await App.get('/api/data/feedback' + App.qs(params));
             var d = res.data || {};
             return { feedbacks: d.feedbacks || [], total: d.total || 0, stats: d.stats || {} };
         },
