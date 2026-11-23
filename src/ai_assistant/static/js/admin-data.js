@@ -28,7 +28,7 @@
     // 加载用户列表到下拉框
     async function loadUserList() {
         try {
-            var res = await AdminApi.listUsers({ page: 1, page_size: 1000 });
+            var res = await AdminApi.listUsers({ page: 1, page_size: 100 });
             var users = res.users || [];
             var options = '<option value="">全部用户</option>';
             users.forEach(function (u) {

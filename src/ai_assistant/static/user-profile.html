@@ -40,6 +40,7 @@
                     <div class="tabs" style="margin: 20px 20px 0; border-radius: 10px;">
                         <button id="tabChat" class="active">我的对话</button>
                         <button id="tabFeedback">我的反馈</button>
+                        <button id="tabWordCloud">词云</button>
                     </div>
 
                     <!-- 我的对话 Tab -->
@@ -76,6 +77,11 @@
                                 <button class="btn btn-ghost btn-sm" id="feedbackNextBtn">下一页</button>
                             </div>
                         </div>
+                    </div>
+
+                    <!-- 词云 Tab -->
+                    <div id="wordCloudPane" class="history-pane" hidden>
+                        <div id="userWordCloud" style="width: 100%; height: 500px;"></div>
                     </div>
                 </div>
             </section>
@@ -118,6 +124,8 @@
     </div>
 
     <script src="/static/js/api.js"></script>
+    <script src="/static/js/echarts.min.js"></script>
+    <script src="/static/js/echarts-wordcloud.min.js"></script>
     <style>
         .history-pane { min-height: 400px; }
         .history-item {
@@ -248,22 +256,38 @@
         // ===== 历史记录 Tab 切换 =====
         var tabChat = document.getElementById('tabChat');
         var tabFeedback = document.getElementById('tabFeedback');
+        var tabWordCloud = document.getElementById('tabWordCloud');
         var chatPane = document.getElementById('chatHistoryPane');
         var feedbackPane = document.getElementById('feedbackHistoryPane');
+        var wordCloudPane = document.getElementById('wordCloudPane');
 
         tabChat.addEventListener('click', function () {
             tabChat.classList.add('active');
             tabFeedback.classList.remove('active');
+            tabWordCloud.classList.remove('active');
             chatPane.hidden = false;
             feedbackPane.hidden = true;
+            wordCloudPane.hidden = true;
         });
 
         tabFeedback.addEventListener('click', function () {
             tabFeedback.classList.add('active');
             tabChat.classList.remove('active');
+            tabWordCloud.classList.remove('active');
             feedbackPane.hidden = false;
             chatPane.hidden = true;
+            wordCloudPane.hidden = true;
             if (!feedbackState.loaded) loadFeedbackHistory();
+        });
+
+        tabWordCloud.addEventListener('click', function () {
+            tabWordCloud.classList.add('active');
+            tabChat.classList.remove('active');
+            tabFeedback.classList.remove('active');
+            wordCloudPane.hidden = false;
+            chatPane.hidden = true;
+            feedbackPane.hidden = true;
+            if (!wordCloudState.loaded) loadUserWordCloud();
         });
 
         // ===== 我的对话 =====
@@ -294,7 +318,7 @@
 
                 var resp = await App.get('/api/user/chat-history' + App.qs(params));
                 chatState.total = resp.data.total || 0;
-                renderChatHistory(resp.data.items || []);
+                renderChatHistory(resp.data.records || []);
                 updateChatPager();
             } catch (err) {
                 App.toast(err.message || '加载对话历史失败', 'error');
@@ -312,8 +336,8 @@
 
             var html = '';
             items.forEach(function (item) {
-                var time = formatTime(item.created_at);
-                var question = App.escape(item.question || '');
+                var time = formatTime(item.timestamp || item.created_at);
+                var question = App.escape(item.query || '');
                 var answer = App.escape(item.answer || '');
                 var answerId = 'answer-' + item.record_id;
                 var answerPreview = answer.length > 100 ? answer.slice(0, 100) + '...' : answer;
@@ -462,7 +486,7 @@
 
                 var resp = await App.get('/api/user/feedback' + App.qs(params));
                 feedbackState.total = resp.data.total || 0;
-                renderFeedbackHistory(resp.data.items || []);
+                renderFeedbackHistory(resp.data.records || []);
                 updateFeedbackPager();
             } catch (err) {
                 App.toast(err.message || '加载反馈历史失败', 'error');
@@ -480,9 +504,9 @@
 
             var html = '';
             items.forEach(function (item) {
-                var time = formatTime(item.created_at);
+                var time = formatTime(item.timestamp || item.created_at);
                 var typeIcon = item.feedback_type === 'like' ? '👍 点赞' : '👎 点踩';
-                var question = App.escape(item.question || '无相关问题');
+                var question = App.escape(item.query || '无相关问题');
                 var feedbackText = item.feedback_text ? App.escape(item.feedback_text) : '';
 
                 html += '<div class="history-item">';
@@ -525,6 +549,60 @@
                 loadFeedbackHistory();
             }
         });
+
+        // ===== 词云 =====
+        var wordCloudState = {
+            loaded: false
+        };
+
+        async function loadUserWordCloud() {
+            if (wordCloudState.loaded) return;
+            wordCloudState.loaded = true;
+
+            var container = document.getElementById('userWordCloud');
+            container.innerHTML = '<div class="empty">加载中…</div>';
+
+            try {
+                var resp = await App.get('/api/data/wordcloud');
+                var data = resp.data || [];
+
+                if (!data || data.length === 0) {
+                    container.innerHTML = '<div class="empty">暂无数据</div>';
+                    return;
+                }
+
+                var chart = echarts.init(container);
+                var option = {
+                    series: [{
+                        type: 'wordCloud',
+                        shape: 'circle',
+                        sizeRange: [12, 60],
+                        rotationRange: [-90, 90],
+                        rotationStep: 45,
+                        gridSize: 8,
+                        drawOutOfBound: false,
+                        textStyle: {
+                            fontFamily: 'sans-serif',
+                            fontWeight: 'bold',
+                            color: function () {
+                                var colors = ['#5470c6', '#91cc75', '#fac858', '#ee6666', '#73c0de'];
+                                return colors[Math.floor(Math.random() * colors.length)];
+                            }
+                        },
+                        data: data.map(function (item) {
+                            return {
+                                name: item.word,
+                                value: item.count
+                            };
+                        })
+                    }]
+                };
+
+                chart.setOption(option);
+            } catch (err) {
+                container.innerHTML = '<div class="empty">加载失败：' + App.escape(err.message) + '</div>';
+            }
+        }
 
         // ===== 工具函数 =====
         function formatTime(timeStr) {
