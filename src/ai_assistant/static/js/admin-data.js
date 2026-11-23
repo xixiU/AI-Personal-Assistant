@@ -25,6 +25,23 @@
         if (e.target.id === 'detailModal' || e.target.hasAttribute('data-close')) $('detailModal').hidden = true;
     });
 
+    // 加载用户列表到下拉框
+    async function loadUserList() {
+        try {
+            var res = await AdminApi.listUsers({ page: 1, page_size: 1000 });
+            var users = res.users || [];
+            var options = '<option value="">全部用户</option>';
+            users.forEach(function (u) {
+                var label = u.display_name || u.username || u.user_id;
+                options += '<option value="' + esc(u.user_id) + '">' + esc(label) + '</option>';
+            });
+            $('fUserId').innerHTML = options;
+        } catch (err) {
+            console.error('加载用户列表失败:', err);
+        }
+    }
+    loadUserList();
+
     function fmtNum(n) { return (n === undefined || n === null) ? '-' : Number(n).toLocaleString(); }
     function fmtRate(r) { return (r === undefined || r === null) ? '-' : (Number(r) * 100).toFixed(1) + '%'; }
     function failBox(el, err) { el.innerHTML = '<div class="empty">加载失败：' + esc(err.message) + '</div>'; }
@@ -149,10 +166,20 @@
         var params = {
             page: state.page,
             page_size: PAGE_SIZE,
-            start_time: startTime(state.days),
             source: $('fSource').value,
-            user_id: $('fUserId').value.trim()
+            user_id: $('fUserId').value
         };
+        // 时间区间：优先使用用户选择的日期，否则使用时间范围选项卡
+        var startDate = $('fStartDate').value;
+        var endDate = $('fEndDate').value;
+        if (startDate) {
+            params.start_time = startDate;
+        } else {
+            params.start_time = startTime(state.days);
+        }
+        if (endDate) {
+            params.end_time = endDate;
+        }
         var tab = state.tab, page = state.page;
         try {
             var res;
@@ -220,7 +247,7 @@
     });
 
     $('fSearch').addEventListener('click', function () { state.page = 1; loadDetail(); });
-    ['fUserId', 'fKeyword'].forEach(function (id) {
+    ['fKeyword'].forEach(function (id) {
         $(id).addEventListener('keydown', function (e) { if (e.key === 'Enter') { state.page = 1; loadDetail(); } });
     });
     $('prevBtn').addEventListener('click', function () { if (state.page > 1) { state.page--; loadDetail(); } });
