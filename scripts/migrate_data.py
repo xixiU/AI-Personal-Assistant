@@ -39,13 +39,13 @@ def map_user_id_to_uuid(user_manager: UserManager, old_user_id: str, user_name: 
         if old_user_id:
             user = user_manager.get_user_by_feishu_open_id(old_user_id)
             if user:
-                return user.user_id
+                return user['user_id']  # 返回 dict，用 ['key'] 访问
 
         # 2. 再通过 username 查找
         if user_name:
-            user = user_manager.get_user_by_username(user_name)
+            user = user_manager.get_user(user_name)  # 使用 get_user() 方法
             if user:
-                return user.user_id
+                return user['user_id']  # 返回 dict，用 ['key'] 访问
 
         # 找不到用户
         return None
