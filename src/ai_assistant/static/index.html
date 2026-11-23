@@ -875,17 +875,23 @@
             renderMessages();
         }
 
+        // Markdown 渲染时允许的链接/图片协议（必须在初始化 renderMessages() 之前定义）
+        const SAFE_LINK_RE = /^(https?:\/\/|mailto:)/i;
+        const SAFE_IMG_RE = /^https?:\/\//i;
+
         function renderConvList() {
             convList.innerHTML = '';
             conversations.forEach(conv => {
                 const item = document.createElement('div');
                 item.className = 'conv-item' + (conv.id === currentConvId ? ' active' : '');
+                // 标题来自用户输入，先放空 span，再用 textContent 写入，避免 XSS
                 item.innerHTML = `
-                    <span style="flex:1;overflow:hidden;text-overflow:ellipsis">${conv.title}</span>
+                    <span class="conv-title" style="flex:1;overflow:hidden;text-overflow:ellipsis"></span>
                     <span class="conv-delete" style="opacity:0;margin-left:4px;cursor:pointer;font-size:16px;color:#94a3b8"
                           onmouseenter="this.style.color='#ef4444'"
                           onmouseleave="this.style.color='#94a3b8'">&times;</span>
                 `;
+                item.querySelector('.conv-title').textContent = conv.title;
                 item.style.display = 'flex';
                 item.style.alignItems = 'center';
                 item.addEventListener('click', () => switchConversation(conv.id));
@@ -929,25 +935,44 @@
             contentEl.className = 'message-content';
 
             let html = '';
-            if (imageUrl) html += `<img src="${imageUrl}" alt="图片">`;
+            if (imageUrl) html += `<img src="${escapeHtml(imageUrl)}" alt="图片">`;
 
             let text = content;
             // 使用 marked.js 渲染 markdown（支持链接、代码块、表格等）
+            // 安全约束（AI 回答可能引用知识库/日志里的恶意内容，页面有登录会话，XSS 可冒用身份）：
+            //   - 原始 HTML 一律转义显示，不当作标签解析
+            //   - 链接只放行 http/https/mailto，图片只放行 http/https；其余协议（javascript: 等）降级为纯文本
+            //   - href/src/title/alt 全部转义
             if (typeof marked !== 'undefined') {
                 marked.setOptions({
                     breaks: true,
                     gfm: true,
                 });
-                // 所有链接新标签页打开
                 const renderer = new marked.Renderer();
+                renderer.html = function(token) {
+                    return escapeHtml(token.text);
+                };
+                // 链接文字：有子 token 时交给 parser 渲染（其中的原始 HTML 仍走上面的 html 转义），否则转义原文
+                const inlineText = (self, token) =>
+                    (token.tokens && self.parser) ? self.parser.parseInline(token.tokens) : escapeHtml(token.text);
                 renderer.link = function(token) {
-                    const href = token.href || '';
-                    const linkText = token.text || href;
-                    return `<a href="${href}" target="_blank" rel="noopener">${linkText}</a>`;
+                    const href = String(token.href || '').trim();
+                    const linkText = inlineText(this, token) || escapeHtml(href);
+                    if (!SAFE_LINK_RE.test(href)) return linkText;
+                    const title = token.title ? ` title="${escapeHtml(token.title)}"` : '';
+                    // 所有链接新标签页打开
+                    return `<a href="${escapeHtml(href)}"${title} target="_blank" rel="noopener noreferrer">${linkText}</a>`;
+                };
+                renderer.image = function(token) {
+                    const src = String(token.href || '').trim();
+                    const alt = escapeHtml(token.text || '');
+                    if (!SAFE_IMG_RE.test(src)) return alt;
+                    return `<img src="${escapeHtml(src)}" alt="${alt}">`;
                 };
                 text = marked.parse(text, { renderer: renderer });
             } else {
-                // 降级：简单正则处理
+                // 降级：先整体转义，再做简单正则处理（只生成固定标签和 http(s) 链接）
+                text = escapeHtml(text);
                 text = text.replace(/```(\w+)?\n([\s\S]*?)```/g, '<pre><code>$2</code></pre>');
                 text = text.replace(/`([^`]+)`/g, '<code>$1</code>');
                 text = text.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
@@ -964,10 +989,10 @@
                 const feedbackDiv = document.createElement('div');
                 feedbackDiv.className = 'message-feedback';
                 feedbackDiv.innerHTML = `
-                    <button class="feedback-btn like" data-record-id="${recordId}">
+                    <button class="feedback-btn like" data-record-id="${escapeHtml(recordId)}">
                         👍 赞同
                     </button>
-                    <button class="feedback-btn dislike" data-record-id="${recordId}">
+                    <button class="feedback-btn dislike" data-record-id="${escapeHtml(recordId)}">
                         👎 不准确
                     </button>
                     <span class="feedback-status"></span>
@@ -1104,7 +1129,8 @@
                 .replace(/&/g, '&amp;')
                 .replace(/</g, '&lt;')
                 .replace(/>/g, '&gt;')
-                .replace(/"/g, '&quot;');
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#39;');
         }
 
         async function sendMessage() {
@@ -1158,7 +1184,7 @@
                 checkUnauthorized(resp);
                 if (!resp.ok) {
                     const err = await resp.json();
-                    throw new Error(err.error || '请求失败');
+                    throw new Error(err.error || err.message || '请求失败');
                 }
                 const data = await resp.json();
                 // record_id 由后端返回，用于关联反馈（可能为 null）
