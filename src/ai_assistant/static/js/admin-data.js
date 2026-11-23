@@ -190,7 +190,7 @@
             var cells;
             if (state.tab === 'history') {
                 cells = [
-                    esc(r.created_at), userCell(r), esc(SOURCE_TEXT[r.source] || r.source),
+                    esc(r.timestamp || r.created_at), userCell(r), esc(SOURCE_TEXT[r.source] || r.source),
                     '<div class="clip">' + esc(r.query) + '</div>',
                     '<div class="clip">' + esc(r.answer) + '</div>',
                     feedbackBadge(r.feedback_type)
@@ -198,7 +198,7 @@
             } else {
                 var like = r.feedback_type === 'like';
                 cells = [
-                    esc(r.created_at), userCell(r), esc(SOURCE_TEXT[r.source] || r.source),
+                    esc(r.timestamp || r.created_at), userCell(r), esc(SOURCE_TEXT[r.source] || r.source),
                     like ? '<span class="badge green">点赞</span>' : '<span class="badge red">点踩</span>',
                     '<div class="clip">' + esc(r.query) + '</div>',
                     '<div class="clip">' + esc(r.feedback_text || '-') + '</div>'
@@ -267,7 +267,7 @@
         var r = state.rows[+btn.dataset.idx];
         if (!r) return;
         var html =
-            '<div class="field"><label>时间 / 用户 / 来源</label><div>' + esc(r.created_at) + ' · ' + userCell(r) + ' · ' +
+            '<div class="field"><label>时间 / 用户 / 来源</label><div>' + esc(r.timestamp || r.created_at) + ' · ' + userCell(r) + ' · ' +
             esc(SOURCE_TEXT[r.source] || r.source) + (r.mode ? ' · 模式 ' + esc(r.mode) : '') + '</div></div>' +
             '<div class="field"><label>会话 ID</label><div style="font-family:var(--mono);font-size:12px">' + esc(r.session_id) + '</div></div>' +
             '<div class="field"><label>问题</label><div class="pre-block">' + esc(r.query) + '</div></div>' +
