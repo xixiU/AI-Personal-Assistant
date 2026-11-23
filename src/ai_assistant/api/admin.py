@@ -405,17 +405,20 @@ def get_stats():
 
         # 2. 每日问答趋势（多指标）
         daily_questions = _chat_history_db.get_daily_stats(days=days)
-        daily_feedbacks = _feedback_manager.get_daily_stats(days=days)
         daily_active_users = _chat_history_db.get_daily_active_users(days=days)
+        daily_likes_dislikes = _feedback_manager.get_daily_likes_dislikes(days=days)
+        daily_likes = daily_likes_dislikes["likes"]
+        daily_dislikes = daily_likes_dislikes["dislikes"]
 
-        # 合并为统一的趋势数据结构
+        # 合并为统一的趋势数据结构（4 个指标）
         trend_data = []
         for i, item in enumerate(daily_questions):
             trend_data.append({
                 "date": item["date"],
                 "questions": item["count"],
-                "feedbacks": daily_feedbacks[i]["count"] if i < len(daily_feedbacks) else 0,
-                "active_users": daily_active_users[i]["count"] if i < len(daily_active_users) else 0
+                "active_users": daily_active_users[i]["count"] if i < len(daily_active_users) else 0,
+                "likes": daily_likes[i]["count"] if i < len(daily_likes) else 0,
+                "dislikes": daily_dislikes[i]["count"] if i < len(daily_dislikes) else 0
             })
 
         # 3. 高频问题 Top 10（支持语义聚类）

@@ -346,3 +346,74 @@ class FeedbackDBQuery:
         except Exception as e:
             logger.error(f"获取每日反馈统计失败: {e}", exc_info=True)
             return []
+
+    def get_daily_likes_dislikes(self, days: int = 7) -> Dict[str, List[Dict]]:
+        """
+        获取每日点赞和点踩的分开统计
+
+        Args:
+            days: 统计最近 N 天
+
+        Returns:
+            {"likes": [...], "dislikes": [...]}
+            每个数组格式: [{"date": "2024-01-01", "count": 5}, ...]
+        """
+        try:
+            with self.db_manager.get_session() as session:
+                # 计算开始日期
+                start_date = datetime.now() - timedelta(days=days)
+
+                # 统计点赞
+                likes_query = session.query(
+                    func.date(FeedbackDB.timestamp).label('date'),
+                    func.count(FeedbackDB.feedback_id).label('count')
+                ).filter(
+                    FeedbackDB.timestamp >= start_date,
+                    FeedbackDB.feedback_type == FeedbackType.LIKE
+                ).group_by(
+                    func.date(FeedbackDB.timestamp)
+                ).order_by('date')
+
+                likes_results = likes_query.all()
+                likes_map = {str(row.date): row.count for row in likes_results}
+
+                # 统计点踩
+                dislikes_query = session.query(
+                    func.date(FeedbackDB.timestamp).label('date'),
+                    func.count(FeedbackDB.feedback_id).label('count')
+                ).filter(
+                    FeedbackDB.timestamp >= start_date,
+                    FeedbackDB.feedback_type == FeedbackType.DISLIKE
+                ).group_by(
+                    func.date(FeedbackDB.timestamp)
+                ).order_by('date')
+
+                dislikes_results = dislikes_query.all()
+                dislikes_map = {str(row.date): row.count for row in dislikes_results}
+
+                # 补全所有日期
+                likes_data = []
+                dislikes_data = []
+                current_date = start_date.date()
+                end_date = datetime.now().date()
+
+                while current_date <= end_date:
+                    date_str = str(current_date)
+                    likes_data.append({
+                        "date": date_str,
+                        "count": likes_map.get(date_str, 0)
+                    })
+                    dislikes_data.append({
+                        "date": date_str,
+                        "count": dislikes_map.get(date_str, 0)
+                    })
+                    current_date += timedelta(days=1)
+
+                return {
+                    "likes": likes_data,
+                    "dislikes": dislikes_data
+                }
+
+        except Exception as e:
+            logger.error(f"获取每日点赞/点踩统计失败: {e}", exc_info=True)
+            return {"likes": [], "dislikes": []}
