@@ -125,7 +125,10 @@ class AIAssistant:
         logger.info("数据库和用户管理器初始化完成")
 
         # 初始化 FeedbackManager（启用双写）
-        self.feedback_manager = FeedbackManager(db_manager=self.db_manager)
+        self.feedback_manager = FeedbackManager(
+            feedback_dir=getattr(self.config, 'feedback_dir', './data/feedback'),
+            db_manager=self.db_manager  # 启用双写
+        )
 
         # 初始化 AI Provider
         provider_type = self.config.ai_primary_provider
