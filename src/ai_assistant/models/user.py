@@ -135,6 +135,7 @@ class User(Base):
             "display_name": self.name,  # 映射为 display_name
             "role": self.role.value,
             "is_active": self.is_active,
+            "feishu_open_id": self.feishu_open_id,  # 添加 feishu_open_id 字段
             "feishu_bound": bool(self.feishu_open_id),  # 映射为布尔值
             "created_at": self.created_at.strftime("%Y-%m-%d %H:%M:%S"),
             "updated_at": self.updated_at.strftime("%Y-%m-%d %H:%M:%S"),
