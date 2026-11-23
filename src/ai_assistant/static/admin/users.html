@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>用户管理 - 管理后台</title>
+    <link rel="stylesheet" href="/static/css/app.css">
+</head>
+<body data-scope="admin">
+    <div class="layout" id="layout" hidden>
+        <aside class="side">
+            <div class="side-brand"><div class="brand-mark">⚙</div>管理后台</div>
+            <nav class="side-nav">
+                <a id="navData" href="#">数据统计</a>
+                <a id="navUsers" href="#" class="active">用户管理</a>
+            </nav>
+            <div class="side-user">
+                <div><div class="name" id="sideName"></div><div class="role">管理员</div></div>
+                <button class="btn btn-sm" id="logoutBtn" type="button">退出登录</button>
+            </div>
+        </aside>
+
+        <main class="content">
+            <div class="page-head">
+                <div>
+                    <h1>用户管理</h1>
+                    <p>新建账号、编辑资料、重置密码、停用账号</p>
+                </div>
+                <button class="btn btn-primary" id="createBtn" type="button">+ 新建用户</button>
+            </div>
+
+            <div class="card">
+                <div class="card-head">
+                    <div class="toolbar">
+                        <input class="input" id="keyword" placeholder="搜索用户名 / 显示名">
+                        <select class="select" id="roleFilter">
+                            <option value="">全部角色</option>
+                            <option value="user">普通用户</option>
+                            <option value="admin">管理员</option>
+                        </select>
+                        <select class="select" id="statusFilter">
+                            <option value="">全部状态</option>
+                            <option value="active">正常</option>
+                            <option value="disabled">已停用</option>
+                        </select>
+                        <button class="btn btn-ghost" id="searchBtn" type="button">查询</button>
+                    </div>
+                </div>
+                <div class="table-wrap">
+                    <table class="table">
+                        <thead>
+                            <tr><th>用户名</th><th>显示名</th><th>角色</th><th>状态</th><th>飞书</th><th>创建时间</th><th>最近登录</th><th>操作</th></tr>
+                        </thead>
+                        <tbody id="userRows"><tr><td colspan="8" class="empty">加载中…</td></tr></tbody>
+                    </table>
+                </div>
+                <div class="pager">
+                    <span id="pagerInfo"></span>
+                    <div class="btns">
+                        <button class="btn btn-ghost btn-sm" id="prevBtn" type="button">上一页</button>
+                        <button class="btn btn-ghost btn-sm" id="nextBtn" type="button">下一页</button>
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <!-- 新建 / 编辑弹窗 -->
+    <div class="modal-mask" id="userModal" hidden>
+        <div class="modal">
+            <div class="modal-head"><h3 id="userModalTitle">新建用户</h3><button class="modal-close" data-close type="button">&times;</button></div>
+            <form id="userForm" novalidate>
+                <div class="modal-body">
+                    <div class="form-error" id="userFormError" hidden></div>
+                    <div class="field">
+                        <label for="fUsername">用户名</label>
+                        <input class="input" id="fUsername" maxlength="32" autocomplete="off">
+                        <div class="hint">3–32 个字符，创建后不可修改</div>
+                    </div>
+                    <div class="field">
+                        <label for="fDisplayName">显示名</label>
+                        <input class="input" id="fDisplayName" maxlength="128">
+                    </div>
+                    <div class="field">
+                        <label for="fRole">角色</label>
+                        <select class="select" id="fRole">
+                            <option value="user">普通用户</option>
+                            <option value="admin">管理员</option>
+                        </select>
+                    </div>
+                    <div class="field" id="pwdField">
+                        <label for="fPassword">初始密码（可选）</label>
+                        <input class="input" id="fPassword" type="text" autocomplete="new-password">
+                        <div class="hint">留空则由系统生成，创建后只显示一次</div>
+                    </div>
+                </div>
+                <div class="modal-foot">
+                    <button class="btn btn-ghost" data-close type="button">取消</button>
+                    <button class="btn btn-primary" id="userSubmit" type="submit">保存</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- 重置密码弹窗 -->
+    <div class="modal-mask" id="resetModal" hidden>
+        <div class="modal">
+            <div class="modal-head"><h3>重置密码</h3><button class="modal-close" data-close type="button">&times;</button></div>
+            <form id="resetForm" novalidate>
+                <div class="modal-body">
+                    <div class="form-error" id="resetError" hidden></div>
+                    <p style="margin-bottom:14px;color:var(--text-2)">为 <b id="resetTarget"></b> 设置新密码。</p>
+                    <div class="field">
+                        <label for="rPassword">新密码（可选）</label>
+                        <input class="input" id="rPassword" type="text" autocomplete="new-password">
+                        <div class="hint">至少 6 位；留空则由系统生成</div>
+                    </div>
+                </div>
+                <div class="modal-foot">
+                    <button class="btn btn-ghost" data-close type="button">取消</button>
+                    <button class="btn btn-danger" id="resetSubmit" type="submit">确认重置</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- 生成的密码只展示一次 -->
+    <div class="modal-mask" id="secretModal" hidden>
+        <div class="modal">
+            <div class="modal-head"><h3 id="secretTitle">密码</h3><button class="modal-close" data-close type="button">&times;</button></div>
+            <div class="modal-body">
+                <p style="margin-bottom:10px;color:var(--text-2)">请立即复制并通过安全渠道告知用户，关闭后无法再次查看。</p>
+                <div class="secret" id="secretValue"></div>
+            </div>
+            <div class="modal-foot">
+                <button class="btn btn-ghost" id="copySecret" type="button">复制</button>
+                <button class="btn btn-primary" data-close type="button">我已记下</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/js/api.js"></script>
+    <script src="/static/js/admin-api.js"></script>
+    <script src="/static/js/admin-users.js"></script>
+</body>
+</html>

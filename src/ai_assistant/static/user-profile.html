@@ -3,281 +3,133 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>用户中心 - AI 助手管理系统</title>
-    <link rel="stylesheet" href="css/admin.css">
+    <title>用户中心 - 智慧法庭 AI 助手</title>
+    <link rel="stylesheet" href="/static/css/app.css">
 </head>
-<body>
-    <div class="admin-layout">
-        <!-- 侧边栏 -->
-        <aside class="admin-sidebar">
-            <div class="admin-sidebar-header">
-                <a href="/static/index.html" class="admin-logo">
-                    <div class="admin-logo-icon">⚖</div>
-                    <div class="admin-logo-text">AI 助手</div>
-                </a>
-            </div>
-
-            <nav class="admin-nav">
-                <a href="/static/index.html" class="nav-item">
-                    <span class="nav-icon">💬</span>
-                    <span>返回聊天</span>
-                </a>
-                <a href="/static/user-profile.html" class="nav-item active">
-                    <span class="nav-icon">👤</span>
-                    <span>用户中心</span>
-                </a>
-                <div id="adminNav" style="display: none;">
-                    <a href="/static/admin-users.html" class="nav-item">
-                        <span class="nav-icon">👥</span>
-                        <span>用户管理</span>
-                    </a>
-                    <a href="/static/admin-data.html" class="nav-item">
-                        <span class="nav-icon">📊</span>
-                        <span>数据查看</span>
-                    </a>
-                </div>
+<body data-scope="user">
+    <div class="layout">
+        <aside class="side">
+            <div class="side-brand"><div class="brand-mark">⚖</div>智慧法庭 AI 助手</div>
+            <nav class="side-nav">
+                <a href="/" id="navChat">💬 对话</a>
+                <a href="/profile" id="navProfile" class="active">👤 用户中心</a>
             </nav>
-
-            <div class="admin-sidebar-footer">
-                <div class="user-info">
-                    <div class="user-avatar" id="userAvatar">👤</div>
-                    <div>
-                        <div style="color: white; font-weight: 500;" id="userNickname">用户</div>
-                        <div style="font-size: 12px;" id="userRole">普通用户</div>
-                    </div>
+            <div class="side-user">
+                <div>
+                    <div class="name" id="sideName">-</div>
+                    <div class="role" id="sideRole">-</div>
                 </div>
-                <button class="logout-btn" id="logoutBtn">退出登录</button>
+                <button class="btn btn-sm" id="logoutBtn">退出登录</button>
             </div>
         </aside>
 
-        <!-- 主内容区 -->
-        <main class="admin-main">
-            <header class="admin-header">
-                <h1 class="admin-header-title">用户中心</h1>
-            </header>
-
-            <div class="admin-content">
-                <!-- 用户信息卡片 -->
-                <div class="card">
-                    <div class="card-header">
-                        <h2 class="card-title">基本信息</h2>
-                    </div>
-                    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 20px;">
-                        <div>
-                            <div style="font-size: 14px; color: #64748b; margin-bottom: 4px;">用户名</div>
-                            <div style="font-size: 16px; font-weight: 500;" id="infoUsername">-</div>
-                        </div>
-                        <div>
-                            <div style="font-size: 14px; color: #64748b; margin-bottom: 4px;">昵称</div>
-                            <div style="font-size: 16px; font-weight: 500;" id="infoNickname">-</div>
-                        </div>
-                        <div>
-                            <div style="font-size: 14px; color: #64748b; margin-bottom: 4px;">角色</div>
-                            <div style="font-size: 16px; font-weight: 500;" id="infoRole">-</div>
-                        </div>
-                        <div>
-                            <div style="font-size: 14px; color: #64748b; margin-bottom: 4px;">注册时间</div>
-                            <div style="font-size: 16px; font-weight: 500;" id="infoCreatedAt">-</div>
-                        </div>
-                    </div>
+        <main class="content">
+            <div class="page-head">
+                <div>
+                    <h1>用户中心</h1>
+                    <p>查看账号信息、修改登录密码</p>
                 </div>
+            </div>
 
-                <!-- 修改密码卡片 -->
-                <div class="card">
-                    <div class="card-header">
-                        <h2 class="card-title">修改密码</h2>
+            <div class="grid-2">
+                <section class="card">
+                    <div class="card-head"><h2>账号信息</h2></div>
+                    <div class="card-body">
+                        <div class="field"><label>用户名</label><input class="input" id="pUsername" readonly></div>
+                        <div class="field"><label>显示名称</label><input class="input" id="pName" readonly></div>
+                        <div class="field"><label>角色</label><input class="input" id="pRole" readonly></div>
+                        <div class="field" id="createdField" hidden><label>注册时间</label><input class="input" id="pCreated" readonly></div>
                     </div>
-                    <form id="changePasswordForm" style="max-width: 500px;">
-                        <div class="form-group">
-                            <label class="form-label" for="oldPassword">旧密码</label>
-                            <input
-                                type="password"
-                                id="oldPassword"
-                                class="form-input"
-                                placeholder="请输入旧密码"
-                                required
-                                autocomplete="current-password"
-                            >
-                        </div>
+                </section>
 
-                        <div class="form-group">
-                            <label class="form-label" for="newPassword">新密码</label>
-                            <input
-                                type="password"
-                                id="newPassword"
-                                class="form-input"
-                                placeholder="请输入新密码（至少6位）"
-                                required
-                                autocomplete="new-password"
-                            >
-                        </div>
-
-                        <div class="form-group">
-                            <label class="form-label" for="confirmPassword">确认新密码</label>
-                            <input
-                                type="password"
-                                id="confirmPassword"
-                                class="form-input"
-                                placeholder="请再次输入新密码"
-                                required
-                                autocomplete="new-password"
-                            >
-                        </div>
-
-                        <button type="submit" class="btn btn-primary" id="changePasswordBtn">
-                            修改密码
-                        </button>
-                    </form>
-                </div>
-
-                <!-- 使用统计（如有） -->
-                <div class="card">
-                    <div class="card-header">
-                        <h2 class="card-title">使用统计</h2>
+                <section class="card">
+                    <div class="card-head"><h2>修改密码</h2></div>
+                    <div class="card-body">
+                        <div class="form-error" id="pwdError" hidden></div>
+                        <form id="pwdForm" novalidate>
+                            <div class="field">
+                                <label for="oldPwd">当前密码</label>
+                                <input class="input" id="oldPwd" type="password" autocomplete="current-password">
+                            </div>
+                            <div class="field">
+                                <label for="newPwd">新密码</label>
+                                <input class="input" id="newPwd" type="password" autocomplete="new-password">
+                                <div class="hint">至少 6 位，不能与当前密码相同</div>
+                            </div>
+                            <div class="field">
+                                <label for="newPwd2">确认新密码</label>
+                                <input class="input" id="newPwd2" type="password" autocomplete="new-password">
+                            </div>
+                            <button class="btn btn-primary btn-block" id="pwdBtn" type="submit">保存新密码</button>
+                        </form>
                     </div>
-                    <div class="stats-grid">
-                        <div class="stat-card">
-                            <div class="stat-header">
-                                <div class="stat-title">总对话次数</div>
-                                <div class="stat-icon primary">💬</div>
-                            </div>
-                            <div class="stat-value" id="statChatCount">-</div>
-                        </div>
-                        <div class="stat-card">
-                            <div class="stat-header">
-                                <div class="stat-title">提问次数</div>
-                                <div class="stat-icon success">❓</div>
-                            </div>
-                            <div class="stat-value" id="statQuestionCount">-</div>
-                        </div>
-                        <div class="stat-card">
-                            <div class="stat-header">
-                                <div class="stat-title">反馈次数</div>
-                                <div class="stat-icon warning">👍</div>
-                            </div>
-                            <div class="stat-value" id="statFeedbackCount">-</div>
-                        </div>
-                    </div>
-                </div>
+                </section>
             </div>
         </main>
     </div>
 
-    <script src="js/auth.js"></script>
+    <script src="/static/js/api.js"></script>
     <script>
-        // 权限检查
-        if (!requireLogin()) {
-            // 未登录会自动跳转
-        }
+    (async function () {
+        // 登录态以 GET /api/auth/me 为准（HttpOnly cookie），未登录时 guard 已跳用户登录页
+        var user = await App.guard();
+        if (!user) return;
 
-        const user = Auth.getUser();
-        const isAdmin = Auth.isAdmin();
+        var ROLE_TEXT = { admin: '管理员', user: '普通用户' };
 
-        // 显示用户信息
-        if (user) {
-            document.getElementById('userNickname').textContent = user.nickname || user.username;
-            document.getElementById('userRole').textContent = isAdmin ? '管理员' : '普通用户';
-            document.getElementById('userAvatar').textContent = isAdmin ? '👨‍💼' : '👤';
+        document.getElementById('navChat').href = App.url.userChat();
+        document.getElementById('navProfile').href = App.url.userProfile();
+        document.getElementById('logoutBtn').addEventListener('click', App.logout);
 
-            document.getElementById('infoUsername').textContent = user.username;
-            document.getElementById('infoNickname').textContent = user.nickname || '-';
-            document.getElementById('infoRole').textContent = isAdmin ? '管理员' : '普通用户';
-
-            if (user.created_at) {
-                const date = new Date(user.created_at);
-                document.getElementById('infoCreatedAt').textContent = date.toLocaleString('zh-CN');
+        function render(u) {
+            var name = u.display_name || u.name || u.username || '';
+            document.getElementById('sideName').textContent = name;
+            document.getElementById('sideRole').textContent = ROLE_TEXT[u.role] || u.role || '';
+            document.getElementById('pUsername').value = u.username || '';
+            document.getElementById('pName').value = name;
+            document.getElementById('pRole').value = ROLE_TEXT[u.role] || u.role || '';
+            if (u.created_at) {
+                document.getElementById('pCreated').value = u.created_at;
+                document.getElementById('createdField').hidden = false;
             }
         }
 
-        // 如果是管理员，显示管理菜单
-        if (isAdmin) {
-            document.getElementById('adminNav').style.display = 'block';
-        }
+        // guard 已经拿到 /api/auth/me 的结果，直接渲染
+        render(user);
 
-        // 登出
-        document.getElementById('logoutBtn').addEventListener('click', () => {
-            if (confirm('确定要退出登录吗？')) {
-                Auth.logout();
-            }
-        });
+        var form = document.getElementById('pwdForm');
+        var errEl = document.getElementById('pwdError');
+        var btn = document.getElementById('pwdBtn');
+        function showErr(msg) { errEl.textContent = msg; errEl.hidden = !msg; }
 
-        // 修改密码表单
-        const changePasswordForm = document.getElementById('changePasswordForm');
-        const oldPasswordInput = document.getElementById('oldPassword');
-        const newPasswordInput = document.getElementById('newPassword');
-        const confirmPasswordInput = document.getElementById('confirmPassword');
-        const changePasswordBtn = document.getElementById('changePasswordBtn');
-
-        changePasswordForm.addEventListener('submit', async (e) => {
+        form.addEventListener('submit', async function (e) {
             e.preventDefault();
+            var oldPwd = document.getElementById('oldPwd').value;
+            var newPwd = document.getElementById('newPwd').value;
+            var newPwd2 = document.getElementById('newPwd2').value;
 
-            const oldPassword = oldPasswordInput.value;
-            const newPassword = newPasswordInput.value;
-            const confirmPassword = confirmPasswordInput.value;
+            if (!oldPwd || !newPwd) return showErr('请填写当前密码和新密码');
+            if (newPwd.length < 6) return showErr('新密码长度不能少于 6 位');
+            if (newPwd === oldPwd) return showErr('新密码不能与当前密码相同');
+            if (newPwd !== newPwd2) return showErr('两次输入的新密码不一致');
 
-            // 客户端验证
-            if (newPassword.length < 6) {
-                showToast('新密码长度不能少于6位', 'error');
-                return;
-            }
-
-            if (newPassword !== confirmPassword) {
-                showToast('两次输入的新密码不一致', 'error');
-                return;
-            }
-
-            if (oldPassword === newPassword) {
-                showToast('新密码不能与旧密码相同', 'error');
-                return;
-            }
-
-            // 禁用表单
-            changePasswordBtn.disabled = true;
-            changePasswordBtn.textContent = '修改中...';
-
+            showErr('');
+            btn.disabled = true;
             try {
-                const result = await Auth.changePassword(oldPassword, newPassword);
-
-                if (result.success) {
-                    showToast(result.message, 'success');
-                    changePasswordForm.reset();
-
-                    // 2秒后跳转登录页
-                    setTimeout(() => {
-                        Auth.logout();
-                    }, 2000);
-                } else {
-                    showToast(result.message, 'error');
-                    changePasswordBtn.disabled = false;
-                    changePasswordBtn.textContent = '修改密码';
-                }
-            } catch (error) {
-                showToast('修改失败：' + error.message, 'error');
-                changePasswordBtn.disabled = false;
-                changePasswordBtn.textContent = '修改密码';
+                // 旧密码错误时后端返回 401 AUTH_FAILED，这里不能当成登录过期处理
+                await App.post('/api/auth/change-password',
+                    { old_password: oldPwd, new_password: newPwd },
+                    { noRedirect: true });
+                App.toast('密码修改成功，请重新登录', 'success');
+                // 改密成功后走 logout 清掉服务端 cookie，再回用户登录页
+                setTimeout(function () { App.logout(); }, 1200);
+            } catch (err) {
+                if (err.status === 401 && err.code !== 'AUTH_FAILED') { App.toLogin(); return; }
+                showErr(err.message || '密码修改失败');
+                btn.disabled = false;
             }
         });
-
-        // 加载使用统计（Mock 数据）
-        // TODO: 等待后端 API 实现
-        function loadUserStats() {
-            // Mock 数据
-            document.getElementById('statChatCount').textContent = '42';
-            document.getElementById('statQuestionCount').textContent = '128';
-            document.getElementById('statFeedbackCount').textContent = '15';
-
-            // 真实 API 调用示例：
-            // Auth.fetchWithAuth('/api/user/stats')
-            //     .then(res => res.json())
-            //     .then(data => {
-            //         document.getElementById('statChatCount').textContent = data.chat_count;
-            //         document.getElementById('statQuestionCount').textContent = data.question_count;
-            //         document.getElementById('statFeedbackCount').textContent = data.feedback_count;
-            //     })
-            //     .catch(err => console.error('加载统计失败', err));
-        }
-
-        loadUserStats();
+    })();
     </script>
 </body>
 </html>

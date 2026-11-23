@@ -520,16 +520,40 @@
         .feedback-btn.active { background: #e2e8f0; color: #94a3b8; cursor: not-allowed; }
         .feedback-status { font-size: 12px; color: #94a3b8; line-height: 28px; }
 
+        /* 顶栏右侧：当前用户 / 用户中心 / 退出 */
+        .chat-header-user {
+            margin-left: auto;
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            font-size: 13px;
+        }
+        .chat-header-name { color: var(--text-secondary); margin-right: 8px; }
+        .header-link {
+            padding: 6px 10px;
+            border: none;
+            border-radius: 6px;
+            background: transparent;
+            color: var(--text-secondary);
+            font: inherit;
+            text-decoration: none;
+            cursor: pointer;
+        }
+        .header-link:hover { background: var(--ai-bubble); color: var(--text); }
+
         /* 响应式 */
         @media (max-width: 768px) {
+            .chat-header-name { display: none; }
             .sidebar { display: none; }
             .messages-inner, .input-inner { padding-left: 16px; padding-right: 16px; }
             .welcome-tips { grid-template-columns: 1fr; }
         }
     </style>
-    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <!-- 本地 vendored，内网断网可用；不再依赖 cdn.jsdelivr.net -->
+    <script src="/static/vendor/marked.min.js"></script>
+    <script src="/static/js/api.js"></script>
 </head>
-<body>
+<body data-scope="user">
     <aside class="sidebar">
         <div class="sidebar-header">
             <button class="new-chat-btn" id="newChatBtn">
@@ -551,6 +575,11 @@
             <div>
                 <div class="chat-header-title">智慧法庭 AI 助手</div>
                 <div class="chat-header-subtitle">基于知识库的智能问答</div>
+            </div>
+            <div class="chat-header-user">
+                <span class="chat-header-name" id="headerUserName"></span>
+                <a class="header-link" id="profileLink" href="/profile">用户中心</a>
+                <button class="header-link" id="logoutBtn" type="button">退出登录</button>
             </div>
         </header>
 
@@ -595,6 +624,28 @@
     <div class="error-toast" id="errorToast"></div>
 
     <script>
+    (async function () {
+        // ---- 登录守卫：以 GET /api/auth/me 为准（HttpOnly cookie，前端不存 token/role）----
+        // 未登录时 App.guard() 已跳转用户登录页，后面的聊天逻辑不执行
+        const currentUser = await App.guard();
+        if (!currentUser) return;
+
+        document.getElementById('headerUserName').textContent =
+            currentUser.display_name || currentUser.name || currentUser.username || '';
+        document.getElementById('profileLink').href = App.url.userProfile();
+        document.getElementById('logoutBtn').addEventListener('click', App.logout);
+
+        // 聊天/反馈接口的请求头：cookie 自动携带，写操作补 CSRF 头；401 统一回用户登录页
+        function authHeaders() {
+            return Object.assign({ 'Content-Type': 'application/json' }, App.csrfHeaders());
+        }
+        function checkUnauthorized(resp) {
+            if (resp.status === 401) {
+                App.toLogin();
+                throw new Error('登录已过期，请重新登录');
+            }
+        }
+
         const chatMessages = document.getElementById('chatMessages');
         const messagesInner = document.getElementById('messagesInner');
         const chatInput = document.getElementById('chatInput');
@@ -764,7 +815,8 @@
         }
 
         // ---- 对话存储（localStorage）----
-        const STORAGE_KEY = 'ai_chat_conversations';
+        // 按用户隔离本地对话记录，同一浏览器换账号登录时互相看不到
+        const STORAGE_KEY = 'ai_chat_conversations:' + (currentUser.user_id || currentUser.username);
         let conversations = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
         let currentConvId = null;
 
@@ -1098,10 +1150,12 @@
             try {
                 const resp = await fetch('/api/chat', {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
+                    headers: authHeaders(),
+                    credentials: 'same-origin',
                     body: JSON.stringify(reqBody)
                 });
                 hideTyping();
+                checkUnauthorized(resp);
                 if (!resp.ok) {
                     const err = await resp.json();
                     throw new Error(err.error || '请求失败');
@@ -1191,7 +1245,8 @@
 
                 const resp = await fetch('/api/feedback', {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
+                    headers: authHeaders(),
+                    credentials: 'same-origin',
                     body: JSON.stringify({
                         session_id: currentConvId,
                         record_id: recordId,
@@ -1199,10 +1254,11 @@
                         feedback_text: text
                     })
                 });
+                checkUnauthorized(resp);
 
                 if (!resp.ok) {
                     const err = await resp.json();
-                    throw new Error(err.error || '反馈提交失败');
+                    throw new Error(err.error || err.message || '反馈提交失败');
                 }
 
                 return true;
@@ -1212,7 +1268,11 @@
             }
         }
 
+        // 欢迎卡片通过 onclick="askQuestion(...)" 调用，脚本包在 async 函数里后需显式挂到全局
+        window.askQuestion = askQuestion;
+
         chatInput.focus();
+    })();
     </script>
 </body>
 </html>

@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>数据统计 - 管理后台</title>
+    <link rel="stylesheet" href="/static/css/app.css">
+</head>
+<body data-scope="admin">
+    <div class="layout" id="layout" hidden>
+        <aside class="side">
+            <div class="side-brand"><div class="brand-mark">⚙</div>管理后台</div>
+            <nav class="side-nav">
+                <a id="navData" href="#" class="active">数据统计</a>
+                <a id="navUsers" href="#">用户管理</a>
+            </nav>
+            <div class="side-user">
+                <div><div class="name" id="sideName"></div><div class="role">管理员</div></div>
+                <button class="btn btn-sm" id="logoutBtn" type="button">退出登录</button>
+            </div>
+        </aside>
+
+        <main class="content">
+            <div class="page-head">
+                <div>
+                    <h1>数据统计</h1>
+                    <p>问答量、点赞率、活跃用户与高频问题 <span id="rangeText" style="color:var(--text-3)"></span></p>
+                </div>
+                <div class="tabs" id="rangeTabs">
+                    <button type="button" data-days="7" class="active">近 7 天</button>
+                    <button type="button" data-days="30">近 30 天</button>
+                    <button type="button" data-days="90">近 90 天</button>
+                </div>
+            </div>
+
+            <div class="stats">
+                <div class="stat"><div class="label">问答总量</div><div class="value" id="sQueries">-</div><div class="sub">所选时间范围内</div></div>
+                <div class="stat"><div class="label">会话数</div><div class="value" id="sSessions">-</div><div class="sub">去重会话</div></div>
+                <div class="stat"><div class="label">活跃用户</div><div class="value" id="sActive">-</div><div class="sub" id="sUsers">注册用户 -</div></div>
+                <div class="stat"><div class="label">点赞率</div><div class="value" id="sLikeRate">-</div><div class="sub" id="sLikeDetail">-</div></div>
+                <div class="stat"><div class="label">点踩数</div><div class="value" id="sDislike">-</div><div class="sub">需关注的回答</div></div>
+            </div>
+
+            <div class="grid-2">
+                <div class="card">
+                    <div class="card-head"><h2>问答量趋势</h2></div>
+                    <div class="card-body"><div id="trendChart"><div class="empty">加载中…</div></div></div>
+                </div>
+                <div class="card">
+                    <div class="card-head"><h2>高频问题 Top 10</h2></div>
+                    <div class="card-body"><div class="bar-list" id="topList"><div class="empty">加载中…</div></div></div>
+                </div>
+            </div>
+
+            <div class="grid-2">
+                <div class="card">
+                    <div class="card-head"><h2>活跃用户 Top 10</h2></div>
+                    <div class="card-body"><div class="bar-list" id="topUsers"><div class="empty">加载中…</div></div></div>
+                </div>
+                <div class="card">
+                    <div class="card-head"><h2>来源分布</h2></div>
+                    <div class="card-body"><div class="bar-list" id="sourceList"><div class="empty">加载中…</div></div></div>
+                </div>
+            </div>
+
+            <div class="card">
+                <div class="card-head">
+                    <div class="tabs" id="detailTabs">
+                        <button type="button" data-tab="history" class="active">问答历史</button>
+                        <button type="button" data-tab="feedback">反馈记录</button>
+                    </div>
+                    <div class="toolbar">
+                        <select class="select" id="fSource">
+                            <option value="">全部来源</option>
+                            <option value="web">Web</option>
+                            <option value="feishu">飞书</option>
+                            <option value="wechat">微信</option>
+                        </select>
+                        <select class="select" id="fType" hidden>
+                            <option value="">全部反馈</option>
+                            <option value="like">点赞</option>
+                            <option value="dislike">点踩</option>
+                        </select>
+                        <input class="input" id="fKeyword" placeholder="问题关键词（仅问答历史）">
+                        <input class="input" id="fUserId" placeholder="用户 ID（可选）">
+                        <button class="btn btn-ghost" id="fSearch" type="button">查询</button>
+                    </div>
+                </div>
+                <div class="table-wrap">
+                    <table class="table">
+                        <thead id="detailHead"></thead>
+                        <tbody id="detailRows"><tr><td class="empty">加载中…</td></tr></tbody>
+                    </table>
+                </div>
+                <div class="pager">
+                    <span id="pagerInfo"></span>
+                    <div class="btns">
+                        <button class="btn btn-ghost btn-sm" id="prevBtn" type="button">上一页</button>
+                        <button class="btn btn-ghost btn-sm" id="nextBtn" type="button">下一页</button>
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <!-- 详情弹窗 -->
+    <div class="modal-mask" id="detailModal" hidden>
+        <div class="modal wide">
+            <div class="modal-head"><h3>问答详情</h3><button class="modal-close" data-close type="button">&times;</button></div>
+            <div class="modal-body" id="detailBody"></div>
+        </div>
+    </div>
+
+    <script src="/static/js/api.js"></script>
+    <script src="/static/js/admin-api.js"></script>
+    <script src="/static/js/charts.js"></script>
+    <script src="/static/js/admin-data.js"></script>
+</body>
+</html>

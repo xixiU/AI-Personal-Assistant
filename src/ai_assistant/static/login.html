@@ -3,137 +3,70 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>登录 - AI 助手管理系统</title>
-    <link rel="stylesheet" href="css/admin.css">
+    <title>登录 - 智慧法庭 AI 助手</title>
+    <link rel="stylesheet" href="/static/css/app.css">
 </head>
-<body>
-    <div class="login-container">
-        <div class="login-box">
-            <div class="login-header">
-                <div class="login-logo">⚖</div>
-                <h1 class="login-title">AI 助手管理系统</h1>
-                <p class="login-subtitle">请登录以继续使用</p>
+<body data-scope="user">
+    <div class="auth-page">
+        <div class="auth-card">
+            <div class="auth-brand">
+                <div class="brand-mark">⚖</div>
+                <h1>智慧法庭 AI 助手</h1>
+                <p>请使用账号登录后开始对话</p>
             </div>
 
-            <form id="loginForm">
-                <div class="form-group">
-                    <label class="form-label" for="username">用户名</label>
-                    <input
-                        type="text"
-                        id="username"
-                        class="form-input"
-                        placeholder="请输入用户名"
-                        required
-                        autocomplete="username"
-                    >
-                </div>
+            <div class="form-error" id="formError" hidden></div>
 
-                <div class="form-group">
-                    <label class="form-label" for="password">密码</label>
-                    <input
-                        type="password"
-                        id="password"
-                        class="form-input"
-                        placeholder="请输入密码"
-                        required
-                        autocomplete="current-password"
-                    >
+            <form id="loginForm" novalidate>
+                <div class="field">
+                    <label for="username">用户名</label>
+                    <input class="input" id="username" name="username" autocomplete="username" required autofocus>
                 </div>
-
-                <button type="submit" class="btn btn-primary" id="loginBtn">
-                    登录
-                </button>
+                <div class="field">
+                    <label for="password">密码</label>
+                    <input class="input" id="password" name="password" type="password" autocomplete="current-password" required>
+                </div>
+                <button class="btn btn-primary btn-block" id="submitBtn" type="submit">登录</button>
             </form>
 
-            <div style="margin-top: 20px; padding-top: 20px; border-top: 1px solid #e2e8f0; font-size: 13px; color: #64748b; text-align: center;">
-                <p>测试账号（开发阶段）：</p>
-                <p>管理员：admin / admin123</p>
-                <p>普通用户：user / user123</p>
-            </div>
+            <div class="auth-foot">忘记密码请联系管理员重置</div>
         </div>
     </div>
 
-    <script src="js/auth.js"></script>
+    <script src="/static/js/api.js"></script>
     <script>
-        const loginForm = document.getElementById('loginForm');
-        const usernameInput = document.getElementById('username');
-        const passwordInput = document.getElementById('password');
-        const loginBtn = document.getElementById('loginBtn');
+    (function () {
+        // 已登录（以 /api/auth/me 为准）直接进聊天页
+        App.fetchMe().then(function (me) {
+            if (me) location.replace(App.nextUrl(App.url.userChat()));
+        }).catch(function () { /* 查询失败时停留在登录页 */ });
 
-        // 如果已登录，跳转到用户中心
-        if (Auth.isLoggedIn()) {
-            if (Auth.isAdmin()) {
-                window.location.href = '/static/admin-users.html';
-            } else {
-                window.location.href = '/static/user-profile.html';
-            }
-        }
+        var form = document.getElementById('loginForm');
+        var errEl = document.getElementById('formError');
+        var btn = document.getElementById('submitBtn');
 
-        loginForm.addEventListener('submit', async (e) => {
+        function showErr(msg) { errEl.textContent = msg; errEl.hidden = !msg; }
+
+        form.addEventListener('submit', async function (e) {
             e.preventDefault();
+            var username = form.username.value.trim();
+            var password = form.password.value;
+            if (!username || !password) { showErr('请输入用户名和密码'); return; }
 
-            const username = usernameInput.value.trim();
-            const password = passwordInput.value;
-
-            // 客户端验证
-            if (!username) {
-                showToast('请输入用户名', 'error');
-                return;
-            }
-
-            if (!password) {
-                showToast('请输入密码', 'error');
-                return;
-            }
-
-            if (password.length < 6) {
-                showToast('密码长度不能少于6位', 'error');
-                return;
-            }
-
-            // 禁用表单
-            loginBtn.disabled = true;
-            loginBtn.textContent = '登录中...';
-
+            showErr('');
+            btn.disabled = true;
+            btn.textContent = '登录中…';
             try {
-                const result = await Auth.login(username, password);
-
-                if (result.success) {
-                    // 保存 Token 和用户信息
-                    Auth.setToken(result.data.token);
-                    Auth.setUser(result.data.user);
-
-                    showToast('登录成功', 'success');
-
-                    // 根据角色跳转
-                    setTimeout(() => {
-                        if (result.data.user.role === 'admin') {
-                            window.location.href = '/static/admin-users.html';
-                        } else {
-                            window.location.href = '/static/user-profile.html';
-                        }
-                    }, 500);
-                } else {
-                    showToast(result.message, 'error');
-                    loginBtn.disabled = false;
-                    loginBtn.textContent = '登录';
-                }
-            } catch (error) {
-                showToast('登录失败：' + error.message, 'error');
-                loginBtn.disabled = false;
-                loginBtn.textContent = '登录';
+                // POST /api/auth/login：成功后服务端下发 HttpOnly 会话 cookie，前端不保存 token
+                await App.post('/api/auth/login', { username: username, password: password }, { noRedirect: true });
+                location.replace(App.nextUrl(App.url.userChat()));
+            } catch (err) {
+                showErr(err.message || '登录失败');
+                btn.disabled = false;
+                btn.textContent = '登录';
             }
         });
-
-        // 回车登录
-        passwordInput.addEventListener('keypress', (e) => {
-            if (e.key === 'Enter') {
-                loginForm.dispatchEvent(new Event('submit'));
-            }
-        });
-
-        // 聚焦用户名输入框
-        usernameInput.focus();
+    })();
     </script>
 </body>
 </html>
