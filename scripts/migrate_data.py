@@ -3,13 +3,14 @@
 
 将现有 JSONL 数据（chat_history 和 feedback）迁移到数据库
 支持增量迁移，避免重复导入
+自动创建历史用户记录
 """
 
 import json
 import sys
 from pathlib import Path
 from datetime import datetime
-from typing import List, Tuple
+from typing import List, Tuple, Set, Dict
 from loguru import logger
 
 # 添加项目根目录到 Python 路径
@@ -17,7 +18,8 @@ project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root / "src"))
 
 from ai_assistant.core.database import DatabaseManager
-from ai_assistant.models import ChatHistoryDB, FeedbackDB
+from ai_assistant.core.user_manager import UserManager
+from ai_assistant.models import ChatHistoryDB, FeedbackDB, User
 
 
 def migrate_chat_history(
@@ -204,6 +206,131 @@ def migrate_feedback(
     return success_count, skip_count
 
 
+def extract_users_from_jsonl(
+    history_dir: Path,
+    feedback_dir: Path
+) -> Set[Tuple[str, str]]:
+    """
+    从 JSONL 文件提取所有唯一用户（user_id, user_name）
+
+    Args:
+        history_dir: chat_history 目录路径
+        feedback_dir: feedback 目录路径
+
+    Returns:
+        Set of (user_id, user_name) tuples
+    """
+    users = set()
+
+    # 从 chat_history 提取
+    if history_dir.exists():
+        for jsonl_file in history_dir.glob("*.jsonl"):
+            try:
+                with open(jsonl_file, "r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            record = json.loads(line)
+                            user_id = record.get("user_id")
+                            user_name = record.get("user_name", "")
+
+                            # 提取域账号
+                            if user_name and " " in user_name:
+                                user_name = user_name.split()[-1]
+
+                            if user_id and user_name:
+                                users.add((user_id, user_name))
+                        except json.JSONDecodeError:
+                            continue
+            except Exception as e:
+                logger.warning(f"读取文件失败 {jsonl_file}: {e}")
+                continue
+
+    # 从 feedback 提取
+    if feedback_dir.exists():
+        for jsonl_file in feedback_dir.glob("*.jsonl"):
+            try:
+                with open(jsonl_file, "r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            record = json.loads(line)
+                            user_id = record.get("user_id")
+                            user_name = record.get("user_name", "")
+
+                            # 提取域账号
+                            if user_name and " " in user_name:
+                                user_name = user_name.split()[-1]
+
+                            if user_id and user_name:
+                                users.add((user_id, user_name))
+                        except json.JSONDecodeError:
+                            continue
+            except Exception as e:
+                logger.warning(f"读取文件失败 {jsonl_file}: {e}")
+                continue
+
+    return users
+
+
+def migrate_users(
+    user_manager: UserManager,
+    users: Set[Tuple[str, str]]
+) -> Tuple[int, int]:
+    """
+    批量创建历史用户
+
+    Args:
+        user_manager: 用户管理器
+        users: Set of (user_id/feishu_open_id, username) tuples
+
+    Returns:
+        (成功数量, 跳过数量)
+    """
+    success_count = 0
+    skip_count = 0
+
+    logger.info(f"开始迁移 {len(users)} 个唯一用户")
+
+    for user_id, username in users:
+        try:
+            # 检查用户是否已存在（通过 feishu_open_id 或 username）
+            existing_user = user_manager.get_user_by_feishu_open_id(user_id)
+            if not existing_user:
+                existing_user = user_manager.get_user(user_id)  # 也检查 user_id
+
+            if existing_user:
+                skip_count += 1
+                continue
+
+            # 创建用户（使用随机密码）
+            password = user_manager.generate_random_password(8)
+            new_user_id = user_manager.create_user(
+                username=username,
+                password=password,
+                feishu_open_id=user_id,  # 将 user_id 作为 feishu_open_id
+                display_name=username,
+                role="user",
+                is_active=True
+            )
+
+            if new_user_id:
+                success_count += 1
+                logger.debug(f"创建用户: username={username}, feishu_open_id={user_id}")
+            else:
+                logger.warning(f"创建用户失败: username={username}")
+
+        except Exception as e:
+            logger.error(f"创建用户异常 ({username}, {user_id}): {e}")
+            continue
+
+    return success_count, skip_count
+
+
 def main():
     """主函数"""
     logger.info("=" * 60)
@@ -220,6 +347,46 @@ def main():
     # 创建表
     logger.info("创建数据库表...")
     db_manager.create_tables()
+
+    # 初始化用户管理器
+    user_manager = UserManager(db_manager)
+
+    # 数据目录
+    history_dir = Path("./data/chat_history")
+    feedback_dir = Path("./data/feedback")
+
+    # 1. 提取所有用户
+    logger.info("\n[1/4] 提取历史用户...")
+    users = extract_users_from_jsonl(history_dir, feedback_dir)
+    logger.info(f"提取到 {len(users)} 个唯一用户")
+
+    # 2. 迁移用户
+    logger.info("\n[2/4] 迁移用户...")
+    user_success, user_skip = migrate_users(user_manager, users)
+    logger.info(f"用户迁移完成: 成功 {user_success}, 跳过 {user_skip}")
+
+    # 3. 迁移对话历史
+    logger.info("\n[3/4] 迁移对话历史...")
+    history_success, history_skip = migrate_chat_history(
+        db_manager, history_dir, batch_size=100
+    )
+    logger.info(f"对话历史迁移完成: 成功 {history_success}, 跳过 {history_skip}")
+
+    # 4. 迁移反馈
+    logger.info("\n[4/4] 迁移反馈...")
+    feedback_success, feedback_skip = migrate_feedback(
+        db_manager, feedback_dir, batch_size=100
+    )
+    logger.info(f"反馈迁移完成: 成功 {feedback_success}, 跳过 {feedback_skip}")
+
+    # 总结
+    logger.info("\n" + "=" * 60)
+    logger.info("数据迁移完成")
+    logger.info("=" * 60)
+    logger.info(f"用户:     成功 {user_success}, 跳过 {user_skip}")
+    logger.info(f"对话历史: 成功 {history_success}, 跳过 {history_skip}")
+    logger.info(f"反馈:     成功 {feedback_success}, 跳过 {feedback_skip}")
+    logger.info("=" * 60)
 
     # 数据目录
     data_dir = Path("./data")
