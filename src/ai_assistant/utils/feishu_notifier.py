@@ -103,7 +103,7 @@ class FeishuNotifier:
 
             # 构建消息内容
             message_lines = [
-                "🎉 您的账号已自动注册成功！",
+                "🎉 您的其他端账号已自动注册成功！",
                 "",
                 f"📧 登录名: {username}",
                 f"🔑 初始密码: {password}",
@@ -113,7 +113,7 @@ class FeishuNotifier:
 
             if frontend_url:
                 message_lines.append("")
-                message_lines.append(f"🌐 前端地址: {frontend_url}")
+                message_lines.append(f"🌐 前端地址(请先连接公司vpn): {frontend_url}")
 
             message_text = "\n".join(message_lines)
 
@@ -178,7 +178,7 @@ class FeishuNotifier:
                     "tag": "div",
                     "text": {
                         "tag": "lark_md",
-                        "content": "🎉 **您的账号已自动注册成功！**"
+                        "content": "🎉 **您的其他端账号已自动注册成功！**"
                     }
                 },
                 {
@@ -223,7 +223,7 @@ class FeishuNotifier:
                             "tag": "button",
                             "text": {
                                 "tag": "plain_text",
-                                "content": "🌐 前往登录"
+                                "content": "🌐 前往登录(请先连接公司vpn)"
                             },
                             "type": "primary",
                             "url": frontend_url
