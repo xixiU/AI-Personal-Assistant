@@ -1879,7 +1879,7 @@ class AIAssistant:
             username=username,
             password=password,
             feishu_open_id=feishu_open_id,
-            name=display_name,  # 注意：这里是 name 参数，会映射到 display_name
+            display_name=display_name,  # 修正：参数名是 display_name
             role="user"
         )
 
