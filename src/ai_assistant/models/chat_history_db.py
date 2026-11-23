@@ -147,5 +147,5 @@ class ChatHistoryDB(Base):
             context_key=record.get("context_key"),
             chain_info=record.get("chain_info"),
             message_id=record.get("message_id"),
-            metadata=record.get("metadata"),
+            extra_data=record.get("metadata"),  # JSONL 中是 metadata，映射到 extra_data
         )
