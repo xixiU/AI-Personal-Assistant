@@ -1221,7 +1221,10 @@ class FeishuBotAdapter(IMAdapter):
             feedbacks = None
             if record_id:
                 try:
-                    feedback_mgr = FeedbackManager()
+                    feedback_mgr = FeedbackManager(
+                        feedback_dir=getattr(self.assistant.config, 'feedback_dir', './data/feedback'),
+                        db_manager=self.assistant.db_manager  # 启用双写
+                    )
                     feedbacks = feedback_mgr.get_feedbacks_by_record_id(record_id)
                     if feedbacks:
                         logger.info(f"📝 Found {len(feedbacks)} existing feedbacks for record_id={record_id}")
@@ -1298,7 +1301,10 @@ class FeishuBotAdapter(IMAdapter):
                        f"user={user_id}, user_name={user_name}, chat={chat_id}")
 
             from ai_assistant.core.feedback_manager import FeedbackManager
-            feedback_mgr = FeedbackManager()
+            feedback_mgr = FeedbackManager(
+                feedback_dir=getattr(self.assistant.config, 'feedback_dir', './data/feedback'),
+                db_manager=self.assistant.db_manager  # 启用双写
+            )
 
             # ===== 分支 0: 取消点踩表单 =====
             if action_value.get("action") == "cancel_dislike_feedback":
@@ -1311,7 +1317,10 @@ class FeishuBotAdapter(IMAdapter):
                 from ai_assistant.core.chat_history import ChatHistoryManager
                 from ai_assistant.utils.feishu_message import FeishuMessageBuilder
 
-                chat_history_mgr = ChatHistoryManager()
+                chat_history_mgr = ChatHistoryManager(
+                    history_dir=getattr(self.assistant.config, 'chat_history_dir', './data/chat_history'),
+                    db_manager=self.assistant.db_manager  # 启用双写
+                )
                 history_record = chat_history_mgr.get_record_by_id(record_id)
 
                 if not history_record:
@@ -1376,7 +1385,10 @@ class FeishuBotAdapter(IMAdapter):
                 from ai_assistant.core.chat_history import ChatHistoryManager
                 from ai_assistant.utils.feishu_message import FeishuMessageBuilder
 
-                chat_history_mgr = ChatHistoryManager()
+                chat_history_mgr = ChatHistoryManager(
+                    history_dir=getattr(self.assistant.config, 'chat_history_dir', './data/chat_history'),
+                    db_manager=self.assistant.db_manager  # 启用双写
+                )
                 history_record = chat_history_mgr.get_record_by_id(record_id)
 
                 if not history_record:
@@ -1445,7 +1457,10 @@ class FeishuBotAdapter(IMAdapter):
                 from ai_assistant.core.chat_history import ChatHistoryManager
                 from ai_assistant.utils.feishu_message import FeishuMessageBuilder
 
-                chat_history_mgr = ChatHistoryManager()
+                chat_history_mgr = ChatHistoryManager(
+                    history_dir=getattr(self.assistant.config, 'chat_history_dir', './data/chat_history'),
+                    db_manager=self.assistant.db_manager  # 启用双写
+                )
                 history_record = chat_history_mgr.get_record_by_id(record_id)
 
                 if not history_record:
@@ -1499,7 +1514,10 @@ class FeishuBotAdapter(IMAdapter):
                 logger.warning(f"⚠️ record_id not found in cache for message_id={message_id}, trying API fallback...")
                 try:
                     from ai_assistant.core.chat_history import ChatHistoryManager
-                    history_mgr = ChatHistoryManager(history_dir="data/chat_history")
+                    history_mgr = ChatHistoryManager(
+                        history_dir="data/chat_history",
+                        db_manager=self.assistant.db_manager  # 启用双写
+                    )
 
                     # 优先通过 message_id 精确查找
                     record_id = history_mgr.find_record_by_message_id(message_id, source="feishu")
@@ -1548,7 +1566,10 @@ class FeishuBotAdapter(IMAdapter):
                 from ai_assistant.core.chat_history import ChatHistoryManager
                 from ai_assistant.utils.feishu_message import FeishuMessageBuilder
 
-                chat_history_mgr = ChatHistoryManager()
+                chat_history_mgr = ChatHistoryManager(
+                    history_dir=getattr(self.assistant.config, 'chat_history_dir', './data/chat_history'),
+                    db_manager=self.assistant.db_manager  # 启用双写
+                )
                 history_record = chat_history_mgr.get_record_by_id(record_id)
 
                 if not history_record:

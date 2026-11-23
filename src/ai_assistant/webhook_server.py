@@ -76,8 +76,8 @@ class WebhookServer:
         if self.admin_path in reserved_paths or self.admin_path.startswith('/api/') or self.admin_path.startswith('/webhook/'):
             raise ValueError(f"管理员路径 {self.admin_path} 与保留路径冲突，请配置其他路径")
 
-        # 初始化 FeedbackManager
-        self.feedback_manager = FeedbackManager()
+        # 初始化 FeedbackManager（延迟到 set_assistant 时获取 db_manager）
+        self.feedback_manager = None
 
         # 用于存储 API 相关组件
         self.user_manager = None
