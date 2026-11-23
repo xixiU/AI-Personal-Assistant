@@ -487,3 +487,42 @@ def reset_user_password(user_id: str):
     except Exception as e:
         logger.error(f"重置密码异常: {e}", exc_info=True)
         return jsonify(error_response("服务器内部错误", "INTERNAL_ERROR")), 500
+
+
+@admin_bp.route('/users/list', methods=['GET'])
+def get_users_list():
+    """
+    获取所有用户列表（用于下拉框）
+
+    响应：
+    {
+        "success": true,
+        "data": [
+            {"user_id": "uuid", "username": "user1", "display_name": "用户1"},
+            ...
+        ]
+    }
+    """
+    if not _user_manager:
+        return jsonify(error_response("用户管理服务未初始化", "SERVICE_UNAVAILABLE")), 503
+
+    try:
+        # 获取所有活跃用户
+        with _user_manager.db_manager.get_session() as session:
+            from ai_assistant.models import User
+            users = session.query(User).filter(User.is_active == True).all()
+
+            user_list = [
+                {
+                    "user_id": user.user_id,
+                    "username": user.username,
+                    "display_name": user.display_name or user.username
+                }
+                for user in users
+            ]
+
+        logger.info(f"获取用户列表成功: 共 {len(user_list)} 个用户")
+        return jsonify(success_response(user_list))
+    except Exception as e:
+        logger.error(f"获取用户列表失败: {e}", exc_info=True)
+        return jsonify(error_response(f"获取用户列表失败: {str(e)}", "QUERY_ERROR")), 500
