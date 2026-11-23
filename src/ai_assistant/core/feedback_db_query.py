@@ -296,3 +296,53 @@ class FeedbackDBQuery:
         """
         feedback_types = self.get_feedback_types(record_ids)
         return {rid: (ftype is not None) for rid, ftype in feedback_types.items()}
+
+    def get_daily_stats(self, days: int = 7) -> List[Dict]:
+        """
+        获取每日反馈趋势统计
+
+        Args:
+            days: 统计最近 N 天
+
+        Returns:
+            每日统计列表，格式: [{"date": "2024-01-01", "count": 10}, ...]
+            注意：会补全空白日期（count=0）
+        """
+        try:
+            with self.db_manager.get_session() as session:
+                # 计算开始日期
+                start_date = datetime.now() - timedelta(days=days)
+
+                # 按日期分组统计
+                query_obj = session.query(
+                    func.date(FeedbackDB.timestamp).label('date'),
+                    func.count(FeedbackDB.feedback_id).label('count')
+                ).filter(
+                    FeedbackDB.timestamp >= start_date
+                ).group_by(
+                    func.date(FeedbackDB.timestamp)
+                ).order_by('date')
+
+                results = query_obj.all()
+
+                # 构建日期到计数的映射
+                data_map = {str(row.date): row.count for row in results}
+
+                # 补全所有日期（包括没有数据的日期）
+                complete_data = []
+                current_date = start_date.date()
+                end_date = datetime.now().date()
+
+                while current_date <= end_date:
+                    date_str = str(current_date)
+                    complete_data.append({
+                        "date": date_str,
+                        "count": data_map.get(date_str, 0)
+                    })
+                    current_date += timedelta(days=1)
+
+                return complete_data
+
+        except Exception as e:
+            logger.error(f"获取每日反馈统计失败: {e}", exc_info=True)
+            return []

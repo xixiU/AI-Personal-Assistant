@@ -403,8 +403,20 @@ def get_stats():
             "like_rate": like_rate
         }
 
-        # 2. 每日问答趋势
-        daily = _chat_history_db.get_daily_stats(days=days)
+        # 2. 每日问答趋势（多指标）
+        daily_questions = _chat_history_db.get_daily_stats(days=days)
+        daily_feedbacks = _feedback_manager.get_daily_stats(days=days)
+        daily_active_users = _chat_history_db.get_daily_active_users(days=days)
+
+        # 合并为统一的趋势数据结构
+        trend_data = []
+        for i, item in enumerate(daily_questions):
+            trend_data.append({
+                "date": item["date"],
+                "questions": item["count"],
+                "feedbacks": daily_feedbacks[i]["count"] if i < len(daily_feedbacks) else 0,
+                "active_users": daily_active_users[i]["count"] if i < len(daily_active_users) else 0
+            })
 
         # 3. 高频问题 Top 10（支持语义聚类）
         use_clustering = request.args.get('clustering', 'false', type=str).lower() == 'true'
@@ -436,7 +448,7 @@ def get_stats():
 
         return jsonify(success_response({
             "summary": summary,
-            "daily": daily,
+            "trend_data": trend_data,
             "top_questions": top_questions,
             "top_users": top_users,
             "sources": sources,

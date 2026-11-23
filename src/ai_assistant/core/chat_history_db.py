@@ -415,6 +415,58 @@ class ChatHistoryDBQuery:
             logger.error(f"获取活跃用户数失败: {e}", exc_info=True)
             return 0
 
+    def get_daily_active_users(self, days: int = 7) -> List[Dict]:
+        """
+        获取每日活跃用户数趋势统计
+
+        Args:
+            days: 统计最近 N 天
+
+        Returns:
+            每日统计列表，格式: [{"date": "2024-01-01", "count": 5}, ...]
+            注意：会补全空白日期（count=0）
+        """
+        try:
+            with self.db_manager.get_session() as session:
+                # 计算开始日期
+                start_date = datetime.now() - timedelta(days=days)
+
+                # 按日期分组统计不重复的用户数
+                query_obj = session.query(
+                    func.date(ChatHistoryDB.timestamp).label('date'),
+                    func.count(func.distinct(ChatHistoryDB.user_id)).label('count')
+                ).filter(
+                    ChatHistoryDB.timestamp >= start_date,
+                    ChatHistoryDB.user_id.isnot(None),
+                    ChatHistoryDB.user_id != ''
+                ).group_by(
+                    func.date(ChatHistoryDB.timestamp)
+                ).order_by('date')
+
+                results = query_obj.all()
+
+                # 构建日期到计数的映射
+                data_map = {str(row.date): row.count for row in results}
+
+                # 补全所有日期（包括没有数据的日期）
+                complete_data = []
+                current_date = start_date.date()
+                end_date = datetime.now().date()
+
+                while current_date <= end_date:
+                    date_str = str(current_date)
+                    complete_data.append({
+                        "date": date_str,
+                        "count": data_map.get(date_str, 0)
+                    })
+                    current_date += timedelta(days=1)
+
+                return complete_data
+
+        except Exception as e:
+            logger.error(f"获取每日活跃用户数失败: {e}", exc_info=True)
+            return []
+
     def get_all_queries(self, user_id: Optional[str] = None, days: Optional[int] = None, limit: int = 1000) -> List[str]:
         """
         获取所有问题文本（用于词云分析）
