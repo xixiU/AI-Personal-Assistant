@@ -42,6 +42,9 @@ class UserManager:
         # 启动时清理过期会话
         self.cleanup_all_expired_sessions()
 
+        # 自动创建管理员账号（如果配置了且不存在）
+        self._ensure_admin_exists()
+
         logger.info("用户管理器初始化完成")
 
     def create_user(
@@ -689,6 +692,56 @@ class UserManager:
                 self._cleanup_expired_sessions(session)
         except Exception as e:
             logger.error(f"清理所有过期会话失败: {e}", exc_info=True)
+
+    def _ensure_admin_exists(self):
+        """
+        确保管理员账号存在（启动时自动创建）
+
+        从 admin_config 读取管理员配置，如果数据库中不存在该管理员则自动创建。
+        """
+        if not self.admin_config:
+            logger.debug("未配置管理员账号，跳过自动创建")
+            return
+
+        admin_username = self.admin_config.get('username')
+        admin_password = self.admin_config.get('password')
+
+        if not admin_username or not admin_password:
+            logger.warning("管理员配置不完整（缺少 username 或 password），跳过自动创建")
+            return
+
+        try:
+            with self.db_manager.get_session() as session:
+                # 检查管理员是否已存在
+                existing_admin = session.query(User).filter(User.username == admin_username).first()
+
+                if existing_admin:
+                    # 验证密码是否匹配
+                    if not existing_admin.check_password(admin_password):
+                        logger.warning(
+                            f"管理员账号已存在但密码不匹配: username={admin_username}。"
+                            f"请检查 config.yaml 中的密码配置是否正确。"
+                        )
+                    else:
+                        logger.info(f"管理员账号已存在: username={admin_username}, role={existing_admin.role.value}")
+                    return
+
+                # 创建管理员账号
+                admin_name = self.admin_config.get('name', '系统管理员')
+                user_id = self.create_user(
+                    username=admin_username,
+                    password=admin_password,
+                    name=admin_name,
+                    role='admin'
+                )
+
+                if user_id:
+                    logger.info(f"管理员账号自动创建成功: user_id={user_id}, username={admin_username}")
+                else:
+                    logger.error(f"管理员账号自动创建失败: username={admin_username}")
+
+        except Exception as e:
+            logger.error(f"检查/创建管理员账号失败: {e}", exc_info=True)
 
     def count_users(
         self,
