@@ -47,6 +47,46 @@ def map_user_id_to_uuid(user_manager: UserManager, old_user_id: str, user_name: 
             if user:
                 return user['user_id']  # 返回 dict，用 ['key'] 访问
 
+        # 3. 用户不存在，自动创建（不发送飞书通知）
+        if old_user_id or user_name:
+            import string
+            import random
+
+            # 生成随机密码
+            def generate_random_password(length=12):
+                chars = string.ascii_letters + string.digits
+                return ''.join(random.choice(chars) for _ in range(length))
+
+            # 从 user_name 提取 username 和 display_name
+            if user_name and ' ' in user_name:
+                # "袁荣杰 rjyuan2" -> username="rjyuan2", display_name="袁荣杰"
+                parts = user_name.split()
+                display_name = parts[0]
+                username = parts[-1]
+            elif user_name:
+                username = user_name
+                display_name = user_name
+            else:
+                # 只有 open_id，没有 user_name
+                username = f"user_{old_user_id[:8]}"
+                display_name = "未知用户"
+
+            # 创建用户
+            user_id = user_manager.create_user(
+                username=username,
+                password=generate_random_password(),
+                feishu_open_id=old_user_id if old_user_id else None,
+                display_name=display_name,
+                role="user"
+            )
+
+            if user_id:
+                logger.info(f"自动创建用户: {username} ({display_name}), feishu_open_id={old_user_id}")
+                # 重新查询获取 UUID
+                user = user_manager.get_user_by_feishu_open_id(old_user_id) if old_user_id else user_manager.get_user(username)
+                if user:
+                    return user['user_id']
+
         # 找不到用户
         return None
     except Exception as e:
