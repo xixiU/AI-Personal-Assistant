@@ -2,6 +2,7 @@
 用户提问历史持久化
 
 按天保存所有用户提问和 AI 回复到 JSONL 文件，用于后续分析和产品优化。
+同时写入数据库，支持结构化查询。
 """
 
 import json
@@ -14,13 +15,14 @@ from loguru import logger
 
 
 class ChatHistoryManager:
-    """用户提问历史持久化管理"""
+    """用户提问历史持久化管理（双写：JSONL + 数据库）"""
 
-    def __init__(self, history_dir: str = "./data/chat_history"):
+    def __init__(self, history_dir: str = "./data/chat_history", db_manager=None):
         self.history_dir = Path(history_dir)
         self.history_dir.mkdir(parents=True, exist_ok=True)
+        self.db_manager = db_manager  # 数据库管理器（可选）
         self._lock = threading.Lock()
-        logger.info(f"对话历史管理器初始化: {self.history_dir}")
+        logger.info(f"对话历史管理器初始化: {self.history_dir}, 数据库: {'启用' if db_manager else '未启用'}")
 
     def save(
         self,
@@ -90,6 +92,25 @@ class ChatHistoryManager:
         if metadata:
             record["metadata"] = metadata
 
+        # 双写：先写数据库，成功后再写文件
+        if self.db_manager:
+            try:
+                from ai_assistant.models import ChatHistoryDB
+
+                # 创建数据库记录
+                db_record = ChatHistoryDB.from_jsonl_record(record)
+
+                # 写入数据库
+                with self.db_manager.get_session() as session:
+                    session.add(db_record)
+                    session.commit()
+
+                logger.debug(f"数据库写入成功: record_id={record_id}")
+            except Exception as e:
+                # 数据库写入失败不阻塞流程，记录错误日志
+                logger.error(f"数据库写入失败，仅写入文件: record_id={record_id}, error={e}", exc_info=True)
+
+        # 写入 JSONL 文件
         today = datetime.now().strftime("%Y-%m-%d")
         file_path = self.history_dir / f"{today}.jsonl"
 

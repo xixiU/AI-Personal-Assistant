@@ -3,6 +3,7 @@
 
 按天保存用户对 AI 回答的反馈数据，支持查询指定 session 的负反馈记录。
 用于在同 session 的后续对话中通过 Prompt 注入方式改进 AI 回答质量。
+同时写入数据库，支持结构化查询。
 """
 
 import json
@@ -15,19 +16,21 @@ from loguru import logger
 
 
 class FeedbackManager:
-    """用户反馈数据持久化管理"""
+    """用户反馈数据持久化管理（双写：JSONL + 数据库）"""
 
-    def __init__(self, feedback_dir: str = "./data/feedback"):
+    def __init__(self, feedback_dir: str = "./data/feedback", db_manager=None):
         """
         初始化反馈管理器
 
         Args:
             feedback_dir: 反馈数据保存目录
+            db_manager: 数据库管理器（可选）
         """
         self.feedback_dir = Path(feedback_dir)
         self.feedback_dir.mkdir(parents=True, exist_ok=True)
+        self.db_manager = db_manager  # 数据库管理器
         self._lock = threading.Lock()
-        logger.info(f"反馈管理器初始化: {self.feedback_dir}")
+        logger.info(f"反馈管理器初始化: {self.feedback_dir}, 数据库: {'启用' if db_manager else '未启用'}")
 
     def save_feedback(
         self,
@@ -79,6 +82,24 @@ class FeedbackManager:
             "user_name": user_name or "",
             "user_id": user_id or "",
         }
+
+        # 双写：先写数据库，成功后再写文件
+        if self.db_manager:
+            try:
+                from ai_assistant.models import FeedbackDB
+
+                # 创建数据库记录
+                db_record = FeedbackDB.from_jsonl_record(record)
+
+                # 写入数据库
+                with self.db_manager.get_session() as session:
+                    session.add(db_record)
+                    session.commit()
+
+                logger.debug(f"数据库写入成功: feedback_id={feedback_id}")
+            except Exception as e:
+                # 数据库写入失败不阻塞流程，记录错误日志
+                logger.error(f"数据库写入失败，仅写入文件: feedback_id={feedback_id}, error={e}", exc_info=True)
 
         # 按天保存到 JSONL 文件
         today = datetime.now().strftime("%Y-%m-%d")
