@@ -551,6 +551,30 @@ class AIAssistant:
             # 保存原始 text 用于运维模式检测（需要保留 @ 提及来识别命令）
             original_text = text
 
+            # 检测 /我 命令（优先处理，不触发 AI）
+            if hasattr(adapter, 'handle_my_command'):
+                text_stripped = text.strip()
+                if text_stripped.startswith("/我") or text_stripped.startswith("／我"):
+                    logger.info(f"🔧 检测到 /我 命令: {text_stripped[:20]}...")
+                    sender_id = parsed.get("sender_id", "")
+                    chat_id = parsed["chat_id"]
+
+                    # 处理命令
+                    result = adapter.handle_my_command(text_stripped, sender_id, chat_id)
+                    if result:
+                        # 直接发送命令结果
+                        success = adapter._send_text_reply(chat_id, message_id, result)
+                        if success:
+                            logger.info(f"✅ /我 命令处理完成，已发送回复")
+                        else:
+                            logger.error(f"❌ /我 命令回复发送失败")
+                    else:
+                        logger.warning(f"⚠️ /我 命令处理返回空结果")
+
+                    # 命令处理完成，不继续走 AI 流程
+                    logger.info(f"🔧 /我 命令已处理，跳过 AI 流程")
+                    return
+
             # 本条自带的日志文件附件（解析阶段已下载落地）
             own_logs = parsed.get("log_contents") or []
 
