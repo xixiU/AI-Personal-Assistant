@@ -111,9 +111,9 @@ def get_user_chat_history():
 
         # 获取当前用户
         current_user = g.current_user
-        # 优先使用 feishu_open_id，如果没有则使用 username
-        # chat_history 表的 user_id 字段存储的是飞书 open_id 或域账号
-        user_id_filter = current_user.get('feishu_open_id') or current_user.get('username')
+        # 使用 UUID 查询（方案 A）
+        # chat_history 表的 user_id 字段存储的是 users 表的 UUID
+        user_id = current_user.get('user_id')  # 直接使用 UUID
 
         # 查询对话历史
         if not _chat_history_db:
@@ -121,13 +121,13 @@ def get_user_chat_history():
 
         offset = (page - 1) * page_size
         records = _chat_history_db.query(
-            user_id=user_id_filter,
+            user_id=user_id,
             keyword=keyword,
             limit=page_size,
             offset=offset
         )
         total = _chat_history_db.count(
-            user_id=user_id_filter,
+            user_id=user_id,
             keyword=keyword
         )
 
@@ -140,7 +140,7 @@ def get_user_chat_history():
                 from ai_assistant.models.feedback_db import FeedbackDB
                 feedbacks = session.query(FeedbackDB).filter(
                     FeedbackDB.record_id.in_(record_ids),
-                    FeedbackDB.user_id == user_id_filter
+                    FeedbackDB.user_id == user_id
                 ).all()
 
                 # 构建 record_id -> feedback 的映射
@@ -159,7 +159,7 @@ def get_user_chat_history():
         # 计算总页数
         total_pages = (total + page_size - 1) // page_size
 
-        logger.info(f"查询用户对话历史: user_id_filter={user_id_filter}, page={page}, keyword={keyword}, total={total}")
+        logger.info(f"查询用户对话历史: user_id={user_id[:8]}..., page={page}, keyword={keyword}, total={total}")
 
         return jsonify(success_response({
             "records": records,
@@ -224,9 +224,9 @@ def get_user_feedback():
 
         # 获取当前用户
         current_user = g.current_user
-        # 优先使用 feishu_open_id，如果没有则使用 username
-        # feedback 表的 user_id 字段存储的是飞书 open_id 或域账号
-        user_id_filter = current_user.get('feishu_open_id') or current_user.get('username')
+        # 使用 UUID 查询（方案 A）
+        # feedback 表的 user_id 字段存储的是 users 表的 UUID
+        user_id = current_user.get('user_id')  # 直接使用 UUID
 
         # 查询反馈记录
         if not _feedback_manager:
@@ -234,13 +234,13 @@ def get_user_feedback():
 
         offset = (page - 1) * page_size
         feedbacks = _feedback_manager.query(
-            user_id=user_id_filter,
+            user_id=user_id,
             feedback_type=feedback_type,
             limit=page_size,
             offset=offset
         )
         total = _feedback_manager.count(
-            user_id=user_id_filter,
+            user_id=user_id,
             feedback_type=feedback_type
         )
 
@@ -277,7 +277,7 @@ def get_user_feedback():
         # 计算总页数
         total_pages = (total + page_size - 1) // page_size
 
-        logger.info(f"查询用户反馈记录: user_id_filter={user_id_filter}, page={page}, feedback_type={feedback_type}, total={total}")
+        logger.info(f"查询用户反馈记录: user_id={user_id[:8]}..., page={page}, feedback_type={feedback_type}, total={total}")
 
         return jsonify(success_response({
             "records": feedbacks,
