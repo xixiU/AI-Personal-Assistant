@@ -316,7 +316,7 @@
                 var params = { page: chatState.page, page_size: chatState.pageSize };
                 if (chatState.keyword) params.keyword = chatState.keyword;
 
-                var resp = await App.get('/api/user/chat-history' + App.qs(params));
+                var resp = await App.get('/api/chat-history' + App.qs(params));
                 chatState.total = resp.data.total || 0;
                 renderChatHistory(resp.data.records || []);
                 updateChatPager();
@@ -563,7 +563,7 @@
             container.innerHTML = '<div class="empty">加载中…</div>';
 
             try {
-                var resp = await App.get('/api/data/wordcloud');
+                var resp = await App.get('/api/wordcloud');
                 var data = resp.data || [];
 
                 if (!data || data.length === 0) {
