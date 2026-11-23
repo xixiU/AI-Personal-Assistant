@@ -76,6 +76,12 @@ class FeishuBotAdapter(IMAdapter):
         # 日志文件管理器（由 main.py 注入；None 表示不处理文件附件）
         self.log_file_manager = config.get("log_file_manager")
 
+        # 用户管理器和历史管理器（由外部注入，用于 /我 命令）
+        self.user_manager = None
+        self.chat_history_manager = None
+        self.feedback_manager_ref = None
+        self.assistant = None  # AIAssistant 实例引用
+
     def cache_message_record(self, message_id: str, record_id: str):
         """
         缓存飞书消息 ID 到 record_id 的映射
@@ -975,6 +981,147 @@ class FeishuBotAdapter(IMAdapter):
         """
         return []
 
+    def handle_my_command(self, text: str, open_id: str, chat_id: str) -> Optional[str]:
+        """
+        处理 /我 或 /我的 命令
+
+        支持的命令：
+        - /我的密码：返回用户密码
+        - /我的提问：返回最近的历史提问（最近 10 条）
+        - /我的反馈：返回最近的反馈记录
+        - /我的信息：返回用户基本信息
+
+        Args:
+            text: 消息文本
+            open_id: 用户的飞书 open_id
+            chat_id: 会话 ID
+
+        Returns:
+            命令处理结果文本，如果不是命令则返回 None
+        """
+        # 检查是否是 /我 或 /我的 命令
+        text_stripped = text.strip()
+        if not (text_stripped.startswith("/我") or text_stripped.startswith("／我")):
+            return None
+
+        # 检查依赖是否注入
+        if not self.user_manager:
+            return "系统配置错误：用户管理器未初始化"
+
+        # 获取用户信息
+        user = self.user_manager.get_user_by_feishu_open_id(open_id)
+        if not user:
+            return "未找到您的用户信息，请先联系管理员注册账号"
+
+        user_id = user.get('user_id')
+
+        # 命令解析和处理
+        if '密码' in text_stripped:
+            # 密码使用 bcrypt 加密存储，无法查看明文
+            # 提供重置密码的引导
+            return f"""🔐 密码安全提示：
+
+出于安全考虑，系统密码采用不可逆加密存储，无法直接查看。
+
+如需重置密码，请：
+1. 联系管理员重置密码
+2. 或登录管理后台自行修改密码
+
+您的用户名：{user.get('username')}"""
+
+        elif '提问' in text_stripped or '问题' in text_stripped:
+            # 返回历史提问
+            if not self.chat_history_manager:
+                return "系统配置错误：历史记录管理器未初始化"
+
+            try:
+                # 使用数据库查询（如果启用）
+                if self.chat_history_manager.db_manager:
+                    from ai_assistant.models import ChatHistoryDB
+                    with self.chat_history_manager.db_manager.get_session() as session:
+                        records = session.query(ChatHistoryDB).filter(
+                            ChatHistoryDB.user_id == user_id
+                        ).order_by(ChatHistoryDB.timestamp.desc()).limit(10).all()
+
+                        if not records:
+                            return "您还没有提问记录"
+
+                        # 格式化输出
+                        lines = ["📝 您最近的 10 条提问记录：\n"]
+                        for idx, record in enumerate(records, 1):
+                            timestamp = record.timestamp.strftime("%Y-%m-%d %H:%M:%S")
+                            query = record.query[:50] + "..." if len(record.query) > 50 else record.query
+                            lines.append(f"{idx}. [{timestamp}] {query}")
+
+                        return "\n".join(lines)
+                else:
+                    return "历史记录查询功能未启用（需要数据库支持）"
+            except Exception as e:
+                logger.error(f"查询历史提问失败: {e}", exc_info=True)
+                return f"查询历史提问失败: {str(e)}"
+
+        elif '反馈' in text_stripped:
+            # 返回反馈记录
+            if not self.feedback_manager_ref:
+                return "系统配置错误：反馈管理器未初始化"
+
+            try:
+                # 使用数据库查询（如果启用）
+                if self.feedback_manager_ref.db_manager:
+                    from ai_assistant.models import FeedbackDB
+                    with self.feedback_manager_ref.db_manager.get_session() as session:
+                        feedbacks = session.query(FeedbackDB).filter(
+                            FeedbackDB.user_id == open_id  # 反馈记录用的是 open_id
+                        ).order_by(FeedbackDB.timestamp.desc()).limit(10).all()
+
+                        if not feedbacks:
+                            return "您还没有反馈记录"
+
+                        # 格式化输出
+                        lines = ["📊 您最近的反馈记录：\n"]
+                        for idx, feedback in enumerate(feedbacks, 1):
+                            timestamp = feedback.timestamp.strftime("%Y-%m-%d %H:%M:%S")
+                            feedback_type = "👍 点赞" if feedback.feedback_type == "like" else "👎 点踩"
+                            feedback_text = feedback.feedback_text or "（无文字反馈）"
+                            if len(feedback_text) > 30:
+                                feedback_text = feedback_text[:30] + "..."
+                            lines.append(f"{idx}. [{timestamp}] {feedback_type} - {feedback_text}")
+
+                        return "\n".join(lines)
+                else:
+                    return "反馈记录查询功能未启用（需要数据库支持）"
+            except Exception as e:
+                logger.error(f"查询反馈记录失败: {e}", exc_info=True)
+                return f"查询反馈记录失败: {str(e)}"
+
+        elif '信息' in text_stripped:
+            # 返回基本信息
+            lines = [
+                "👤 您的基本信息：\n",
+                f"用户名：{user.get('username', '未设置')}",
+                f"显示名称：{user.get('name', '未设置')}",
+                f"角色：{'管理员' if user.get('role') == 'admin' else '普通用户'}",
+                f"账号状态：{'正常' if user.get('is_active') else '已停用'}",
+                f"注册时间：{user.get('created_at', '未知')}",
+            ]
+
+            if user.get('last_login_at'):
+                lines.append(f"最后登录：{user.get('last_login_at')}")
+
+            return "\n".join(lines)
+
+        else:
+            # 未识别的命令，返回帮助信息
+            return """🤖 /我 命令使用帮助：
+
+支持的命令：
+• /我的密码 - 查看您的登录密码
+• /我的提问 - 查看最近 10 条提问记录
+• /我的反馈 - 查看最近的反馈记录
+• /我的信息 - 查看账号基本信息
+
+示例：直接发送 "/我的密码" 即可"""
+
     def check_trigger(self, keyword: str) -> bool:
         """
         检查是否触发关键词
@@ -1024,6 +1171,18 @@ class FeishuBotAdapter(IMAdapter):
 
             # 按消息类型解析文本、图片 key 与文件附件
             text, image_keys, files = self._parse_message_content(message_type, content_data)
+
+            # 检查是否是 /我 命令（优先处理，不触发 AI）
+            text_stripped = text.strip()
+            if text_stripped.startswith("/我") or text_stripped.startswith("／我"):
+                logger.info(f"🔧 检测到 /我 命令: {text_stripped[:20]}...")
+                # 处理命令
+                result = self.handle_my_command(text_stripped, sender_id, chat_id)
+                if result:
+                    # 直接发送命令结果，不触发 AI
+                    self._send_text_reply(chat_id, message.get("message_id"), result)
+                    self.latest_event = None
+                    return False  # 不触发 AI 处理
 
             # 图片/文件消息通常没有文字说明，给一句默认提问，避免 text 为空
             if image_keys and not text.strip():
@@ -1728,6 +1887,53 @@ class FeishuBotAdapter(IMAdapter):
         }
     }
 }
+
+    def _send_text_reply(self, chat_id: str, message_id: str, text: str) -> bool:
+        """
+        发送纯文本回复消息
+
+        Args:
+            chat_id: 会话 ID
+            message_id: 要回复的消息 ID
+            text: 消息文本
+
+        Returns:
+            是否成功
+        """
+        try:
+            token = self.get_tenant_access_token()
+            url = f"{self.base_url}/open-apis/im/v1/messages"
+            headers = {
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json"
+            }
+            params = {"receive_id_type": "chat_id"}
+            payload = {
+                "receive_id": chat_id,
+                "msg_type": "text",
+                "content": json.dumps({"text": text}),
+            }
+
+            # 如果有 message_id，设置为回复消息
+            if message_id:
+                payload["reply_in_thread"] = False
+                url = f"{self.base_url}/open-apis/im/v1/messages/{message_id}/reply"
+                params = {}
+
+            logger.debug(f"发送文本消息到 chat_id={chat_id}")
+            response = requests.post(url, headers=headers, json=payload, params=params, timeout=10)
+            response.raise_for_status()
+
+            result = response.json()
+            if result.get("code") == 0:
+                logger.info(f"文本消息发送成功")
+                return True
+            else:
+                logger.warning(f"文本消息发送失败: {result.get('msg')}")
+                return False
+        except Exception as e:
+            logger.error(f"发送文本消息失败: {e}")
+            return False
 
     def _send_ephemeral_message(self, user_id: str, chat_id: str, text: str) -> bool:
         """

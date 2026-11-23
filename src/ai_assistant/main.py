@@ -373,6 +373,11 @@ class AIAssistant:
                 # 注入日志文件管理器（用户上传 .log/.txt/zip 时落地并注入上下文）
                 bot_config["log_file_manager"] = self.log_file_manager
                 adapter = FeishuBotAdapter(bot_config)
+                # 注入用户管理器和历史记录管理器（用于 /我 命令）
+                adapter.user_manager = self.user_manager
+                adapter.chat_history_manager = self.chat_history
+                adapter.feedback_manager_ref = self.feedback_manager
+                adapter.assistant = self
                 self.adapters.append(adapter)
                 logger.info("Feishu Bot API adapter initialized")
                 self._start_webhook_server(adapter)
