@@ -93,8 +93,9 @@
             var trendData = d.trend_data || [];
             Charts.line($('trendChart'), trendData, [
                 { key: 'questions', label: '问答量', color: '#2563eb' },
-                { key: 'feedbacks', label: '反馈数', color: '#10b981' },
-                { key: 'active_users', label: '活跃用户', color: '#f59e0b' }
+                { key: 'active_users', label: '活跃用户', color: '#7c3aed' },
+                { key: 'likes', label: '点赞', color: '#16a34a' },
+                { key: 'dislikes', label: '点踩', color: '#dc2626' }
             ]);
             Charts.bars($('topList'), d.top_questions || []);
             Charts.bars($('topUsers'), (d.top_users || []).map(function (u) {
