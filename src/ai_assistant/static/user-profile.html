@@ -563,7 +563,7 @@
             container.innerHTML = '<div class="empty">加载中…</div>';
 
             try {
-                var resp = await App.get('/api/wordcloud');
+                var resp = await App.get('/api/data/wordcloud');
                 var data = resp.data || [];
 
                 if (!data || data.length === 0) {

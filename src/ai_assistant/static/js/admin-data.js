@@ -66,8 +66,14 @@
 
     async function loadStats() {
         var days = state.days;
-        STAT_IDS.forEach(function (id) { $(id).textContent = '…'; });
-        BOX_IDS.forEach(function (id) { $(id).innerHTML = '<div class="empty">加载中…</div>'; });
+        STAT_IDS.forEach(function (id) {
+            var el = $(id);
+            if (el) el.textContent = '…';
+        });
+        BOX_IDS.forEach(function (id) {
+            var el = $(id);
+            if (el) el.innerHTML = '<div class="empty">加载中…</div>';
+        });
         try {
             var d = await AdminApi.stats(days);
             if (days !== state.days) return;   // 用户已切换时间范围，丢弃过期结果
@@ -94,14 +100,17 @@
             Charts.bars($('topUsers'), (d.top_users || []).map(function (u) {
                 return { query: u.user_name || u.user_id || '（未关联账号）', count: u.count };
             }));
-            var src = d.sources || {};
-            Charts.bars($('sourceList'), Object.keys(SOURCE_TEXT).map(function (k) {
-                return { query: SOURCE_TEXT[k], count: +src[k] || 0 };
-            }).filter(function (x) { return x.count > 0; }));
+            // 来源分布已隐藏，不再渲染
         } catch (err) {
             if (err.status === 401) return;
-            STAT_IDS.forEach(function (id) { $(id).textContent = '-'; });
-            BOX_IDS.forEach(function (id) { failBox($(id), err); });
+            STAT_IDS.forEach(function (id) {
+                var el = $(id);
+                if (el) el.textContent = '-';
+            });
+            BOX_IDS.forEach(function (id) {
+                var el = $(id);
+                if (el) failBox(el, err);
+            });
         }
     }
 
