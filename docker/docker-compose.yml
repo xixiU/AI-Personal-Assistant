@@ -47,7 +47,7 @@ services:
     # ro 表示只读，rw 表示读写（默认）
     volumes:
       - ../src:/app/src                     # 代码位置
-      - ../src/scripts:/app/src/scripts     # 脚本
+      - ../scripts:/app/scripts     # 脚本
       - ../config.yaml:/app/config.yaml:ro  # 配置文件（只读，避免容器修改）
       - ../logs:/app/logs                    # 日志目录（持久化日志）
       - ../data:/app/data                    # 数据目录（向量数据库、文档缓存）
