@@ -141,6 +141,9 @@ def migrate_chat_history(
         logger.info(f"处理文件: {jsonl_file.name}")
         batch = []
 
+        # 从文件名提取日期（例如 "2026-11-17.jsonl" -> "2026-11-17"）
+        file_date = jsonl_file.stem
+
         try:
             with open(jsonl_file, "r", encoding="utf-8") as f:
                 for line_no, line in enumerate(f, 1):
@@ -156,6 +159,10 @@ def migrate_chat_history(
                         if record_id in existing_ids:
                             skip_count += 1
                             continue
+
+                        # 修复时间：如果记录没有 timestamp，使用文件名日期
+                        if not record.get("timestamp"):
+                            record["timestamp"] = f"{file_date} 00:00:00"
 
                         # 映射 user_id 到 UUID
                         old_user_id = record.get("user_id")
