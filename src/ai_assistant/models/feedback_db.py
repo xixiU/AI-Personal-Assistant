@@ -60,12 +60,12 @@ class FeedbackDB(Base):
 
     # 复合索引
     __table_args__ = (
-        Index("idx_record_id", "record_id"),
-        Index("idx_session_source", "session_id", "source"),
+        Index("idx_feedback_record_id", "record_id"),
+        Index("idx_feedback_session_source", "session_id", "source"),
         Index("idx_feedback_type", "feedback_type"),
-        Index("idx_timestamp", "timestamp"),
-        Index("idx_user_id", "user_id"),
-        Index("idx_session_timestamp", "session_id", "timestamp"),
+        Index("idx_feedback_timestamp", "timestamp"),
+        Index("idx_feedback_user_id", "user_id"),
+        Index("idx_feedback_session_timestamp", "session_id", "timestamp"),
     )
 
     @validates("feedback_id")

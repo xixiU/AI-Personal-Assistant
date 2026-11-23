@@ -5,7 +5,7 @@
 """
 
 from datetime import datetime
-from sqlalchemy import Column, String, DateTime, Enum, Index
+from sqlalchemy import Column, String, DateTime, Enum, Boolean, Index
 from sqlalchemy.orm import validates
 import bcrypt
 import enum
@@ -49,6 +49,9 @@ class User(Base):
         comment="飞书用户 open_id（用于关联飞书账号）"
     )
 
+    # 账号状态
+    is_active = Column(Boolean, nullable=False, default=True, comment="账号是否启用")
+
     # 时间戳
     created_at = Column(DateTime, nullable=False, default=datetime.now, comment="创建时间")
     updated_at = Column(
@@ -58,6 +61,7 @@ class User(Base):
         onupdate=datetime.now,
         comment="更新时间"
     )
+    last_login_at = Column(DateTime, nullable=True, comment="最后登录时间")
 
     # 索引
     __table_args__ = (
@@ -128,9 +132,11 @@ class User(Base):
         return {
             "user_id": self.user_id,
             "username": self.username,
-            "name": self.name,
+            "display_name": self.name,  # 映射为 display_name
             "role": self.role.value,
-            "feishu_open_id": self.feishu_open_id,
+            "is_active": self.is_active,
+            "feishu_bound": bool(self.feishu_open_id),  # 映射为布尔值
             "created_at": self.created_at.strftime("%Y-%m-%d %H:%M:%S"),
             "updated_at": self.updated_at.strftime("%Y-%m-%d %H:%M:%S"),
+            "last_login_at": self.last_login_at.strftime("%Y-%m-%d %H:%M:%S") if self.last_login_at else None,
         }
