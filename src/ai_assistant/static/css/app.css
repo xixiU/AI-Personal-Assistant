@@ -157,6 +157,7 @@ a { color: var(--primary); text-decoration: none; }
 
 .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 16px; }
 .grid-2 > .card + .card { margin-top: 0; }
+.grid-col { display: flex; flex-direction: column; gap: 16px; }
 
 /* ---------- 表格 ---------- */
 .table-wrap { overflow-x: auto; }
