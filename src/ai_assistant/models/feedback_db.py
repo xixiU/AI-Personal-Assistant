@@ -147,6 +147,12 @@ class FeedbackDB(Base):
         else:
             feedback_type = FeedbackType.LIKE  # 默认值
 
+        # 提取域账号：如果 user_name 包含空格，取最后一个词（域账号）
+        user_name = record.get("user_name", "")
+        if user_name and " " in user_name:
+            # "童强 qiangtong" → "qiangtong"
+            user_name = user_name.split()[-1]
+
         return cls(
             feedback_id=record.get("feedback_id"),
             record_id=record.get("record_id"),
@@ -156,5 +162,5 @@ class FeedbackDB(Base):
             feedback_type=feedback_type,
             feedback_text=record.get("feedback_text", ""),
             user_id=record.get("user_id", ""),
-            user_name=record.get("user_name", ""),
+            user_name=user_name,  # 使用处理后的域账号
         )

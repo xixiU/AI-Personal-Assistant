@@ -128,6 +128,12 @@ class ChatHistoryDB(Base):
             except ValueError:
                 timestamp = datetime.now()
 
+        # 提取域账号：如果 user_name 包含空格，取最后一个词（域账号）
+        user_name = record.get("user_name", "")
+        if user_name and " " in user_name:
+            # "童强 qiangtong" → "qiangtong"
+            user_name = user_name.split()[-1]
+
         return cls(
             record_id=record.get("record_id"),
             timestamp=timestamp or datetime.now(),
@@ -137,7 +143,7 @@ class ChatHistoryDB(Base):
             answer=record.get("answer", ""),
             latency_ms=record.get("latency_ms"),
             user_id=record.get("user_id"),
-            user_name=record.get("user_name"),
+            user_name=user_name,  # 使用处理后的域账号
             context_key=record.get("context_key"),
             chain_info=record.get("chain_info"),
             message_id=record.get("message_id"),
