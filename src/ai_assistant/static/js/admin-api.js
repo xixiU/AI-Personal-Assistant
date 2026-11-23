@@ -76,6 +76,13 @@
             var res = await App.get('/api/feedback' + App.qs(params));
             var d = res.data || {};
             return { feedbacks: d.feedbacks || [], total: d.total || 0, stats: d.stats || {} };
+        },
+
+        // ---------- 词云 ----------
+        /** data [{word, count}] */
+        wordcloud: async function (days) {
+            var res = await App.get('/api/admin/wordcloud' + App.qs({ days: days }));
+            return res.data || [];
         }
     };
 

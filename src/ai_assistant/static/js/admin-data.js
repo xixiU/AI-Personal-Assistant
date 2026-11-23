@@ -62,7 +62,7 @@
 
     // ---------- 统计（对照表 v1 #10：GET /api/admin/stats 一个接口返回全部）----------
     var STAT_IDS = ['sQueries', 'sActive', 'sLikeRate', 'sDislike', 'sSessions'];
-    var BOX_IDS = ['trendChart', 'topList', 'topUsers', 'sourceList'];
+    var BOX_IDS = ['trendChart', 'topList', 'topUsers', 'sourceList', 'wordCloud'];
 
     async function loadStats() {
         var days = state.days;
@@ -102,6 +102,54 @@
             if (err.status === 401) return;
             STAT_IDS.forEach(function (id) { $(id).textContent = '-'; });
             BOX_IDS.forEach(function (id) { failBox($(id), err); });
+        }
+    }
+
+    // ---------- 词云 ----------
+    async function loadWordCloud() {
+        var days = state.days;
+        $('wordCloud').innerHTML = '<div class="empty">加载中…</div>';
+        try {
+            var data = await AdminApi.wordcloud(days);
+            if (days !== state.days) return;   // 用户已切换时间范围，丢弃过期结果
+
+            if (!data || data.length === 0) {
+                $('wordCloud').innerHTML = '<div class="empty">暂无数据</div>';
+                return;
+            }
+
+            var chart = echarts.init($('wordCloud'));
+
+            var option = {
+                series: [{
+                    type: 'wordCloud',
+                    shape: 'circle',
+                    sizeRange: [12, 60],
+                    rotationRange: [-90, 90],
+                    rotationStep: 45,
+                    gridSize: 8,
+                    drawOutOfBound: false,
+                    textStyle: {
+                        fontFamily: 'sans-serif',
+                        fontWeight: 'bold',
+                        color: function () {
+                            var colors = ['#5470c6', '#91cc75', '#fac858', '#ee6666', '#73c0de'];
+                            return colors[Math.floor(Math.random() * colors.length)];
+                        }
+                    },
+                    data: data.map(function (item) {
+                        return {
+                            name: item.word,
+                            value: item.count
+                        };
+                    })
+                }]
+            };
+
+            chart.setOption(option);
+        } catch (err) {
+            if (err.status === 401) return;
+            failBox($('wordCloud'), err);
         }
     }
 
@@ -255,6 +303,7 @@
 
     function loadAll() {
         loadStats();
+        loadWordCloud();
         loadDetail();
     }
 
