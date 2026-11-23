@@ -66,6 +66,9 @@ system:
   web_frontend_enabled: false  # 是否启用自有前端 Web（首页 / Web 聊天 / Web 反馈接口）
                                # 默认关闭：当前前端无鉴权，任何人都能访问，公网/共享环境有风险
                                # 关闭时仍保留飞书 webhook 与 /health，不影响机器人功能
+  admin_path: "/admin"  # 管理员入口路径（默认 /admin）
+                        # 可以改成其他路径如 /manage、/ops 等，但不能与保留路径冲突（/、/api、/webhook、/static）
+                        # 修改后，管理员访问 http://your-domain:8080/your-path/ 进入管理后台
 
 # IM适配器
 adapters:
