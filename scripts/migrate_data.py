@@ -314,8 +314,8 @@ def migrate_users(
                 password=password,
                 feishu_open_id=user_id,  # 将 user_id 作为 feishu_open_id
                 display_name=username,
-                role="user",
-                is_active=True
+                role="user"
+                # 注意：create_user 不支持 is_active 参数，新用户默认 is_active=True
             )
 
             if new_user_id:
