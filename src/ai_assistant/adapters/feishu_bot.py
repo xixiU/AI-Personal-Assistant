@@ -1017,17 +1017,33 @@ class FeishuBotAdapter(IMAdapter):
 
         # 命令解析和处理
         if '密码' in text_stripped:
-            # 密码使用 bcrypt 加密存储，无法查看明文
-            # 提供重置密码的引导
-            return f"""🔐 密码安全提示：
+            # 生成新的随机密码（12位，字母+数字）
+            new_password = self.user_manager.generate_random_password(12)
 
-出于安全考虑，系统密码采用不可逆加密存储，无法直接查看。
+            # 重置用户密码
+            success = self.user_manager.reset_password(user_id, new_password)
 
-如需重置密码，请：
-1. 联系管理员重置密码
-2. 或登录管理后台自行修改密码
+            if success:
+                # 获取系统配置中的登录地址
+                login_url = "管理后台"  # 默认值
+                if hasattr(self.assistant, 'config'):
+                    system_config = getattr(self.assistant.config, 'system_web_frontend_enabled', False)
+                    if system_config:
+                        webhook_port = getattr(self.assistant.config, 'system_webhook_port', 8000)
+                        login_url = f"http://localhost:{webhook_port}/login"
 
-您的用户名：{user.get('username')}"""
+                return f"""🔐 密码已重置
+
+您的新密码：`{new_password}`
+
+请妥善保管，建议登录后修改为自己的密码。
+
+👤 您的用户名：{user.get('username')}
+🔗 登录地址：{login_url}
+
+💡 提示：密码已重置，所有设备需要重新登录"""
+            else:
+                return "密码重置失败，请联系管理员"
 
         elif '提问' in text_stripped or '问题' in text_stripped:
             # 返回历史提问
