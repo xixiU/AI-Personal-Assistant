@@ -552,13 +552,20 @@ class AIAssistant:
             original_text = text
 
             # 检测 /我 命令（优先处理，不触发 AI）
-            # 同时支持：/我、／我（全角斜杠）、我的（不带斜杠）
+            # 支持的命令列表（精确匹配，避免误判正常问题如"我的系统怎么配置"）
+            MY_COMMANDS = [
+                "我的密码", "/我的密码", "／我的密码",
+                "我的提问", "/我的提问", "／我的提问",
+                "我的反馈", "/我的反馈", "／我的反馈",
+                "我的信息", "/我的信息", "／我的信息"
+            ]
+
             if hasattr(adapter, 'handle_my_command'):
                 text_stripped = text.strip()
-                if (text_stripped.startswith("/我") or
-                    text_stripped.startswith("／我") or
-                    text_stripped.startswith("我的")):
-                    logger.info(f"🔧 检测到 /我 命令: {text_stripped[:20]}...")
+
+                # 精确匹配命令列表
+                if text_stripped in MY_COMMANDS:
+                    logger.info(f"🔧 检测到 /我 命令: {text_stripped}")
                     sender_id = parsed.get("sender_id", "")
                     chat_id = parsed["chat_id"]
 
