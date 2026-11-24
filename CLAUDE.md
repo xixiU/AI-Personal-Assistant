@@ -1,306 +1,125 @@
 # AI 自动回复助手 - 开发规范
 
-本文档为 AI 助手和开发者提供项目开发的规范、约束和上下文信息。
-
 ## 项目概述
 
-**项目名称**: AI 自动回复助手
-**目标**: 为 IM 工具（飞书、微信）提供基于大模型的智能自动回复功能
-**技术栈**: Python 3.10+, pywinauto, requests, loguru, pytest
-**当前状态**: MVP 阶段已完成，核心功能可运行
+**目标**: 为飞书/微信/web提供基于大模型的智能自动回复功能  
+**技术栈**: Python 3.10+, Flask, SQLAlchemy, ChromaDB, Anthropic Claude  
+**当前状态**: 生产环境运行中，本地开发，云端部署，不需要在本地安装运行环境，只需要进行基础的代码静测。
 
-## 核心架构原则
+## 核心架构
 
-### 1. 插件化设计
+### 1. 适配器模式
+- **IM 适配器**: 飞书（webhook）、微信（pywinauto）
+- **AI Provider**: Anthropic Claude (主), OpenAI (备)
+- **文档检索**: 飞书文档 + ChromaDB 向量库
 
-**IM 适配器必须独立**
-- 每个 IM 工具（飞书、微信等）作为独立的适配器实现
-- 所有适配器继承 `IMAdapter` 基类
-- 适配器之间不应有依赖关系
-- 新增 IM 支持只需实现新的适配器类
+### 2. 数据管理
+- **用户系统**: SQLAlchemy ORM，支持飞书/微信用户
+- **问答记录**: 记录所有对话，支持反馈
+- **UUID 统一**: 所有实体使用 UUID 主键
 
-**AI Provider 可扩展**
-- 支持多种 AI 服务（CherryStudio, OpenAI, 自定义）
-- 所有 Provider 继承 `AIProvider` 基类
-- Provider 之间可以作为主备切换
+### 3. Web 管理后台
+- **管理员**: 数据统计、问答历史、用户管理
+- **普通用户**: 个人对话历史、反馈记录、词云
 
-### 2. 非侵入式原则
+## 关键约束
 
-**严格禁止**
-- ❌ 修改 IM 客户端文件
-- ❌ 注入代码到 IM 进程
-- ❌ Hook 系统 API
-- ❌ 拦截网络请求
+### 代码规范
+- ✅ 类型注解必须完整（Python 3.10+）
+- ✅ 异常处理必须完善（不允许裸 except）
+- ✅ 日志记录使用 loguru（带 request_id）
+- ❌ 禁止修改 IM 客户端文件
+- ❌ 禁止硬编码敏感信息
 
-**允许的方式**
-- ✅ 使用 Windows UI 自动化 API
-- ✅ 读取窗口内容
-- ✅ 模拟键盘输入（需用户授权）
-- ✅ 剪贴板操作
+### Git 规范
+- 提交信息格式: `feat/fix/refactor: 简短描述`
+- 新功能必须创建分支，测试后合并
+- 禁止直接 push 到 main（CI/CD 保护）
 
-### 3. 安全优先
+### 安全规范
+- 密码使用 bcrypt 加密存储
+- API 使用 JWT token 认证
+- 飞书 webhook 事件加密验证
+- 敏感配置使用环境变量
 
-**配置文件安全**
-- `config.yaml` 必须在 `.gitignore` 中
-- 敏感信息（API Key）不得硬编码
-- 提供 `config.example.yaml` 作为模板
-
-**数据隐私**
-- 消息内容仅在本地处理
-- 不上传到第三方服务器（除用户配置的 AI 服务）
-- 日志中不记录完整消息内容（仅记录长度和摘要）
-
-**权限最小化**
-- 仅请求必要的系统权限
-- 用户可随时禁用功能
-
-## 代码规范
-
-### 文件组织
+## 项目结构
 
 ```
 src/ai_assistant/
-├── core/              # 核心模块
-│   ├── models.py      # 数据模型
-│   ├── config.py      # 配置管理
-│   ├── context_manager.py  # 上下文管理
-│   ├── ai_provider.py      # AI Provider 接口
-│   └── reply_executor.py   # 回复执行
-├── adapters/          # IM 适配器
-│   ├── base.py        # 适配器基类
-│   ├── feishu.py      # 飞书适配器
-│   └── wechat.py      # 微信适配器（待实现）
-├── providers/         # AI Provider 实现
-│   ├── cherrystudio.py
-│   └── openai.py      # OpenAI 兼容（待实现）
-├── utils/             # 工具函数
-└── main.py            # 主程序入口
+├── adapters/           # IM 适配器（飞书、微信）
+├── api/               # Web API（管理后台、数据接口）
+├── core/              # 核心模块（用户、对话、反馈、文档）
+├── providers/         # AI Provider（Anthropic、OpenAI）
+├── static/            # 前端静态资源
+├── templates/         # HTML 模板
+└── utils/             # 工具函数
+
+scripts/               # 数据迁移、部署脚本
+tests/                # 单元测试
 ```
 
-### Python 代码风格
+## 开发流程
 
-**遵循 PEP 8**
-- 使用 4 空格缩进
-- 行长度限制 100 字符
-- 类名使用 PascalCase
-- 函数名使用 snake_case
-- 常量使用 UPPER_CASE
-
-**类型注解**
-```python
-# 必须：函数参数和返回值
-def send_message(self, messages: List[Message]) -> str:
-    pass
-
-# 推荐：类属性
-class Config:
-    trigger_keyword: str = "【ai】"
-```
-
-**文档字符串**
-```python
-def function_name(param1: str, param2: int) -> bool:
-    """
-    简短描述（一行）
-
-    Args:
-        param1: 参数1说明
-        param2: 参数2说明
-
-    Returns:
-        返回值说明
-
-    Raises:
-        Exception: 异常说明
-    """
-    pass
-```
-
-### 日志规范
-
-**使用 loguru**
-```python
-from loguru import logger
-
-# 日志级别使用
-logger.debug("调试信息")      # 详细的调试信息
-logger.info("正常信息")       # 关键操作记录
-logger.warning("警告信息")    # 可恢复的问题
-logger.error("错误信息")      # 需要关注的错误
-```
-
-**日志内容要求**
-- 不记录完整的消息内容（隐私保护）
-- 记录消息长度、时间戳、会话 ID
-- 记录 AI API 调用的耗时和状态
-- 错误日志必须包含异常堆栈
-
-## 测试要求
-
-### 测试覆盖
-
-**必须测试**
-- ✅ 所有核心模块（models, config, context_manager）
-- ✅ AI Provider 的接口调用
-- ✅ 配置文件加载和解析
-- ✅ 数据模型的边界条件
-
-**可选测试**
-- 🔶 IM 适配器（依赖真实窗口，难以自动化）
-- 🔶 UI 自动化逻辑（需要 mock）
-
-### 测试命名
-
-```python
-# 格式：test_<功能>_<场景>
-def test_session_add_message():
-    pass
-
-def test_session_max_messages_limit():
-    pass
-
-def test_config_load_from_file():
-    pass
-```
-
-### 运行测试
-
+### 1. 新功能开发
 ```bash
-# 运行所有测试
-PYTHONPATH=src pytest tests/unit/ -v
-
-# 运行特定测试
-PYTHONPATH=src pytest tests/unit/test_models.py -v
-
-# 测试覆盖率
-PYTHONPATH=src pytest tests/unit/ --cov=ai_assistant --cov-report=html
+git checkout -b feature/xxx
+# 开发 + 测试
+git commit -m "feat: xxx"
+git push origin feature/xxx
+# 创建 PR，review 后合并
 ```
 
-## Git 工作流
-
-### 提交规范
-
-**Commit Message 格式**
-```
-<type>: <subject>
-
-<body>
-```
-
-**Type 类型**
-- `feat`: 新功能
-- `fix`: Bug 修复
-- `docs`: 文档更新
-- `refactor`: 代码重构
-- `test`: 测试相关
-- `chore`: 构建/工具链相关
-- `security`: 安全相关
-
-**示例**
-```
-feat: add WeChat adapter with message extraction
-
-- Implement WeChatAdapter class
-- Add window detection logic
-- Support private chat and group chat
-```
-
-### 分支策略
-
-- `main`: 稳定版本，可运行
-- `develop`: 开发分支（如需要）
-- `feature/*`: 功能分支
-- `fix/*`: 修复分支
-
-### 提交前检查
-
+### 2. Bug 修复
 ```bash
-# 1. 运行测试
-PYTHONPATH=src pytest tests/unit/ -v
-
-# 2. 检查代码风格（如果配置了 flake8）
-flake8 src/
-
-# 3. 查看改动
-git diff
-
-# 4. 提交
-git add <files>
-git commit -m "type: message"
+git checkout -b fix/xxx
+# 修复 + 测试
+git commit -m "fix: xxx"
+# 直接合并或创建 PR
 ```
 
-## 开发约束
+### 3. 部署
+```bash
+docker restart ai-assistant-gpu
+# 验证日志
+docker logs -f ai-assistant-gpu
+```
 
-### 禁止事项
+## 常见任务
 
-**代码层面**
-- ❌ 不得在代码中硬编码 API Key 或密码
-- ❌ 不得使用 `eval()` 或 `exec()` 执行动态代码
-- ❌ 不得在日志中记录完整的用户消息
-- ❌ 不得绕过配置文件直接修改行为
+### 添加新的 IM 适配器
+1. 继承 `IMAdapter` 基类
+2. 实现 `check_trigger()` 和 `get_latest_message()`
+3. 在 `main.py` 注册适配器
 
-**依赖管理**
-- ❌ 不得添加未经审查的第三方库
-- ❌ 不得使用已知有安全漏洞的库版本
-- ❌ 不得添加体积过大的依赖（如深度学习框架）
+### 添加新的统计指标
+1. 在 `core/chat_history_db.py` 或 `core/feedback_db_query.py` 添加查询方法
+2. 在 `api/admin.py` 的 `/api/admin/stats` 返回新指标
+3. 前端适配展示
 
-**UI 自动化**
-- ❌ 不得使用破坏性操作（如自动删除消息）
-- ❌ 不得在未授权情况下自动发送消息
-- ❌ 不得读取 IM 工具的配置文件或数据库
+### 添加新的前端页面
+1. 在 `templates/` 创建 HTML
+2. 在 `static/js/` 添加 JS 逻辑
+3. 在 `api/` 添加后端接口
 
-### 必须遵守
+## 技术债务
 
-**新增功能**
-- ✅ 必须更新 README.md
-- ✅ 必须更新 config.example.yaml（如涉及配置）
-- ✅ 必须考虑向后兼容性
+### 已知问题
+1. 微信适配器依赖 Windows，需要迁移到 wechaty
+2. 文档检索需要优化缓存策略
+3. 前端需要统一使用组件化框架
 
-**修改现有功能**
-- ✅ 必须更新相关文档
-- ✅ 必须考虑对用户的影响
-
-**安全相关**
-- ✅ 必须使用 HTTPS 调用 AI API
-- ✅ 必须验证用户输入
-- ✅ 必须处理异常情况
-
-## 已知限制和注意事项
-
-### 技术限制
-
-1. **飞书适配器是简化实现**
-   - 当前需要手动复制消息触发
-   - 完整的 UI 自动化需要更复杂的元素定位
-   - 不同版本的飞书客户端可能需要适配
-
-2. **仅支持 Windows 平台**
-   - pywinauto 依赖 Windows API
-   - macOS/Linux 需要使用不同的自动化库
-
-3. **多模态支持未完成**
-   - 当前仅支持文本消息
-   - 图片、视频处理需要额外实现
-
-### 性能考虑
-
-1. **轮询间隔**: 默认 500ms，不建议低于 100ms
-2. **上下文长度**: 默认 10 条消息，过多会增加 token 消耗
-3. **AI 调用超时**: 默认 30 秒，根据模型调整
-
-### 兼容性
-
-1. **Python 版本**: 3.10+（使用了新的类型注解语法）
-2. **IM 客户端版本**: 需要定期测试和适配
-3. **AI 模型**: 必须支持 OpenAI 兼容的 API 格式
-
+### 待优化
+1. 增加单元测试覆盖率（当前 < 30%）
+2. 添加性能监控（响应时间、token 消耗）
+3. 优化数据库索引（大数据量场景）
 
 ## 参考资源
 
-- [pywinauto 文档](https://pywinauto.readthedocs.io/)
-- [loguru 文档](https://loguru.readthedocs.io/)
-- [pytest 文档](https://docs.pytest.org/)
-- [OpenAI API 文档](https://platform.openai.com/docs/api-reference)
+- [Anthropic Claude API](https://docs.anthropic.com/)
+- [Flask 文档](https://flask.palletsprojects.com/)
+- [SQLAlchemy 文档](https://docs.sqlalchemy.org/)
+- [飞书开放平台](https://open.feishu.cn/document/)
 
 ---
 
+**最后更新**: 2026-11-23
