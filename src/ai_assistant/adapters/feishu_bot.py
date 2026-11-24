@@ -1017,63 +1017,19 @@ class FeishuBotAdapter(IMAdapter):
 
         # 命令解析和处理
         if '密码' in text_stripped:
-            # 复用自动注册的密码生成逻辑（保持 8 位，与自动注册一致）
-            new_password = self.user_manager.generate_random_password(8)
+            # 调用主程序的密码重置方法（完全复用自动注册逻辑）
+            if not self.assistant:
+                return "系统配置错误：未注入 assistant 实例"
 
-            # 重置用户密码
-            success = self.user_manager.reset_password(user_id, new_password)
+            new_password = self.assistant._reset_feishu_user_password(
+                feishu_open_id=open_id,
+                adapter=self
+            )
 
-            if not success:
-                return "密码重置失败，请联系管理员"
-
-            # 复用自动注册的通知机制（发送卡片消息）
-            try:
-                from ai_assistant.utils.feishu_notifier import FeishuNotifier
-                notifier = FeishuNotifier(self.bot_config)
-
-                # 从配置读取前端地址（与自动注册保持一致）
-                frontend_url = None
-                if self.assistant and hasattr(self.assistant, 'config'):
-                    frontend_url = getattr(self.assistant.config, 'frontend_url', None)
-
-                # 发送卡片消息通知（复用自动注册的消息格式）
-                card_success = notifier.send_card_message(
-                    open_id=open_id,
-                    username=user.get('username'),
-                    password=new_password,
-                    frontend_url=frontend_url,
-                    is_reset=True  # 标记为密码重置
-                )
-
-                if card_success:
-                    logger.info(f"密码重置卡片通知发送成功: username={user.get('username')}")
-                    return "✅ 密码已重置，新密码已通过卡片消息发送给您"
-                else:
-                    # 卡片发送失败，降级为文本消息（保底方案）
-                    logger.warning("卡片消息发送失败，使用文本消息降级")
-                    return f"""🔐 密码已重置
-
-您的新密码：`{new_password}`
-
-请妥善保管，建议登录后修改为自己的密码。
-
-👤 您的用户名：{user.get('username')}
-🔗 登录地址：{frontend_url or '管理后台'}
-
-💡 提示：密码已重置，所有设备需要重新登录"""
-
-            except Exception as e:
-                logger.error(f"发送密码重置通知失败: {e}", exc_info=True)
-                # 发送失败，仍然返回密码（保底方案）
-                return f"""🔐 密码已重置
-
-您的新密码：`{new_password}`
-
-请妥善保管，建议登录后修改为自己的密码。
-
-👤 您的用户名：{user.get('username')}
-
-💡 提示：密码已重置，所有设备需要重新登录"""
+            if new_password:
+                return "✅ 密码已重置成功\n\n新密码已通过飞书卡片消息发送给您，请查看私聊消息"
+            else:
+                return "❌ 密码重置失败，请联系管理员"
 
         elif '提问' in text_stripped or '问题' in text_stripped:
             # 返回历史提问

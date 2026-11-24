@@ -1848,6 +1848,67 @@ class AIAssistant:
 
         return text, image_keys, files
 
+    def _reset_feishu_user_password(
+        self,
+        feishu_open_id: str,
+        adapter
+    ) -> Optional[str]:
+        """
+        重置飞书用户密码（复用自动注册的逻辑）
+
+        生成新密码，重置用户密码，并通过飞书卡片消息通知用户。
+        完全复用 _auto_register_feishu_user() 的通知逻辑。
+
+        Args:
+            feishu_open_id: 飞书用户 open_id
+            adapter: 飞书适配器
+
+        Returns:
+            新密码（成功）或 None（失败）
+        """
+        # 获取用户信息
+        user = self.user_manager.get_user_by_feishu_open_id(feishu_open_id)
+        if not user:
+            logger.error(f"密码重置失败: 用户不存在 open_id={feishu_open_id[:8]}...")
+            return None
+
+        # 生成新密码（复用自动注册的方法和长度）
+        new_password = self.user_manager.generate_random_password(8)
+
+        # 重置密码
+        success = self.user_manager.reset_password(user['user_id'], new_password)
+        if not success:
+            logger.error(f"密码重置失败: user_id={user['user_id']}")
+            return None
+
+        logger.info(f"密码重置成功: user_id={user['user_id']}, username={user['username']}")
+
+        # 发送飞书卡片消息通知（完全复用自动注册的逻辑）
+        try:
+            from ai_assistant.utils.feishu_notifier import FeishuNotifier
+            notifier = FeishuNotifier(adapter.bot_config)
+
+            # 从配置读取前端地址（与自动注册保持一致）
+            frontend_url = getattr(self.config, 'frontend_url', None)
+
+            # 发送卡片消息（复用自动注册的消息格式）
+            success = notifier.send_card_message(
+                open_id=feishu_open_id,
+                username=user['username'],
+                password=new_password,
+                frontend_url=frontend_url
+            )
+
+            if success:
+                logger.info(f"密码重置通知发送成功: username={user['username']}")
+            else:
+                logger.warning(f"密码重置通知发送失败: username={user['username']}")
+
+        except Exception as e:
+            logger.error(f"发送密码重置通知异常: {e}", exc_info=True)
+
+        return new_password
+
     def _auto_register_feishu_user(
         self,
         feishu_open_id: str,
