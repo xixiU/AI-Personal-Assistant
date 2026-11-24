@@ -552,9 +552,12 @@ class AIAssistant:
             original_text = text
 
             # 检测 /我 命令（优先处理，不触发 AI）
+            # 同时支持：/我、／我（全角斜杠）、我的（不带斜杠）
             if hasattr(adapter, 'handle_my_command'):
                 text_stripped = text.strip()
-                if text_stripped.startswith("/我") or text_stripped.startswith("／我"):
+                if (text_stripped.startswith("/我") or
+                    text_stripped.startswith("／我") or
+                    text_stripped.startswith("我的")):
                     logger.info(f"🔧 检测到 /我 命令: {text_stripped[:20]}...")
                     sender_id = parsed.get("sender_id", "")
                     chat_id = parsed["chat_id"]
