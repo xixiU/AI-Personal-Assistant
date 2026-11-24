@@ -108,7 +108,7 @@ class FeishuNotifier:
                 f"📧 登录名: {username}",
                 f"🔑 初始密码: {password}",
                 "",
-                "⚠️ 请妥善保管您的密码，建议首次登录后修改。"
+                "⚠️ 建议首次登录后修改,如忘记随时可以通过 我的密码 指令重置。"
             ]
 
             if frontend_url:
@@ -210,7 +210,7 @@ class FeishuNotifier:
                     "tag": "div",
                     "text": {
                         "tag": "lark_md",
-                        "content": "⚠️ **请妥善保管您的密码，建议首次登录后修改。**"
+                        "content": "⚠️ 建议首次登录后修改,如忘记随时可以通过 **我的密码** 指令重置"
                     }
                 }
             ]
