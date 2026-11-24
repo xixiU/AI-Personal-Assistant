@@ -986,22 +986,22 @@ class FeishuBotAdapter(IMAdapter):
         处理 /我 或 /我的 命令
 
         支持的命令：
-        - /我的密码：返回用户密码
-        - /我的提问：返回最近的历史提问（最近 10 条）
-        - /我的反馈：返回最近的反馈记录
-        - /我的信息：返回用户基本信息
+        - /我的密码 或 我的密码：返回用户密码
+        - /我的提问 或 我的提问：返回最近的历史提问（最近 10 条）
+        - /我的反馈 或 我的反馈：返回最近的反馈记录
+        - /我的信息 或 我的信息：返回用户基本信息
 
         Args:
-            text: 消息文本
+            text: 消息文本（支持带斜杠或不带斜杠）
             open_id: 用户的飞书 open_id
             chat_id: 会话 ID
 
         Returns:
             命令处理结果文本，如果不是命令则返回 None
         """
-        # 检查是否是 /我 或 /我的 命令
+        # 检查是否是 /我 或 /我的 或 我的 命令（支持不带斜杠）
         text_stripped = text.strip()
-        if not (text_stripped.startswith("/我") or text_stripped.startswith("／我")):
+        if not (text_stripped.startswith("/我") or text_stripped.startswith("／我") or text_stripped.startswith("我的")):
             return None
 
         # 检查依赖是否注入
@@ -1117,12 +1117,12 @@ class FeishuBotAdapter(IMAdapter):
             return """🤖 /我 命令使用帮助：
 
 支持的命令：
-• /我的密码 - 查看您的登录密码
-• /我的提问 - 查看最近 10 条提问记录
-• /我的反馈 - 查看最近的反馈记录
-• /我的信息 - 查看账号基本信息
+• /我的密码 或 我的密码 - 重置您的登录密码
+• /我的提问 或 我的提问 - 查看最近 10 条提问记录
+• /我的反馈 或 我的反馈 - 查看最近的反馈记录
+• /我的信息 或 我的信息 - 查看账号基本信息
 
-示例：直接发送 "/我的密码" 即可"""
+示例：直接发送 "我的密码" 或 "/我的密码" 即可"""
 
     def check_trigger(self, keyword: str) -> bool:
         """
