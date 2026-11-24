@@ -62,7 +62,7 @@
 
     // ---------- 统计（对照表 v1 #10：GET /api/admin/stats 一个接口返回全部）----------
     var STAT_IDS = ['sQueries', 'sActive', 'sLikeRate', 'sDislike', 'sSessions'];
-    var BOX_IDS = ['trendChart', 'topList', 'topUsers'];
+    var BOX_IDS = ['trendChart', 'topList', 'topUsers', 'modeChart'];
 
     async function loadStats() {
         var days = state.days;
@@ -101,6 +101,11 @@
             Charts.bars($('topUsers'), (d.top_users || []).map(function (u) {
                 return { query: u.user_name || u.user_id || '（未关联账号）', count: u.count };
             }));
+
+            // 对话模式分布饼图
+            if (d.mode_distribution) {
+                renderModeDistribution(d.mode_distribution);
+            }
             // 来源分布已隐藏，不再渲染
         } catch (err) {
             if (err.status === 401) return;
@@ -160,6 +165,82 @@
         } catch (err) {
             if (err.status === 401) return;
             failBox($('wordCloud'), err);
+        }
+    }
+
+    // ---------- 对话模式分布饼图 ----------
+    function renderModeDistribution(data) {
+        try {
+            // 模式名称映射
+            var MODE_LABELS = {
+                'normal': '普通对话',
+                'rag': 'RAG检索',
+                'tool': '工具调用',
+                'agentic': 'Agentic模式',
+                'operations': '运维模式'
+            };
+
+            // 转换为 ECharts 数据格式
+            var chartData = Object.keys(data).map(function (mode) {
+                return {
+                    name: MODE_LABELS[mode] || mode,
+                    value: data[mode]
+                };
+            });
+
+            // 如果没有数据，显示空状态
+            if (chartData.length === 0) {
+                $('modeChart').innerHTML = '<div class="empty">暂无数据</div>';
+                return;
+            }
+
+            var chart = echarts.init($('modeChart'));
+
+            var option = {
+                tooltip: {
+                    trigger: 'item',
+                    formatter: '{b}: {c} ({d}%)'
+                },
+                legend: {
+                    orient: 'vertical',
+                    left: 'left',
+                    top: 'center'
+                },
+                series: [{
+                    type: 'pie',
+                    radius: ['40%', '70%'],
+                    center: ['60%', '50%'],
+                    avoidLabelOverlap: false,
+                    itemStyle: {
+                        borderRadius: 10,
+                        borderColor: '#fff',
+                        borderWidth: 2
+                    },
+                    label: {
+                        show: true,
+                        formatter: '{b}: {d}%'
+                    },
+                    emphasis: {
+                        label: {
+                            show: true,
+                            fontSize: 16,
+                            fontWeight: 'bold'
+                        },
+                        itemStyle: {
+                            shadowBlur: 10,
+                            shadowOffsetX: 0,
+                            shadowColor: 'rgba(0, 0, 0, 0.5)'
+                        }
+                    },
+                    data: chartData,
+                    color: ['#5470c6', '#91cc75', '#fac858', '#ee6666', '#73c0de']
+                }]
+            };
+
+            chart.setOption(option);
+        } catch (err) {
+            console.error('渲染对话模式饼图失败:', err);
+            failBox($('modeChart'), err);
         }
     }
 
@@ -274,6 +355,21 @@
             '<div class="field"><label>问题</label><div class="pre-block">' + esc(r.query) + '</div></div>' +
             '<div class="field"><label>回答</label><div class="pre-block">' + esc(r.answer) + '</div></div>' +
             (r.latency_ms != null ? '<div class="field"><label>耗时</label><div>' + esc(r.latency_ms) + ' ms</div></div>' : '');
+
+        // 添加关联文档展示
+        if (r.metadata && r.metadata.doc_ids && r.metadata.doc_ids.length > 0) {
+            var docHtml = '<div class="field"><label>关联文档</label><div>';
+            r.metadata.doc_ids.forEach(function(docId) {
+                var docUrl = 'https://feishu.cn/docx/' + esc(docId);
+                docHtml += '<div style="margin-bottom:8px"><a href="' + docUrl + '" target="_blank" style="color:#2563eb;text-decoration:none">📄 ' + esc(docId) + '</a></div>';
+            });
+            docHtml += '</div></div>';
+            html += docHtml;
+        } else if (r.metadata && r.metadata.doc_count && r.metadata.doc_count > 0) {
+            // 如果有 doc_count 但没有 doc_ids，显示文档数量
+            html += '<div class="field"><label>关联文档</label><div>使用了 ' + esc(r.metadata.doc_count) + ' 个文档片段</div></div>';
+        }
+
         if (state.tab === 'feedback') {
             html += '<div class="field"><label>反馈</label><div class="pre-block">' +
                 (r.feedback_type === 'like' ? '👍 点赞' : '👎 点踩') +

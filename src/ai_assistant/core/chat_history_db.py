@@ -510,3 +510,43 @@ class ChatHistoryDBQuery:
         except Exception as e:
             logger.error(f"获取问题文本失败: {e}", exc_info=True)
             return []
+
+    def get_mode_distribution(self, days: int = 30) -> Dict[str, int]:
+        """
+        获取对话模式分布统计
+
+        Args:
+            days: 统计最近 N 天
+
+        Returns:
+            对话模式分布字典，格式: {"normal": 50, "rag": 30, "tool": 15, "agentic": 5}
+        """
+        try:
+            with self.db_manager.get_session() as session:
+                # 计算开始日期
+                start_date = datetime.now() - timedelta(days=days)
+
+                # 查询所有记录的 metadata
+                query_obj = session.query(ChatHistoryDB.metadata).filter(
+                    ChatHistoryDB.timestamp >= start_date,
+                    ChatHistoryDB.metadata.isnot(None)
+                )
+
+                results = query_obj.all()
+
+                # 统计各模式的数量
+                mode_counts: Dict[str, int] = {}
+                for row in results:
+                    metadata = row.metadata if row.metadata else {}
+                    mode = metadata.get('mode', 'normal')
+                    mode_counts[mode] = mode_counts.get(mode, 0) + 1
+
+                # 如果没有任何数据，返回空字典
+                if not mode_counts:
+                    return {}
+
+                return mode_counts
+
+        except Exception as e:
+            logger.error(f"获取对话模式分布失败: {e}", exc_info=True)
+            return {}

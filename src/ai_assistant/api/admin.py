@@ -447,6 +447,9 @@ def get_stats():
         # 5. 来源分布
         sources = _chat_history_db.get_source_distribution(days=days)
 
+        # 6. 对话模式分布
+        mode_distribution = _chat_history_db.get_mode_distribution(days=days)
+
         logger.info(f"查询管理后台统计: range={range_param}, total_questions={total_questions}")
 
         return jsonify(success_response({
@@ -455,6 +458,7 @@ def get_stats():
             "top_questions": top_questions,
             "top_users": top_users,
             "sources": sources,
+            "mode_distribution": mode_distribution,
             "range": range_param
         })), 200
 
